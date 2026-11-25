@@ -1,6 +1,6 @@
 # Octopilot inside herdr: an "Octopilot" workspace with the orchestrator on
 # the left and the live dashboard on the right, plus the popups the dashboard
-# opens. Link it with `herdr plugin link ~/.dotfiles/ai/octopilot/herdr`.
+# opens. Link it with `herdr plugin link ~/src/octopilot/herdr` (this repo's install.sh does).
 id = "elboletaire.octopilot"
 name = "Octopilot"
 version = "0.1.0"

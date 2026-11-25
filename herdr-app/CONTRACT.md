@@ -3,7 +3,7 @@
 The herdr-app interface is native mods over the same backend the TUI uses. All
 decisions stay in Python (dashboard.py / scan.py); mods only render and send
 actions. `$DIR` is the octopilot code dir (`props().dir`, else
-`shared("octopilot.dir")`, else `~/.dotfiles/ai/octopilot`); `$STATE_DIR` is
+`shared("octopilot.dir")`, else `~/src/octopilot`); `$STATE_DIR` is
 `props().state_dir`, else `shared("octopilot.state_dir")`, else
 `~/.local/state/octopilot`.
 

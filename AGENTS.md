@@ -1,8 +1,7 @@
 # Octopilot (code changes)
 
-You are changing Octopilot, the code in this directory. The repo-wide guide is
-`../../AGENTS.md`: read it for anything outside octopilot (install, layout,
-conventions). Changes elsewhere in the dotfiles are fine too, under the same rules.
+You are changing Octopilot, the code in this repo. Its root is the checkout every
+machine has at `${OCTOPILOT_DIR:-~/src/octopilot}`.
 
 ## What it is
 
@@ -17,7 +16,7 @@ then the review-fix loop runs. When a PR merges, the orchestrator cleans up.
 The user watches the dashboard (TUI or GUI) and talks to a prompter chat, which
 queues commands for the orchestrator. Nothing is typed into the orchestrator
 directly. The Octopilot workspace has three tabs: OCTOPILOT (kitchen, chat, dashboard),
-"Octopilot (code changes)", a claude started in this directory (`ai/octopilot`) for
+"Octopilot (code changes)", a claude started in this checkout for
 changing this code, and "engine" (orchestrator, prompter, headless dashboard), shown
 third unless the launcher runs with `--hide-engine` (see `herdr/README.md`).
 
@@ -25,6 +24,24 @@ The GUI is native mods over the same Python backend. The decisions stay in
 `scan.py` and `dashboard.py`; the mods only render `view.json` and send actions
 (`dashboard.sh --action`). `herdr-app/CONTRACT.md` is that contract: the
 `view.json` shape, the actions and the remote-space rules.
+
+## Install and parallel work
+
+`./install.sh` (see `README.md`) links the herdr plugin `elboletaire.octopilot`
+(`herdr/`), runs `herdr-app/install.sh` when herdr-app is installed, and moves PR
+Autopilot's state over once. Nothing else is written: the Claude plugin is loaded
+through `CLAUDE_CODE_PLUGIN_DIRS` (settings.json, set by the dotfiles), and the herdr
+keys are bound by the dotfiles' herdr config, not here. The code, the mods and the
+prompts never hard-code a checkout path: they use `OCTOPILOT_DIR`, defaulting to
+`~/src/octopilot`.
+
+Parallel work uses a git worktree in this repo, under `.worktrees/` (git-ignored),
+branched from a fresh `origin/main`:
+
+```sh
+git fetch origin
+git worktree add --no-track -b feat/x .worktrees/feat-x origin/main
+```
 
 ## Main pieces
 

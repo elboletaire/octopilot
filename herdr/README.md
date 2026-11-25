@@ -11,14 +11,14 @@ orchestrator is the agent named `octopilot`.
 
 ## Setup
 
-`scripts/install.sh` links the plugin when herdr is installed. By hand:
+`./install.sh` (this repo) links the plugin when herdr is installed. By hand:
 
 ```sh
-herdr plugin link ~/.dotfiles/ai/octopilot/herdr
+herdr plugin link ~/src/octopilot/herdr
 ```
 
-Its actions are bound in `config/herdr/config.toml` (tracked; `scripts/install.sh herdr`
-links it to `~/.config/herdr/config.toml`):
+Its actions are bound by the dotfiles' herdr config, `config/herdr/config.toml` there (linked
+to `~/.config/herdr/config.toml` by the dotfiles' installer), not by this repo:
 
 ```toml
 [[keys.command]]
@@ -33,9 +33,8 @@ command = "elboletaire.octopilot.peek"
 ```
 
 The workspace has two tabs: **OCTOPILOT**, described below, and **Octopilot
-(code changes)**, a claude started in `ai/octopilot` for changing octopilot itself
-(`octopilot-code`; it may still change anything in the dotfiles, with paths
-relative to the repo root such as `../../...`). In OCTOPILOT, the dashboard pane is titled
+(code changes)**, a claude started in this checkout for changing octopilot itself
+(`octopilot-code`). In OCTOPILOT, the dashboard pane is titled
 `dashboard`.
 
 `open` starts the orchestrator as a fresh claude in `OCTOPILOT_ORCH_CWD`
@@ -75,7 +74,7 @@ delivery = "herdr"   # in-app toasts only; "off" silences them entirely
 claude = "off"       # no state-change sounds from Claude agents (all of them)
 ```
 
-The dashboard also runs outside herdr: `~/.dotfiles/ai/octopilot/dashboard.sh`.
+The dashboard also runs outside herdr: `~/src/octopilot/dashboard.sh`.
 It needs `uv` (which provides `rich`); there is nothing else to install.
 
 ## GUI (herdr-app)
@@ -86,7 +85,7 @@ terminals run in herdr-core) as one space with three tabs, in this order:
 | Tab | Holds |
 |---|---|
 | **OCTOPILOT** | the `octopilot-kitchen` mod, a pane 300 px tall, on the left, over the `octopilot-chat` mod (the prompter as a chat, its input at the bottom); on the right the `octopilot-dashboard` mod (the table below), full height (`props`: `dir`, `state_dir`; its pane is named by `pane.rename`, the mod reads no name) |
-| **Octopilot (code changes)** | the code agent's own claude (`octopilot-code`, a claude started in `ai/octopilot`, an hc terminal that is never parked) |
+| **Octopilot (code changes)** | the code agent's own claude (`octopilot-code`, a claude started in this checkout, an hc terminal that is never parked) |
 | **engine** | the orchestrator (`octopilot`, `/octopilot:messenger`), the prompter (`octopilot-prompter`) and `dashboard.sh --headless` (`octopilot-headless`), each an hc terminal. Shown by default; `--hide-engine` parks them (see below) |
 
 The space is named `Octopilot` (`LABEL`): `space.new` does not keep the name it
@@ -186,10 +185,10 @@ a folder holding only herdr's generated files is deleted too), and adds an
 `programs.json` that runs `herdr/open-gui.sh --close-launcher`. The
 `octopilot-launcher` mod's palette entry, "Open Octopilot" (ctrl-shift-p), runs
 the same thing in a new tab, which closes again once the space is up. The
-palette entry always opens the live checkout (`~/.dotfiles`); `--dir` moves only
+palette entry always opens the live checkout (`$OCTOPILOT_DIR`, else `~/src/octopilot`); `--dir` moves only
 the mod symlinks and the `programs.json` entry to another checkout. The launcher
 closes its own pane when the space is up (never the tab: the tab goes only with
-its last pane). A failed run keeps that pane, with the error (see the GUI section). `scripts/install.sh` runs the
+its last pane). A failed run keeps that pane, with the error (see the GUI section). `./install.sh` (this repo) runs the
 installer when `herdr-app` is installed. It does not bind a key: pass `--key`
 to bind `ctrl-alt-o` in `keys.json` as well (backed up first, a key bound to
 something else is left alone). Other options: `--dry-run`, `--uninstall`
@@ -217,7 +216,7 @@ shares the live `state.json`:
 ```sh
 OCTOPILOT_STATE_DIR=~/.local/state/octopilot-gui-test \
 HOME_REPOS="<owner/repo>" ISSUE_ORGS="<org>" \
-  ~/.dotfiles/.worktrees/<branch>/ai/octopilot/herdr/open-gui.sh
+  ~/src/octopilot/.worktrees/<branch>/herdr/open-gui.sh
 ```
 
 `HOME_REPOS`, `ISSUE_ORGS` and `CLONE_ROOTS` narrow what the test scans; only

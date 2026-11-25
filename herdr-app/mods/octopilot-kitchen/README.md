@@ -35,7 +35,7 @@ Either way:
 - Click the chef: peek the orchestrator's terminal (`terminal.peek`).
 - Click the message: the whole text in a dialog (the same mod, `full` props).
 
-Props, all optional: `dir` (the octopilot code, default `~/.dotfiles/ai/octopilot`) and
+Props, all optional: `dir` (the octopilot code, default `~/src/octopilot`) and
 `state_dir` (default `~/.local/state/octopilot`), each falling back to
 `shared("octopilot.dir")` / `shared("octopilot.state_dir")`; `folded: true` to start folded
 (floating only). `mod.json` is `"place": "none"`: the mod shows only where a layout floats
