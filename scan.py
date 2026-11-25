@@ -72,9 +72,6 @@ OCTOPILOT_BACKEND = os.environ.get("OCTOPILOT_BACKEND", "herdr")
 # The octopilot code dir: where workers find scan.sh and their plugin.
 OCTOPILOT_DIR = (os.environ.get("OCTOPILOT_DIR")
                  or os.path.dirname(os.path.abspath(__file__)))
-# The live checkout, which settings.json's CLAUDE_CODE_PLUGIN_DIRS loads. Not
-# OCTOPILOT_DIR: that names the checkout running, which may be a worktree.
-INSTALLED_DIR = os.path.expanduser("~/src/octopilot")
 # herdr agent name the orchestrator runs under.
 ORCH_AGENT = "octopilot"
 # herdr agent in the "Octopilot (code changes)" tab (herdr/open.sh): changes
@@ -2765,29 +2762,52 @@ def chat_keys(args):
 
 
 READ_ONLY = {"render", "status", "siblings", "snapshot", "wind-down", "plugin-settings",
-             "speech", "chat", "chat-send", "chat-keys"}
+             "installed-dir", "speech", "chat", "chat-send", "chat-keys"}
+
+
+def claude_plugin_dirs():
+    """The entries of CLAUDE_CODE_PLUGIN_DIRS in ~/.claude/settings.json, as listed."""
+    try:
+        with open(os.path.expanduser("~/.claude/settings.json")) as f:
+            settings = json.load(f)
+    except (OSError, ValueError):
+        return []
+    env = settings.get("env") if isinstance(settings, dict) else None
+    listed = env.get("CLAUDE_CODE_PLUGIN_DIRS") if isinstance(env, dict) else None
+    return [e for e in (listed if isinstance(listed, str) else "").split(":") if e]
+
+
+def is_octopilot_plugin(entry):
+    """True when the plugin dir of a settings entry (~ expanded) is octopilot's,
+    by the name in its manifest."""
+    try:
+        with open(os.path.join(os.path.expanduser(entry), ".claude-plugin", "plugin.json")) as f:
+            return json.load(f).get("name") == "octopilot"
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def installed_dir():
+    """The live checkout: the parent of the octopilot plugin dir that settings.json
+    loads. ~/src/octopilot when settings.json lists none."""
+    for entry in claude_plugin_dirs():
+        if is_octopilot_plugin(entry):
+            return os.path.dirname(os.path.realpath(os.path.expanduser(entry)))
+    return os.path.expanduser("~/src/octopilot")
 
 
 def plugin_settings():
     """--settings JSON that loads this checkout's octopilot plugin in place of
     the installed one, keeping the other plugin dirs of settings.json. Empty on
     the live checkout, which already loads its own plugin."""
-    if os.path.realpath(OCTOPILOT_DIR) == os.path.realpath(INSTALLED_DIR):
+    if os.path.realpath(OCTOPILOT_DIR) == os.path.realpath(installed_dir()):
         return ""
-    try:
-        with open(os.path.expanduser("~/.claude/settings.json")) as f:
-            settings = json.load(f)
-    except (OSError, ValueError):
-        settings = {}
-    env = settings.get("env") if isinstance(settings, dict) else None
-    listed = env.get("CLAUDE_CODE_PLUGIN_DIRS") if isinstance(env, dict) else None
-    installed = os.path.realpath(os.path.join(INSTALLED_DIR, "plugin"))
     own = os.path.join(OCTOPILOT_DIR, "plugin")
     dirs, placed = [], False
-    for entry in (listed if isinstance(listed, str) else "").split(":"):
-        if not entry:
-            continue
-        if os.path.realpath(os.path.expanduser(entry)) == installed:
+    for entry in claude_plugin_dirs():
+        # Every octopilot copy goes, so only the worktree's loads; the first one's
+        # place is kept.
+        if is_octopilot_plugin(entry):
             if not placed:
                 dirs.append(own)
                 placed = True
@@ -2956,6 +2976,10 @@ def dispatch(cmd, args, state):
         state["declined"] = [k for k in state["declined"] if k not in args[1:]]
         save(state)
         print("undeclined:", " ".join(args[1:]))
+        return 0
+    if cmd == "installed-dir":
+        # installed-dir: the live checkout, as settings.json loads it (open-gui.sh uses it).
+        print(installed_dir())
         return 0
     if cmd == "plugin-settings":
         # plugin-settings: the --settings JSON for a worktree's claude, nothing
