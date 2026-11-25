@@ -2793,7 +2793,7 @@ def installed_dir():
     for entry in claude_plugin_dirs():
         if is_octopilot_plugin(entry):
             return os.path.dirname(os.path.realpath(os.path.expanduser(entry)))
-    return os.path.expanduser("~/src/octopilot")
+    return os.path.realpath(os.path.expanduser("~/src/octopilot"))
 
 
 def plugin_settings():

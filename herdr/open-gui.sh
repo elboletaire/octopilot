@@ -22,7 +22,7 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 # The live checkout, as settings.json loads it (scan.py installed_dir). OCTOPILOT_DIR is
 # the running checkout, so a worktree's would be wrong here.
 LIVE_DIR="$("$DIR/scan.sh" installed-dir 2>/dev/null || true)"
-LIVE_DIR="${LIVE_DIR:-$HOME/src/octopilot}"
+LIVE_DIR="${LIVE_DIR:-$(cd "$HOME/src/octopilot" 2>/dev/null && pwd -P || echo "$HOME/src/octopilot")}"
 LABEL="Octopilot"
 ORCH_AGENT="octopilot"                 # scan.py's ORCH_AGENT
 PROMPTER_AGENT="octopilot-prompter"    # scan.py's PROMPTER_AGENT
