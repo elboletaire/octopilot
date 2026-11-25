@@ -185,7 +185,8 @@ a folder holding only herdr's generated files is deleted too), and adds an
 `programs.json` that runs `herdr/open-gui.sh --close-launcher`. The
 `octopilot-launcher` mod's palette entry, "Open Octopilot" (ctrl-shift-p), runs
 the same thing in a new tab, which closes again once the space is up. The
-palette entry always opens the live checkout (`$OCTOPILOT_DIR`, else `~/src/octopilot`); `--dir` moves only
+palette entry opens `$OCTOPILOT_DIR`, else `~/src/octopilot`, the checkout installed on this machine
+(Octopilot's own processes set `OCTOPILOT_DIR` to theirs); `--dir` moves only
 the mod symlinks and the `programs.json` entry to another checkout. The launcher
 closes its own pane when the space is up (never the tab: the tab goes only with
 its last pane). A failed run keeps that pane, with the error (see the GUI section). `./install.sh` (this repo) runs the

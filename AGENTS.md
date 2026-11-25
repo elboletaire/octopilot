@@ -1,7 +1,7 @@
 # Octopilot (code changes)
 
-You are changing Octopilot, the code in this repo. Its root is the checkout every
-machine has at `${OCTOPILOT_DIR:-~/src/octopilot}`.
+You are changing Octopilot, the code in this repo. Its root is the checkout installed
+on this machine (the dotfiles clone it to `~/src/octopilot`).
 
 ## What it is
 
@@ -32,8 +32,10 @@ The GUI is native mods over the same Python backend. The decisions stay in
 Autopilot's state over once. Nothing else is written: the Claude plugin is loaded
 through `CLAUDE_CODE_PLUGIN_DIRS` (settings.json, set by the dotfiles), and the herdr
 keys are bound by the dotfiles' herdr config, not here. The code, the mods and the
-prompts never hard-code a checkout path: they use `OCTOPILOT_DIR`, defaulting to
-`~/src/octopilot`.
+prompts never hard-code the live checkout: it is the plugin dir that settings.json
+loads (`scan.sh installed-dir`). `OCTOPILOT_DIR` names the checkout a process runs
+from (Octopilot sets it per process), and the launcher falls back to `~/src/octopilot`
+when it is unset.
 
 Parallel work uses a git worktree in this repo, under `.worktrees/` (git-ignored),
 branched from a fresh `origin/main`:

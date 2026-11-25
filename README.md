@@ -9,9 +9,10 @@ review-fix loop, and cleans up when the PR merges. You watch a live dashboard
 ## Requirements
 
 - [herdr](https://herdr.dev), the terminal workspace manager that hosts the agents
-- [herdr-app](https://herdr.dev) (optional): the GUI front end
+- herdr-app (optional): the GUI front end
 - `python3` and [`uv`](https://docs.astral.sh/uv/), which runs the dashboard with
   its Python deps (`rich`)
+- `git`, `gh`, `jq`, `uuidgen` and `sha1sum`, which the scripts and the GUI launcher call
 
 ## Install
 
@@ -23,11 +24,15 @@ cd ~/src/octopilot
 
 `install.sh` links the herdr plugin `elboletaire.octopilot` (when a herdr server
 runs), installs the herdr-app mods (when `herdr-app` is on PATH) and moves
-PR Autopilot's state to `~/.local/state/octopilot` once. It is safe to rerun.
+PR Autopilot's state from `${XDG_STATE_HOME:-~/.local/state}/pr-autopilot` to
+`.../octopilot` once. It is safe to rerun.
 `./install.sh --help` lists that.
 
-The checkout can live elsewhere: the scripts use `OCTOPILOT_DIR` when it is set,
-else `~/src/octopilot`.
+`OCTOPILOT_DIR` is where octopilot is installed on this machine, which the launcher
+reads (default `~/src/octopilot`). Set it only when the checkout lives elsewhere.
+Each Octopilot process sets it to the checkout it runs from, so a worktree's sessions
+use their own code. The live checkout is the one whose plugin settings.json loads
+(`scan.sh installed-dir`).
 
 ### Claude plugin
 

@@ -16,8 +16,8 @@ usage: install.sh [--help]
 
 Links the herdr plugin elboletaire.octopilot (herdr/) when a herdr server runs,
 installs the herdr-app mods (herdr-app/install.sh) when herdr-app is on PATH, and
-moves ~/.local/state/pr-autopilot to ~/.local/state/octopilot when that is still
-pending. Nothing else is written.
+moves ${XDG_STATE_HOME:-~/.local/state}/pr-autopilot to .../octopilot when that is
+still pending. Nothing else is written.
 EOF
 }
 
