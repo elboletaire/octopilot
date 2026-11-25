@@ -3,7 +3,7 @@
 You own this PR end to end. Nobody polls you and nobody will prompt you again:
 after this message you decide what happens next, and you report when you stop.
 
-`A="${OCTOPILOT_DIR:-$HOME/.dotfiles/ai/octopilot}/scan.sh"`, and your item key is `{{KEY}}`. Always
+`A="${OCTOPILOT_DIR:-$HOME/src/octopilot}/scan.sh"`, and your item key is `{{KEY}}`. Always
 quote it: it contains `#` (or `?`), which a shell otherwise reads as a
 comment and silently truncates the argument.
 

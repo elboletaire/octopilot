@@ -3,7 +3,7 @@
 You own this stack end to end. Nobody polls you and nobody will prompt you again:
 after this message you decide what happens next, and you report when you stop.
 
-`A="${OCTOPILOT_DIR:-$HOME/.dotfiles/ai/octopilot}/scan.sh"`, and your item key is `{{KEY}}`: the
+`A="${OCTOPILOT_DIR:-$HOME/src/octopilot}/scan.sh"`, and your item key is `{{KEY}}`: the
 bottom open PR's key, which tracks the whole stack. Rounds, heartbeats and the
 report all go on that key, whichever layer a finding is about. Always quote it:
 it contains `#` (or `?`), which a shell otherwise reads as a comment and silently
@@ -82,7 +82,7 @@ that layer, because round 2 reviews it.
    keeps you armed long after the one thing you cared about has happened.
 
    ```
-   A="${OCTOPILOT_DIR:-$HOME/.dotfiles/ai/octopilot}/scan.sh"
+   A="${OCTOPILOT_DIR:-$HOME/src/octopilot}/scan.sh"
    PRS=(<PR numbers, bottom to top>)
    # Per layer: all checks terminal. A layer gh reports no checks for counts as
    # settled once the grace period (10 rounds, about 5 minutes) has passed; any

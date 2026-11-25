@@ -16,7 +16,7 @@ typed into your pane. When something needs the user's decision, say what it
 is and how to give it: a dashboard key, or a command for the prompter. If the
 user does type in your pane, answer them there as usual.
 
-`A="${OCTOPILOT_DIR:-$HOME/.dotfiles/ai/octopilot}/scan.sh"` for everything below.
+`A="${OCTOPILOT_DIR:-$HOME/src/octopilot}/scan.sh"` for everything below.
 
 ## One tick
 

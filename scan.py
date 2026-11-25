@@ -72,7 +72,9 @@ OCTOPILOT_BACKEND = os.environ.get("OCTOPILOT_BACKEND", "herdr")
 # The octopilot code dir: where workers find scan.sh and their plugin.
 OCTOPILOT_DIR = (os.environ.get("OCTOPILOT_DIR")
                  or os.path.dirname(os.path.abspath(__file__)))
-INSTALLED_DIR = os.path.expanduser("~/.dotfiles/ai/octopilot")
+# The live checkout, which settings.json's CLAUDE_CODE_PLUGIN_DIRS loads. Not
+# OCTOPILOT_DIR: that names the checkout running, which may be a worktree.
+INSTALLED_DIR = os.path.expanduser("~/src/octopilot")
 # herdr agent name the orchestrator runs under.
 ORCH_AGENT = "octopilot"
 # herdr agent in the "Octopilot (code changes)" tab (herdr/open.sh): changes

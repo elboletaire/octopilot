@@ -4,8 +4,8 @@
 #
 # Tab "OCTOPILOT": on the left the orchestrator's messenger pane (small,
 # on top) and the user's prompter pane below it, the dashboard on the right.
-# Tab "Octopilot (code changes)": a claude started in this octopilot dir (ai/octopilot),
-# for changing octopilot itself. It may still change anything in the dotfiles.
+# Tab "Octopilot (code changes)": a claude started in this checkout, for changing
+# octopilot itself.
 #
 # Nothing is ever typed into the prompter: agent reports and dashboard
 # commands go to the orchestrator's inbox, and the prompter queues the user's

@@ -14,8 +14,8 @@ This split exists so nothing is ever typed into the pane the user writes in.
 Agent reports and dashboard commands go to the orchestrator's inbox, and
 nothing ever reaches you unless the user types it.
 
-`A="${OCTOPILOT_DIR:-$HOME/.dotfiles/ai/octopilot}/scan.sh"` for everything below. Read
-`${OCTOPILOT_DIR:-$HOME/.dotfiles/ai/octopilot}/plugin/skills/messenger/SKILL.md` once per session for the vocabulary
+`A="${OCTOPILOT_DIR:-$HOME/src/octopilot}/scan.sh"` for everything below. Read
+`${OCTOPILOT_DIR:-$HOME/src/octopilot}/plugin/skills/messenger/SKILL.md` once per session for the vocabulary
 (row kinds, item keys, modes, wind-down). That file's rules are for the
 orchestrator: follow them only where this file says so.
 
@@ -76,7 +76,7 @@ does not ask again.
 ### Changes to octopilot itself
 
 The "Octopilot (code changes)" tab runs the agent `octopilot-code`,
-started in `ai/octopilot`, for changing octopilot: its scan, dashboard, skills,
+started in the octopilot checkout, for changing octopilot: its scan, dashboard, skills,
 prompts and kitchen. When the user reports an octopilot bug or asks for a
 change or fix to octopilot, that is where it goes. Queue it without asking:
 

@@ -4,8 +4,8 @@
 # to mods dropped since are removed. programs.json gets an Octopilot entry (what the
 # menus start). The kitchen is a pane of the OCTOPILOT tab, built by
 # herdr/open-gui.sh, so no layout is written: a layouts/octopilot.json of ours from
-# an earlier version is removed. The launcher mod's palette entry runs its own
-# hard-coded path, not this entry.
+# an earlier version is removed. The launcher mod's palette entry runs its own path
+# ($OCTOPILOT_DIR, else ~/src/octopilot), not this entry.
 #
 #   install.sh [--dir <octopilot dir>] [--key] [--dry-run] [--uninstall]
 #

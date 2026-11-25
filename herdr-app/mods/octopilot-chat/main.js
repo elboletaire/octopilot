@@ -212,7 +212,7 @@ export default class Chat extends View {
     return {
       on: null,
       unknown: false,
-      dir: p.dir || shared("octopilot.dir") || `${home()}/.dotfiles/ai/octopilot`,
+      dir: p.dir || shared("octopilot.dir") || `${home()}/src/octopilot`,
       stateExplicit: p.state_dir || shared("octopilot.state_dir") || null,
       missing: null,
     };

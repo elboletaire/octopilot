@@ -109,7 +109,7 @@ export default class Kitchen extends View {
     return {
       on: null,
       unknown: false,
-      dir: setting("dir", "octopilot.dir") ?? `${home()}/.dotfiles/ai/octopilot`,
+      dir: setting("dir", "octopilot.dir") ?? `${home()}/src/octopilot`,
       stateExplicit,
       stateDir: stateExplicit ?? `${home()}/.local/state/octopilot`,
       missing: null,

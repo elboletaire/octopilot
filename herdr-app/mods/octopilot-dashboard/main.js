@@ -140,7 +140,7 @@ export default class OctopilotDashboard extends View {
         viewFile: p.state_dir ? `${p.state_dir}/view.json` : null, missing,
       };
     }
-    const dir = p.dir ?? shared("octopilot.dir") ?? `${home()}/.dotfiles/ai/octopilot`;
+    const dir = p.dir ?? shared("octopilot.dir") ?? `${home()}/src/octopilot`;
     // Only an explicit state dir is passed to the actions; unset, their default applies.
     const stateExplicit = p.state_dir ?? shared("octopilot.state_dir") ?? null;
     const stateDir = stateExplicit ?? `${home()}/.local/state/octopilot`;
