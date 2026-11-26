@@ -32,7 +32,9 @@ If the header says `PAUSED yes`:
   no tick has run in this conversation yet), the pause is a leftover from an
   earlier session: run `$A resume`, say so in the headline (`▶️ resumed, was
   paused since <date>`), and carry on with the tick. A pause set during this
-  session is honoured.
+  session is honoured. Not when the header also has an `ENGINE` line: the
+  engine holds `go`, `/investigate` and `re-review` while paused, so a leftover
+  pause stays until the user resumes, and the tick is handled as below.
 - **On any other tick**, report the row counts and stop. Take no action until
   the user resumes.
 - **Every reply while paused** -- ticks, answers, `go`/`detach`/anything --
@@ -348,8 +350,8 @@ the `REQUEST` lines are the engine's (`$A drain`), and stay queued for it.
   if the user had typed that command to you (`go`, `no`, `re-review`,
   `/investigate`, ...), with the same rules, wind-down included. A trailing
   `(confirmed past wind-down)` or `(confirmed over cap)` is the user's
-  confirmation, not part of the command: strip it before acting, and never pass it into an investigation's
-  question. The dashboard runs `reset-rounds`, `ack-push`, `detach`, `pause`
+  confirmation, not part of the command: strip it before acting, and never
+  pass it into an investigation's question. The dashboard runs `reset-rounds`, `ack-push`, `detach`, `pause`
   and `resume` itself, so those reach you only as events, never as requests.
 - A `REQUEST /octopilot-code <text>` is for the code-changes agent, not you:
   run `$A send-code "<text>"` with the text verbatim, and report one line.
