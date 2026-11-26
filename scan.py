@@ -920,22 +920,41 @@ def review_requested(detail, me):
 
 
 def review_wait(detail, me):
-    """The row note for a review `me` is waiting on the PR in `detail`, or None.
-
-    reviewDecision is GitHub's answer wherever the repo sets one. Without it
-    (no review required) only a pending request from someone else counts: a
-    request to `me` is one the user answers, not one they wait on."""
+    """The row note for a review `me` waits on in `detail`, or None.
+    A set reviewDecision decides; without one only others' pending requests count.
+    """
     d = detail or {}
     decision = d.get("reviewDecision")
+    asked = [r for r in d.get("reviewRequests") or []
+             if (r.get("login") or r.get("name")) != me]
     if decision == "REVIEW_REQUIRED":
+        # Asked alone, `me` is the one who must review: not a wait.
+        if not asked and d.get("reviewRequests"):
+            return None
         return "waiting on review"
     if decision == "CHANGES_REQUESTED":
+        # The latest blocking review is `me`'s: the user must act, not wait.
+        blocks = [r for r in d.get("reviews") or []
+                  if r.get("state") == "CHANGES_REQUESTED"]
+        last = max(blocks, key=lambda r: r.get("submittedAt") or "",
+                   default=None)
+        if last and (last.get("author") or {}).get("login") == me:
+            return None
         return "waiting on re-review"
     if decision:
         return None
-    others = [r for r in d.get("reviewRequests") or []
-              if (r.get("login") or r.get("name")) != me]
-    return "waiting on review" if others else None
+    return "waiting on review" if asked else None
+
+
+def rereview_hours(it, head):
+    """Hours the PR at `head` has waited on a re-review, or None before
+    RE_REVIEW_QUIET_HOURS. The first scan that sees the wait stamps it, per head,
+    so the clock starts when octopilot first saw the head waiting."""
+    wait = it.get("rereview_wait") or {}
+    if wait.get("head") != head:
+        wait = it["rereview_wait"] = {"head": head, "at": int(time.time())}
+    hours = (time.time() - wait["at"]) / 3600
+    return hours if hours >= RE_REVIEW_QUIET_HOURS else None
 
 
 def pr_review_comments(detail):
@@ -1520,7 +1539,15 @@ def scan(state, refresh=False, info=None):
                                            "detail unavailable"))
                 continue
             note = review_wait(first, me)
-            if note:
+            overdue = rereview_hours(it, cmp_head) \
+                if note == "waiting on re-review" else None
+            if overdue is not None:
+                # Nothing re-requests a review by itself: once it has waited
+                # too long, the user is asked to nudge the reviewer or merge.
+                rows.append(("READY", k, f"mode=fix {smeta} checks={checks} "
+                                         f"-> re-review overdue ({overdue:.0f}h): "
+                                         "nudge the reviewer or merge"))
+            elif note:
                 active -= 1
                 rows.append(("DONE", k, f"mode=fix {smeta} checks={checks} "
                                         f"-> {note}"))
