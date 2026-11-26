@@ -444,7 +444,9 @@ class Model:
         try:
             self.refresh_snapshot(force, "tick" if scan.engine_allowed(DIR)
                                   else "snapshot")
-            self.wake_orchestrator()
+            # The engine acts on the rows itself, so there is no one to ring.
+            if scan.engine_mode() != "on":
+                self.wake_orchestrator()
         except Exception:
             # Silent like notify_loop: the next pass retries.
             pass
