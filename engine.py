@@ -449,3 +449,38 @@ def execute(action, ctx):
         ctx.log("engine-error", action.key, action=action.kind,
                 error=f"{type(exc).__name__}: {exc}")
         return f"{action.key}: {action.kind} failed: {exc}"
+
+
+def _deliver_code():
+    """Deliver the code-changes requests the dashboard queued, as `scan` does
+    after its own scan: under the state lock, so each goes out once."""
+    import scan
+    with scan.locked():
+        state = scan.load()
+        if not state.get("code_pending"):
+            return []
+        sent, err = scan.send_code(state)
+    return [f"{scan.CODE_AGENT}: {sent} request(s) delivered"
+            + (f", still pending ({err})" if err else "")]
+
+
+def run_rows(rows, mode):
+    """Plan the tick's `rows` (scan's (kind, key, extra) tuples) and, in on
+    mode, act on the plan. Plan mode logs what would happen and changes
+    nothing. Caller holds exec.lock, not the state lock. -> the outcome lines."""
+    import scan
+    state = scan.load()
+    dict_rows = [{"kind": kind, "key": key,
+                  "fields": scan.parse_extra(extra)["fields"]}
+                 for kind, key, extra in sorted(rows, key=scan.row_order)]
+    dry = mode == "plan"
+    ctx = Ctx(dry_run=dry, sent_keys=set(), log=scan.log_event, rows=dict_rows)
+    lines = []
+    for action in plan_rows(dict_rows, state):
+        if dry:
+            scan.log_event("engine-plan", action.key, action=action.kind)
+        lines.append(execute(action, ctx))
+    lines += deliver_pending(ctx)
+    if not dry:
+        lines += _deliver_code()
+    return lines

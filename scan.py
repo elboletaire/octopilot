@@ -64,6 +64,9 @@ EVENTS_FILE = os.path.join(os.path.dirname(STATE_FILE), "events.jsonl")
 SNAPSHOT_FILE = os.path.join(os.path.dirname(STATE_FILE), "snapshot.json")
 # One tick at a time: a tick that finds it held returns at once.
 TICK_LOCK = os.path.join(os.path.dirname(STATE_FILE), "tick.lock")
+# Held by each engine phase that acts (engine.run_rows), taken after the state
+# lock is released: its steps take that lock one at a time.
+EXEC_LOCK = os.path.join(os.path.dirname(STATE_FILE), "exec.lock")
 EVENTS_MAX_BYTES = 512 * 1024
 EVENTS_KEEP = 1000
 # Address of the orchestrator ("herdr:<agent>"). Empty means "whichever agent
@@ -3022,6 +3025,16 @@ def engine_allowed(checkout):
     return os.path.realpath(checkout) == os.path.realpath(installed_dir())
 
 
+def engine_mode(args=()):
+    """off, plan or on: OCTOPILOT_ENGINE picks it, and `tick --plan` forces plan.
+    Off wherever engine_allowed() refuses the checkout: a worktree's events
+    would land in the live log."""
+    mode = "plan" if "--plan" in args else os.environ.get("OCTOPILOT_ENGINE", "off")
+    if mode not in ("plan", "on") or not engine_allowed(OCTOPILOT_DIR):
+        return "off"
+    return mode
+
+
 def tick(args):
     """tick [--quiet]: one scan that saves the transitions it finds, and writes
     the dashboard's snapshot from the same rows."""
@@ -3056,6 +3069,14 @@ def tick(args):
                 log_event("tick", active=active, counts=counts)
             if "--quiet" not in args:
                 render(rows, active, n, state, untracked)
+        mode = engine_mode(args)
+        if mode != "off":
+            import engine
+            with open(EXEC_LOCK, "w") as ex:
+                fcntl.flock(ex.fileno(), fcntl.LOCK_EX)
+                lines = engine.run_rows(rows, mode)
+            if "--quiet" not in args and lines:
+                print("\n".join(lines))
     return 0
 
 

@@ -64,6 +64,7 @@ def fake_world(**answers):
         "EVENTS_FILE": os.path.join(files, "events.jsonl"),
         "SNAPSHOT_FILE": os.path.join(files, "snapshot.json"),
         "TICK_LOCK": os.path.join(files, "tick.lock"),
+        "EXEC_LOCK": os.path.join(files, "exec.lock"),
     }
     with contextlib.ExitStack() as stack:
         for name, value in patches.items():

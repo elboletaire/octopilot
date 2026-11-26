@@ -111,6 +111,10 @@ DASHBOARD_REFRESH_SECS=120
 # GUI); running sessions keep theirs.
 OCTOPILOT_BACKEND="${OCTOPILOT_BACKEND:-herdr}"
 
+# Each tick's action on what it finds: off, plan (logs, changes nothing) or on
+# (the engine acts, in place of the orchestrator). Worktrees always stay off.
+OCTOPILOT_ENGINE="${OCTOPILOT_ENGINE:-off}"
+
 # OCTOPILOT_STATE_DIR in the environment points octopilot at another state
 # (a sandbox, a second profile); unset, it is the usual XDG state dir.
 STATE_DIR="${OCTOPILOT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/octopilot}"
