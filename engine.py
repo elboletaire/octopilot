@@ -916,10 +916,8 @@ def walk_stack(slug, num, base):
 
 # ------------------------------------------------------------ starting work
 #
-# The request handlers. Each takes one Request and returns its outcome line, or
-# None for a report (already recorded on its item). A refusal or a hold is
-# logged and the request is consumed: the user asks again rather than the
-# engine retrying it.
+# Request handlers: each returns its outcome line, or None for a report. A
+# refusal or a hold is logged and consumed, never retried by the engine.
 
 def _snapshot():
     """The last tick's snapshot, or {} before the first one. Read only: a request
@@ -1282,9 +1280,8 @@ def _handle(req, ctx):
 
 # ------------------------------------------------------------------- drain
 #
-# The inbox is the queue the dashboard and the agents write to. A drain takes
-# one message at a time under the state lock, so a request that arrives while
-# another is handled waits its turn rather than being lost.
+# The inbox takes one message at a time under the state lock, so a request
+# that arrives mid-drain waits for its turn rather than being overwritten.
 
 # Requests that wait in the inbox while paused (Q1): the rest run at once.
 HELD_WHILE_PAUSED = {"go", "investigate", "investigate-read-only", "re-review"}
@@ -1375,10 +1372,8 @@ def _plan_inbox(ctx):
 
 
 def drain(mode, started, clock=time.monotonic):
-    """Handle the inbox's requests in order, then deliver the queued sends -> the
-    outcome lines. Plan mode says what each would do and changes nothing. A
-    `tick` request is left to the next scheduled tick. Caller holds exec.lock,
-    not the state lock."""
+    """Handle the inbox's requests in order, then the queued sends -> the outcome
+    lines. Plan mode changes nothing. Caller holds exec.lock, not the state lock."""
     import scan
     ctx = Ctx(dry_run=mode == "plan", sent_keys=set(), log=scan.log_event,
               rows=_snapshot().get("rows", []),
