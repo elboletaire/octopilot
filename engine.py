@@ -9,6 +9,7 @@ Rows must come from the tick's saved scan, not from snapshot()'s copy: a
 forward re-key (issue key -> PR key) is not mapped by prev_keys, so an issue
 row cannot be followed to the PR it became.
 """
+import re
 import time
 from collections import namedtuple
 from dataclasses import dataclass, field
@@ -25,15 +26,21 @@ TRACKED = {"BOOTING", "CAPPED", "CLOSED", "DONE", "FEEDBACK", "MERGED", "PUSHED"
            "READY", "RESTACK", "REVIEW", "STALLED", "UNKNOWN", "WORKING"}
 
 
-def find_item(state, key):
-    """The item tracked under `key`, or under a key it was re-keyed from."""
+def locate_item(state, key):
+    """(key, item) of the item tracked under `key` or a key it was re-keyed
+    from, else (None, None)."""
     items = state.get("items", {})
     if key in items:
-        return items[key]
-    for it in items.values():
-        if key in it.get("prev_keys", []):
-            return it
-    return None
+        return key, items[key]
+    for k, it in items.items():
+        if key in (it.get("prev_keys") or []):
+            return k, it
+    return None, None
+
+
+def find_item(state, key):
+    """The item tracked under `key`, or under a key it was re-keyed from."""
+    return locate_item(state, key)[1]
 
 
 def layer_keys(state):
@@ -719,3 +726,186 @@ def run_rows(rows, mode, started, clock=time.monotonic):
     lines += delivered
     lines += _deliver_code()
     return lines
+
+
+# ------------------------------------------------------------------ requests
+#
+# One request, as the prompter and the dashboard queue it (the inbox's
+# `REQUEST <text>`, without the prefix), or one agent report line.
+
+Request = namedtuple("Request", "verb args confirmed over_cap")
+
+# Appended by the kitchen-closed dialog and by the prompter, after the user
+# confirmed a request past wind-down or over MAX_ACTIVE.
+CONFIRMED_PAST = "(confirmed past wind-down)"
+CONFIRMED_OVER = "(confirmed over cap)"
+
+ONE_TARGET = ("go", "no", "detach", "re-review", "ack")
+NO_ARGS = ("pause", "resume", "tick")
+INVESTIGATE = re.compile(r"/investigate\s+(--read-only\s+)?(\S+)\s+(.+)", re.DOTALL)
+CODE = re.compile(r"/octopilot-code\s+(.+)", re.DOTALL)
+
+
+def _strip_confirmations(text):
+    """-> (text, confirmed past wind-down, confirmed over cap). Only markers at
+    the very end count: one inside a question is part of the question."""
+    confirmed = over_cap = False
+    text = text.rstrip()
+    while text.endswith((CONFIRMED_PAST, CONFIRMED_OVER)):
+        if text.endswith(CONFIRMED_PAST):
+            confirmed = True
+            text = text[:-len(CONFIRMED_PAST)]
+        else:
+            over_cap = True
+            text = text[:-len(CONFIRMED_OVER)]
+        text = text.rstrip()
+    return text, confirmed, over_cap
+
+
+def parse_request(text):
+    """A queued request or report line -> Request. Anything outside the grammar
+    is verb "unknown" with the text as given, for the caller to refuse."""
+    unknown = Request("unknown", (text,), False, False)
+    line = text.strip()
+    # A report's message is the agent's own text: no confirmation markers.
+    if line.startswith("OCTOPILOT "):
+        parts = line.split(maxsplit=4)
+        if len(parts) < 4:
+            return unknown
+        msg = parts[4] if len(parts) > 4 else ""
+        return Request("report", (parts[1], parts[2], parts[3], msg), False, False)
+    # Code text is verbatim: nothing appends a marker to it, so a trailing one
+    # is part of what the user wrote.
+    m = CODE.fullmatch(line)
+    if m:
+        return Request("code", (m.group(1),), False, False)
+    line, confirmed, over_cap = _strip_confirmations(line)
+    m = INVESTIGATE.fullmatch(line)
+    if m:
+        read_only, repo, question = m.groups()
+        verb = "investigate-read-only" if read_only else "investigate"
+        return Request(verb, (repo, question), confirmed, over_cap)
+    words = line.split(maxsplit=1)
+    if not words:
+        return unknown
+    verb, rest = words[0], (words[1] if len(words) > 1 else "")
+    if verb in ONE_TARGET and len(rest.split()) == 1:
+        return Request(verb, (rest,), confirmed, over_cap)
+    if verb in NO_ARGS and not rest:
+        return Request(verb, (), confirmed, over_cap)
+    return unknown
+
+
+def _key_number(key):
+    """The number in owner/repo#N or owner/repo!N, else None."""
+    m = re.search(r"[#!](\d+)$", key)
+    return int(m.group(1)) if m else None
+
+
+def _known_key(state, snap_rows, key):
+    """The item key `key` names: a tracked item's, by its key or a re-keyed
+    one, else `key` itself when a row has it, else None."""
+    item_key, _ = locate_item(state, key)
+    if item_key:
+        return item_key
+    if any(r["key"] == key for r in snap_rows):
+        return key
+    return None
+
+
+def resolve_target(token, state, snap_rows):
+    """Resolves a request target to an item key -> (key, error).
+
+    Accepts a key or prev_key, repo#N or repo!N (either separator, repo a
+    registry slug or a unique suffix of one), or a bare N naming one row.
+    Pick-list numbers are the prompter's job, so they are not read here."""
+    key = _known_key(state, snap_rows, token)
+    if key:
+        return key, None
+    m = re.fullmatch(r"(.+?)([#!])(\d+)", token)
+    if m:
+        repo, sep, num = m.groups()
+        slugs = list(state.get("registry", {}))
+        if repo in slugs:
+            slug = repo
+        else:
+            found = sorted(s for s in slugs if s.endswith("/" + repo))
+            if not found:
+                return None, f"{repo} is not in the registry"
+            if len(found) > 1:
+                return None, f"{repo} is ambiguous: {' '.join(found)}"
+            slug = found[0]
+        # The messenger accepted either separator for an item: prefer the one
+        # that is tracked or proposed, else keep the one typed.
+        built = f"{slug}{sep}{int(num)}"
+        other = f"{slug}{'!' if sep == '#' else '#'}{int(num)}"
+        return (_known_key(state, snap_rows, built)
+                or _known_key(state, snap_rows, other) or built), None
+    if token.isdigit():
+        n = int(token)
+        keys = sorted({r["key"] for r in snap_rows
+                       if (r["kind"] == "PROPOSE" or r["kind"] in TRACKED)
+                       and _key_number(r["key"]) == n})
+        if not keys:
+            return None, f"no proposed or tracked item #{n}"
+        if len(keys) > 1:
+            return None, f"#{n} is ambiguous: {' '.join(keys)}"
+        return keys[0], None
+    return None, f"unknown target {token!r}"
+
+
+# ------------------------------------------------------------------- stacks
+
+def _children(open_prs, pr):
+    """The open PRs based on `pr`'s branch."""
+    return [p for p in open_prs if p["baseRefName"] == pr["headRefName"]]
+
+
+def stack_from(open_prs, num, base):
+    """The stack PR `num` is in, as [{pr, branch}] bottom to top -> (layers, error).
+
+    (None, None) is a plain PR: alone, or its bottom is not based on `base`.
+    (None, error) names a fork or an unknown PR; no layer may have two children."""
+    by_num = {p["number"]: p for p in open_prs}
+    if num not in by_num:
+        return None, f"#{num} is not an open PR"
+    seen = {num}
+    below = []
+    cur = by_num[num]
+    while cur["baseRefName"] != base:
+        found = [p for p in open_prs if p["headRefName"] == cur["baseRefName"]]
+        if not found:
+            return None, None
+        if len(found) > 1:
+            return None, f"stack is ambiguous below #{cur['number']}"
+        cur = found[0]
+        if cur["number"] in seen:
+            return None, f"stack loops at #{cur['number']}"
+        seen.add(cur["number"])
+        below.insert(0, cur)
+    above = []
+    top = by_num[num]
+    while True:
+        kids = _children(open_prs, top)
+        if len(kids) != 1 or kids[0]["number"] in seen:
+            break
+        top = kids[0]
+        seen.add(top["number"])
+        above.append(top)
+    chain = below + [by_num[num]] + above
+    for p in chain:
+        if len(_children(open_prs, p)) > 1:
+            return None, f"stack forks at #{p['number']}"
+    if len(chain) < 2:
+        return None, None
+    return [{"pr": p["number"], "branch": p["headRefName"]} for p in chain], None
+
+
+def walk_stack(slug, num, base):
+    """stack_from over the repo's open PRs, from one gh call."""
+    import scan  # lazy: scan reads its state at import
+    rows = scan.gh_json(["pr", "list", "-R", slug, "--state", "open",
+                         "--limit", "200", "--json", scan.PR_FIELDS], default=None)
+    if rows is None:
+        return None, f"could not list the open PRs of {slug}"
+    return stack_from(rows, num, base)
