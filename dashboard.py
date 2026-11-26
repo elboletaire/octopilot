@@ -416,7 +416,7 @@ class Model:
             self.snap_running, self.snap_started = True, time.time()
             self.changed.set()
             code, _, err = sh([sys.executable, os.path.join(DIR, "scan.py"),
-                               verb, "--quiet"], timeout=600)
+                               verb, "--quiet"], timeout=1200)
             with self.lock:
                 self.snap_err = None if code == 0 else \
                     (err or "snapshot failed").splitlines()[-1][:120]

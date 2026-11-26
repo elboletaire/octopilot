@@ -498,7 +498,7 @@ class ExecuteTest(unittest.TestCase):
 
     def test_queued_send_older_than_a_day_expires(self):
         self.save({A: item(8, "feat/b", "w2")},
-                  pending_sends=[self.entry(A, "rebase",
+                  pending_sends=[self.entry(A, "boot",
                                             at=int(time.time()) - 90000)])
         out = deliver_pending(self.ctx())
         self.assertEqual(self.sends(), [])
@@ -511,6 +511,34 @@ class ExecuteTest(unittest.TestCase):
         out = execute(Action("review", A, {}), ctx)
         self.assertIn("deferred", out)
         self.reboot_calls.assert_not_called()
+
+    def events(self, kind):
+        with open(scan.EVENTS_FILE) as fh:
+            return fh.read().count(f'"kind": "{kind}"')
+
+    def test_a_budget_cut_logs_engine_skip_once_per_change(self):
+        self.save({A: item(8, "feat/b", "w2", phase="fixing",
+                           feedback_seen="2026-11-20T00:00:00Z")})
+        rows = [("FEEDBACK", A, "mode=fix since=2026-11-26T00:00:00Z")]
+        for _ in range(2):
+            run_rows(rows, "on", 0, clock=lambda: ACT_BUDGET_SECS)
+        self.assertEqual(self.events("engine-skip"), 1)
+        self.assertEqual(self.state()["engine_skip"], [f"{A} feedback"])
+
+    def test_a_queued_rebase_never_ages_out(self):
+        self.save({A: item(8, "feat/b", "w2")},
+                  pending_sends=[self.entry(A, "rebase",
+                                            at=int(time.time()) - 5 * 86400)])
+        deliver_pending(self.ctx())
+        self.assertEqual(self.addresses(), ["herdr:w2"])
+
+    def test_an_expired_boot_drop_is_an_error_on_the_item(self):
+        self.save({A: item(8, "feat/b", "w2", phase="booting")},
+                  pending_sends=[self.entry(A, "boot",
+                                            at=int(time.time()) - 90000)])
+        deliver_pending(self.ctx())
+        self.assertEqual(self.sends(), [])
+        self.assertIn("older than a day", self.state()["items"][A]["engine_error"])
 
 
 if __name__ == "__main__":

@@ -3035,7 +3035,6 @@ def engine_mode(args=(), checkout=None):
 def tick(args):
     """tick [--quiet] [--plan]: one scan that saves the transitions it finds,
     writes the dashboard's snapshot from the same rows, then runs the engine."""
-    started = time.monotonic()
     os.makedirs(os.path.dirname(TICK_LOCK), exist_ok=True)
     with open(TICK_LOCK, "w") as lk:
         try:
@@ -3075,7 +3074,9 @@ def tick(args):
             import engine
             with open(EXEC_LOCK, "w") as ex:
                 fcntl.flock(ex.fileno(), fcntl.LOCK_EX)
-                lines = engine.run_rows(rows, mode, started)
+                # The budget counts from here: the scan and lock waits are not
+                # the engine's to pay for.
+                lines = engine.run_rows(rows, mode, time.monotonic())
             if "--quiet" not in args and lines:
                 print("\n".join(lines))
     return 0

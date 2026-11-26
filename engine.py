@@ -128,14 +128,13 @@ def plan_rows(rows, state):
 BLOCKED = "agent blocked"
 FAILED = "send failed"
 
-# How long after the tick's start a new action may begin. The dashboard kills a
-# tick at 600s. The slowest action is a review: /clear 120 + wait_idle 90 +
-# pr_detail 60 + two fetches (FETCH_TIMEOUT) 60 + send 120 = 450s, so 100s
-# leaves 50s of margin; the rest waits for the next tick.
-ACT_BUDGET_SECS = 100
+# No action starts this long after the act phase began. Invariant: budget + the
+# slowest action (a review, 750s: /clear 120, idle 90, pr_detail 60, 2 fetches,
+# 3 git calls of 60, send 120) + the scan < the dashboard's 1200s tick timeout.
+ACT_BUDGET_SECS = 240
 
-# The engine's own git fetch limit, short so a stuck remote cannot eat the tick.
-FETCH_TIMEOUT = 30
+# The engine's own git fetch limit: long enough for a big first fetch.
+FETCH_TIMEOUT = 90
 
 # A queued prompt older than this is stale: the world it was written for moved.
 QUEUE_MAX_AGE_SECS = 24 * 3600
@@ -208,9 +207,11 @@ def _stale(entry, it):
     """Why a queued prompt no longer holds for its item, or None. The queue can
     outlive the state it was written for (a review that ran, feedback marked)."""
     import scan
-    if time.time() - entry["at"] > QUEUE_MAX_AGE_SECS:
-        return "older than a day"
     reason = entry["reason"]
+    # A rebase is rendered against the base when it goes out: it never ages.
+    if reason not in ("rebase", "restack") \
+            and time.time() - entry["at"] > QUEUE_MAX_AGE_SECS:
+        return "older than a day"
     if reason == "boot":
         if it.get("phase") != "booting":
             return "item is no longer booting"
@@ -274,6 +275,12 @@ def deliver_pending(ctx):
                                           if p is not entry]
                 scan.save(state)
                 ctx.log("send-dropped", key, template=entry["template"], why=why)
+                if why == "older than a day":
+                    # A one-shot prompt was lost, not made moot: say so.
+                    _note(state, ctx, resolved, "engine_error", "engine-error",
+                          f"{reason} dropped: {entry['template']} {why}",
+                          action=reason)
+                    scan.save(state)
                 out.append(f"{key}: dropped, {why}")
                 continue
             ctx.sent_keys.add(ident)
@@ -653,11 +660,26 @@ def _deliver_code():
             + (f", still pending ({err})" if err else "")]
 
 
+def _record_skip(cut):
+    """Log `engine-skip` when the budget cut work, once per change of what was
+    cut (like engine_plan): the dashboard runs the tick quiet."""
+    import scan
+    with scan.locked():
+        state = scan.load()
+        if cut == (state.get("engine_skip") or []):
+            return
+        state["engine_skip"] = cut
+        scan.save(state)
+    if cut:
+        scan.log_event("engine-skip", "budget", reason="act budget spent",
+                       left=", ".join(cut))
+
+
 def run_rows(rows, mode, started, clock=time.monotonic):
     """Plan the tick's `rows` (scan's (kind, key, extra) tuples) and, in on
     mode, act on the plan. Plan mode logs what would happen, when the planned
     set changes, and changes nothing else. Starts no action once ACT_BUDGET_SECS
-    past `started` (a clock() reading); the rest waits for the next tick.
+    past `started` (a clock() reading taken when the act phase began).
     Caller holds exec.lock, not the state lock. -> the outcome lines."""
     import scan
     state = scan.load()
@@ -680,14 +702,20 @@ def run_rows(rows, mode, started, clock=time.monotonic):
                 scan.log_event("engine-plan", a.key, action=a.kind)
         return [f"{a.key}: would {a.kind}" for a in plan]
     lines = []
+    cut = []
     for i, action in enumerate(plan):
         if scan.load().get("paused"):
             lines.append(f"paused: {len(plan) - i} action(s) left")
             break
         if _over_budget(ctx):
             lines.append(f"budget spent: {len(plan) - i} action(s) left for the next tick")
+            cut = [f"{a.key} {a.kind}" for a in plan[i:]]
             break
         lines.append(execute(action, ctx))
-    lines += deliver_pending(ctx)
+    delivered = deliver_pending(ctx)
+    if any(line.startswith("budget spent") for line in delivered):
+        cut.append("queued sends")
+    _record_skip(cut)
+    lines += delivered
     lines += _deliver_code()
     return lines
