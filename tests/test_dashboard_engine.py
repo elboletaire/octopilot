@@ -46,11 +46,10 @@ class GithubPassTest(unittest.TestCase):
 class OpenPrompterTest(unittest.TestCase):
     def test_no_prompter_running_is_refused_without_the_orchestrator(self):
         with mock.patch.object(dashboard.scan, "OCTOPILOT_BACKEND", "herdr"), \
-                mock.patch.object(dashboard.scan, "herdr", return_value=(1, "", "")), \
-                mock.patch.object(dashboard.scan, "orchestrator_target") as target:
+                mock.patch.object(dashboard.scan, "herdr", return_value=(1, "", "")):
             res = dashboard.open_prompter()
         self.assertEqual(res, dashboard.Result(False, "no prompter running"))
-        target.assert_not_called()
+        self.assertFalse(hasattr(dashboard.scan, "orchestrator_target"))
 
 
 @unittest.skipIf(dashboard is None, "dashboard needs rich")
