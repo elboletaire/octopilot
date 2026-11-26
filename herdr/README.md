@@ -265,6 +265,9 @@ dashboards share one refresh. GitHub notifications are polled every 60s
 (`NOTIFY_POLL_SECS`) and trigger an early refresh; a new Next tick row rings the
 orchestrator's doorbell once (`request tick`). With `OCTOPILOT_ENGINE=on` the
 engine acts on the Next tick rows itself and nothing rings the orchestrator.
+Then the dashboard also runs `scan.py drain` on each request or report it sees,
+and at least every 60s (`DRAIN_EVERY`), and requests (the `g`/`n`/`i` keys and
+the prompter's commands) go to the engine, not the orchestrator.
 
 ## Keys
 
@@ -276,10 +279,10 @@ engine acts on the Next tick rows itself and nothing rings the orchestrator.
 | `a` | go to the prompter (the orchestrator if there is none) |
 | `t` | shell in the item's worktree |
 | `o` | PR or issue in the browser, opened on the computer you are at (the mod runs `xdg-open`, `open` or `start`), not on the octopilot's machine; no URL: `dashboard.sh --action browser` |
-| `g` / `n` | on a Pick next row: queue `go <key>` / `no <key>` for the orchestrator (press twice; past `WIND_DOWN_AT`, or with the slots full (`ACTIVE + UNTRACKED` at `MAX_ACTIVE`), the second press confirms starting anyway, and the alert's `g` sends it with `(confirmed past wind-down)` and/or `(confirmed over cap)`) |
+| `g` / `n` | on a Pick next row: queue `go <key>` / `no <key>` for the orchestrator, or the engine when `OCTOPILOT_ENGINE=on` (press twice; past `WIND_DOWN_AT`, or with the slots full (`ACTIVE + UNTRACKED` at `MAX_ACTIVE`), the second press confirms starting anyway, and the alert's `g` sends it with `(confirmed past wind-down)` and/or `(confirmed over cap)`) |
 | `R` | on a CAPPED row: grant another `MAX_REVIEW_ROUNDS` review rounds (press twice) |
 | `e` / `x` | on a PUSHED (stale) row: queue a re-review / ack the new commits (press twice) |
-| `i` | start an investigation: type the repo, the question, and whether it is read-only |
+| `i` | start an investigation: type the repo, the question, and whether it is read-only. Past `WIND_DOWN_AT` or with the slots full, the second press confirms starting anyway, as for `g` |
 | `P` | pause / resume octopilot (press twice) |
 | `z` | detach a tracked item: closes its workspace, keeps the worktree, stops tracking it (press twice) |
 | `del` / `⌫` | remove a tracked item: deletes its workspace and worktree, stops tracking it (press twice). Not on MERGED rows: the orchestrator cleans those up |
