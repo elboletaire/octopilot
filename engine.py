@@ -48,13 +48,14 @@ def revalidate_row(row, state):
     if kind == "RESTACK":
         return bool(it.get("stack"))
     if kind == "REVIEW":
-        head = fields.get("head")
         if it.get("phase") == "booting":
             return False
-        # Reviewed since the row was built: its head is the reviewed one.
-        if head and (it.get("reviewed_sha") or "").startswith(head):
-            return False
-        return True
+        # mark-reviewed since the row was built changes reviewed_sha. Comparing
+        # head would drop a fresh re-request, whose head equals reviewed_sha.
+        # Rows without the field (or empty) are kept.
+        built = fields.get("reviewed")
+        now = (it.get("reviewed_sha") or "none")[:7]
+        return not built or built == now
     if kind == "BOOTING":
         return it.get("phase") == "booting"
     if kind == "FEEDBACK":

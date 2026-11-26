@@ -67,10 +67,29 @@ class RevalidateRowTest(unittest.TestCase):
                  "handled_merges": [K]}
         self.assertFalse(revalidate_row(row("RESTACK"), state))
 
-    def test_review_dropped_once_head_reviewed(self):
+    def test_rerequested_review_kept_when_head_equals_reviewed(self):
         item = {K: {"phase": "fixing", "reviewed_sha": "abc1234def"}}
-        self.assertFalse(revalidate_row(row("REVIEW", head="abc1234"), {"items": item}))
-        self.assertTrue(revalidate_row(row("REVIEW", head="fff0000"), {"items": item}))
+        r = row("REVIEW", head="abc1234", reviewed="abc1234")
+        self.assertTrue(revalidate_row(r, {"items": item}))
+
+    def test_review_dropped_after_mark_reviewed(self):
+        item = {K: {"phase": "fixing", "reviewed_sha": "fff0000aaa"}}
+        r = row("REVIEW", head="fff0000", reviewed="abc1234")
+        self.assertFalse(revalidate_row(r, {"items": item}))
+        r = row("REVIEW", head="fff0000", reviewed="none")
+        self.assertFalse(revalidate_row(r, {"items": item}))
+
+    def test_review_none_kept_while_unreviewed(self):
+        r = row("REVIEW", head="fff0000", reviewed="none")
+        self.assertTrue(revalidate_row(r, {"items": {K: {"phase": "fixing"}}}))
+
+    def test_review_without_reviewed_field_kept(self):
+        item = {K: {"phase": "fixing", "reviewed_sha": "abc1234def"}}
+        self.assertTrue(revalidate_row(row("REVIEW", head="abc1234"), {"items": item}))
+
+    def test_review_dropped_while_booting(self):
+        item = {K: {"phase": "booting"}}
+        self.assertFalse(revalidate_row(row("REVIEW", reviewed="none"), {"items": item}))
 
     def test_propose_dropped_for_stack_layer(self):
         state = {"items": {K: {"stack": [{"pr": 7}, {"pr": 8}]}}, "declined": []}
