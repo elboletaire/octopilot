@@ -143,6 +143,13 @@ REPORT_NEEDS = {"blocked", "failed", "stalled", "capped"}
 # Events after which the GitHub view is worth refreshing early.
 KICK_EVENTS = {"report", "spawn", "sent", "cleanup", "track", "detach",
                "park", "unpark", "untrack", "decline", "merged"}
+# Events that wake the engine's drain: a request queued, or an agent's report.
+DRAIN_EVENTS = {"request", "report"}
+# The drain runs at once on those, and at least this often otherwise.
+DRAIN_EVERY = 60
+# engine.ACT_BUDGET_SECS, plus a spawn's worst case past it: fetch, pull and
+# worktree add (180 each), a checkout (360), and the first prompt's send (120).
+DRAIN_TIMEOUT_SECS = 1500
 
 AGENT_GLYPH = {"running": ("◐", "yellow"), "waiting": ("⏸", "bold red"),
                "idle": ("○", "dim"), "stopped": ("■", "dim"),
@@ -341,6 +348,7 @@ class Model:
         self.live = {}
         self.sessions = {}
         self.kick = threading.Event()
+        self.drain_kick = threading.Event()
         self.changed = threading.Event()
         # Set by a headless refresh: the GitHub loop then skips its debounce.
         self.urgent = threading.Event()
@@ -397,6 +405,8 @@ class Model:
                 self.events_size = size
             if not first and any(e.get("kind") in KICK_EVENTS for e in fresh):
                 self.kick.set()
+            if not first and any(e.get("kind") in DRAIN_EVENTS for e in fresh):
+                self.drain_kick.set()
             self.changed.set()
 
     def refresh_snapshot(self, force=False, verb="snapshot"):
@@ -497,6 +507,22 @@ class Model:
                     json.dump(out, fh)
                 os.replace(tmp, WOKEN_FILE)
 
+    def engine_loop(self):
+        """Drain the engine's inbox (scan.py drain): once at start, then on each
+        request or report in the events log, and at least every DRAIN_EVERY
+        seconds. Only where the engine is on."""
+        while True:
+            # Cleared before the drain, so a request that lands during it wakes the next.
+            self.drain_kick.clear()
+            try:
+                if scan.engine_mode(checkout=DIR) == "on":
+                    sh([sys.executable, os.path.join(DIR, "scan.py"), "drain", "--quiet"],
+                       timeout=DRAIN_TIMEOUT_SECS)
+            except Exception:
+                # Silent like the other loops: the next wake retries.
+                pass
+            self.drain_kick.wait(timeout=DRAIN_EVERY)
+
     def notify_loop(self):
         """Kick the GitHub loop when the user's notifications bring something
         new, so a review request or a comment reaches the orchestrator within
@@ -575,7 +601,7 @@ class Model:
 
     def start(self):
         for fn in (self.github_loop, self.agents_loop, self.publish_loop,
-                   self.notify_loop):
+                   self.notify_loop, self.engine_loop):
             threading.Thread(target=fn, daemon=True).start()
 
     # -- view

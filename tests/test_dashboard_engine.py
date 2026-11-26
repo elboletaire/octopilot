@@ -1,6 +1,9 @@
 """The dashboard's GitHub pass rings the orchestrator only when the engine
 does not act: with the engine on there is nobody to wake."""
+import contextlib
+import json
 import os
+import tempfile
 import unittest
 from unittest import mock
 
@@ -56,3 +59,28 @@ class EngineErrorViewTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipIf(dashboard is None, "dashboard needs rich")
+class DrainKickTest(unittest.TestCase):
+    def test_a_request_or_report_wakes_the_drain_and_other_events_do_not(self):
+        with tempfile.TemporaryDirectory() as d:
+            events = os.path.join(d, "events.jsonl")
+            with open(events, "w") as fh:
+                fh.write(json.dumps({"kind": "tick"}) + "\n")
+            paths = {"EVENTS_FILE": events,
+                     "SNAPSHOT_FILE": os.path.join(d, "snapshot.json"),
+                     "STATE_FILE": os.path.join(d, "state.json")}
+            with contextlib.ExitStack() as stack:
+                for name, value in paths.items():
+                    stack.enter_context(mock.patch.object(dashboard, name, value))
+                model = dashboard.Model(None)
+                model.poll_files()
+                with open(events, "a") as fh:
+                    fh.write(json.dumps({"kind": "sent"}) + "\n")
+                model.poll_files()
+                self.assertFalse(model.drain_kick.is_set())
+                with open(events, "a") as fh:
+                    fh.write(json.dumps({"kind": "request", "text": "go 3"}) + "\n")
+                model.poll_files()
+                self.assertTrue(model.drain_kick.is_set())
