@@ -2,15 +2,28 @@
 engine would have sent. GitHub, herdr and git are faked (tests/stand.py); the
 prompts are rendered from the real templates and sent through the real
 send_item, to a fake send_to."""
+import fcntl
 import time
 import unittest
 from unittest import mock
 
+import engine
 import scan
 from tests.stand import HEAD, REPO, RequestCase
 
 ISSUE = f"{REPO}!12"
 PR = f"{REPO}#31"
+
+
+def lock_is_free():
+    """True when no process holds the state lock (scan.locked)."""
+    with open(scan.STATE_FILE + ".lock", "w") as fh:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return False
+        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        return True
 
 
 class GoTest(RequestCase):
@@ -79,7 +92,34 @@ class GoTest(RequestCase):
             out = self.handle(f"go {PR}")
         self.assertEqual(self.addresses(), [])
         self.assertIn("uncommitted", out)
-        self.assertIn("uncommitted", scan.load()["items"][PR]["engine_error"])
+        it = scan.load()["items"][PR]
+        self.assertIn("uncommitted", it["engine_error"])
+        self.assertEqual(it["phase"], "booting")
+
+    def test_a_failed_checkout_is_retried_by_the_executors_boot(self):
+        self.mode, self.template = "comment", "review-comment"
+        with mock.patch.object(scan, "sh", side_effect=lambda args, cwd=None, timeout=60:
+                               (1, " M x", "") if "status" in args
+                               else self.git(args, cwd, timeout)):
+            self.handle(f"go {PR}")
+        self.assertEqual(self.addresses(), [])
+        ctx = self.ctx()
+        engine._boot(ctx, PR)
+        self.assertEqual(self.addresses(), ["herdr:w9"])
+        it = scan.load()["items"][PR]
+        self.assertEqual((it["reviewed_sha"], it["phase"]), (HEAD, "fixing"))
+
+    def test_git_runs_with_the_state_lock_released(self):
+        self.mode, self.template = "comment", "review-comment"
+        free = []
+
+        def probe(args, cwd=None, timeout=60):
+            if "rev-parse" in args:
+                free.append(lock_is_free())
+            return self.git(args, cwd, timeout)
+        with mock.patch.object(scan, "sh", side_effect=probe):
+            self.handle(f"go {PR}")
+        self.assertEqual(free, [True])
 
     def test_go_refused_when_already_tracked(self):
         self.save({PR: {"mode": "fix", "branch": "feat/b", "session": "w9",

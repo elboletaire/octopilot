@@ -1030,8 +1030,7 @@ def do_go(req, ctx):
     if held:
         return _hold(ctx, key, title, held)
 
-    # The GitHub reads come first: the state lock below is held through the
-    # spawn's git fetch, and only the work prompt's issue context reads GitHub.
+    # GitHub is read before the lock: the spawn holds it through its git fetch.
     base = _base(state, slug)
     layers, stack_spec, start = None, None, key
     if kind == "issue":
@@ -1067,46 +1066,63 @@ def do_go(req, ctx):
                                 stack_spec=stack_spec)
         except (Exception, SystemExit) as exc:
             return _refuse(ctx, "go", start, f"spawn failed: {exc}", title=title)
-        return _first_prompt(state, ctx, start, r, branch, slug, num, title,
-                             layers, kind == "issue")
+        wt, path = _worktree(state["items"][start]), state["registry"][slug]["path"]
+    # git runs with the lock released: a checkout or the behind check can take minutes.
+    tmpl, subs = _first_prompt_for(r, start, branch, slug, num, layers, kind == "issue",
+                                   path)
+    mark, failure = None, None
+    if tmpl in COMMENT_TEMPLATES:
+        head, note = checkout_pr_head(wt, layers[0]["pr"] if layers else num, branch)
+        if head:
+            mark = {"op": "reviewed", "sha": head}
+        else:
+            failure = note
+    with scan.locked():
+        return _send_first(scan.load(), ctx, start, r, title, tmpl, subs, mark, failure)
 
 
-def _first_prompt(state, ctx, start, r, branch, slug, num, title, layers, is_issue):
-    """Send the prompt a fresh session starts with, or queue it when the host
-    warned. Caller holds the lock."""
-    import scan
+# Templates that review someone else's PR on its head, and mark that head reviewed.
+COMMENT_TEMPLATES = ("review-comment", "re-review", "review-stack")
+
+
+def _first_prompt_for(r, start, branch, slug, num, layers, is_issue, path):
+    """The template and substitutions of a fresh session's first prompt. A fix PR
+    behind its base gets the rebase alone: it runs the review loop itself."""
     base, tmpl = r["base"], r["template"]
     if is_issue:
-        subs = {"REPO": slug, "ISSUE": num, "BRANCH": branch, "BASE": base}
-    elif r["stack"]:
-        subs = {"REPO": slug, "BASE": base, "KEY": start}
-    else:
-        subs = {"REPO": slug, "PR": num, "BRANCH": branch, "BASE": base}
-        if r["prev"]:
-            subs["PREV"] = r["prev"]
-        # A fix PR behind its base gets the rebase alone: it runs the review loop.
-        if tmpl == "review-fix" and _behind(state["registry"][slug]["path"],
-                                            base, branch):
-            tmpl = "rebase"
-    mark = None
-    if tmpl in ("review-comment", "re-review", "review-stack"):
-        # Someone else's PR is reviewed on its head, and that head is marked.
-        pr = layers[0]["pr"] if layers else num
-        head, note = checkout_pr_head(_worktree(state["items"][start]), pr, branch)
-        if head is None:
-            _note(state, ctx, start, "engine_error", "engine-error",
-                  f"go failed: {note}", action="go")
-            scan.save(state)
-            return f"go {start} failed: {note}"
-        mark = {"op": "reviewed", "sha": head}
-    if r["warning"]:
-        queue_send(state, start, tmpl, subs, "go", mark)
+        return tmpl, {"REPO": slug, "ISSUE": num, "BRANCH": branch, "BASE": base}
+    if r["stack"]:
+        return tmpl, {"REPO": slug, "BASE": base, "KEY": start}
+    subs = {"REPO": slug, "PR": num, "BRANCH": branch, "BASE": base}
+    if r["prev"]:
+        subs["PREV"] = r["prev"]
+    if tmpl == "review-fix" and _behind(path, base, branch):
+        tmpl = "rebase"
+    return tmpl, subs
+
+
+def _send_first(state, ctx, start, r, title, tmpl, subs, mark, failure):
+    """Send the first prompt, or queue it when the host warned. A checkout that
+    failed leaves the item booting: the executor's BOOTING row retries it. Caller
+    holds the lock."""
+    import scan
+    k = scan.resolve_key(state, start)
+    it = state.get("items", {}).get(k)
+    if it is None:
+        return _refuse(ctx, "go", start, "gone before its first prompt", title=title)
+    if failure:
+        it["phase"] = "booting"
+        _note(state, ctx, k, "engine_error", "engine-error", f"go failed: {failure}",
+              action="go")
         scan.save(state)
-        ctx.log("go", start, title=title, template=tmpl, queued=True,
-                warning=r["warning"])
-        return f"{start}: {tmpl} queued, the host warned: {r['warning']}"
-    ctx.log("go", start, title=title, template=tmpl)
-    return _send_in(state, ctx, start, tmpl, subs, "go", mark)
+        return f"go {k} failed: {failure}; the next tick retries it"
+    if r["warning"]:
+        queue_send(state, k, tmpl, subs, "go", mark)
+        scan.save(state)
+        ctx.log("go", k, title=title, template=tmpl, queued=True, warning=r["warning"])
+        return f"{k}: {tmpl} queued, the host warned: {r['warning']}"
+    ctx.log("go", k, title=title, template=tmpl)
+    return _send_in(state, ctx, k, tmpl, subs, "go", mark)
 
 
 def do_investigate(req, ctx):
