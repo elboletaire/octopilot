@@ -3038,15 +3038,16 @@ def tick(args):
                                         untracked, info))
             if changed:
                 log_event("tick", active=active, counts=counts)
-            legacy = "--legacy" in args and mode == "on"
-            if legacy:
+            # `shown` is only what is printed: the engine below gets every row.
+            shown = rows
+            if "--legacy" in args and mode == "on":
                 # The engine acts on these kinds itself: the table leaves them out.
                 import engine
                 print("octopilot has no orchestrator any more: stop ticking, "
                       "the engine acts on every row")
-                rows = [r for r in rows if r[0] not in engine.PLANNED]
+                shown = [r for r in rows if r[0] not in engine.PLANNED]
             if "--quiet" not in args:
-                render(rows, active, n, state, untracked)
+                render(shown, active, n, state, untracked)
         if mode == "off" and "--plan" in args and "--quiet" not in args:
             print(f"engine off here: {OCTOPILOT_DIR} is not the live checkout "
                   "and OCTOPILOT_STATE_DIR is unset")

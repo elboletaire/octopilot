@@ -160,6 +160,14 @@ class TickEngineTest(unittest.TestCase):
             "octopilot has no orchestrator any more: stop ticking, "
             "the engine acts on every row\n"), text)
         self.assertNotIn(f"MERGED   {MERGED}", text)
+        # The engine still acted on the hidden row, as in a direct tick.
+        self.assertNotIn(MERGED, self.items())
+        self.assertIn(MERGED, scan.load()["handled_merges"])
+        self.assertEqual([args[0] for args, _ in self.sent()], ["herdr:w2"])
+        # The snapshot keeps every row.
+        with open(scan.SNAPSHOT_FILE) as fh:
+            snap = fh.read()
+        self.assertIn(MERGED, snap)
 
     def test_a_direct_tick_with_the_engine_on_keeps_the_full_table(self):
         out = io.StringIO()
