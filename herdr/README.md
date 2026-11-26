@@ -255,7 +255,7 @@ Close the test space with `herdr-app do space.close --id <space> --confirmed tru
 | 🔴 Needs you | `CAPPED`, `READY`, `PUSHED`, `STALLED`, `CLOSED`, agents waiting on a question, and agents whose last report was `blocked`/`failed`/`stalled`/`capped` |
 | ⏭ Next tick | `MERGED`, `REVIEW`, `FEEDBACK`, `BOOTING` -- what the orchestrator will do on its next tick |
 | 🟡 Running | `WORKING`, and anything spawned since the last GitHub refresh |
-| ✔ Done | `DONE` (including a fix PR waiting on someone else's review, `waiting on review`), `GONE`, and cards you parked with `d` (they keep their workspace and hold no slot; new feedback or a re-requested review brings them back). Done rows without a workspace are hidden; `D` shows them |
+| ✔ Done | `DONE` (including a fix PR waiting on a review: `waiting on review`, or `waiting on re-review` after requested changes), `GONE`, and cards you parked with `d` (they keep their workspace and hold no slot; new feedback or a re-requested review brings them back). Done rows without a workspace are hidden; `D` shows them |
 | ⚪ Pick next | `PROPOSE` |
 
 Agent state comes from herdr every 3s, heartbeats, rounds and reports the moment

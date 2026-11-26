@@ -919,12 +919,23 @@ def review_requested(detail, me):
                   for r in (detail or {}).get("reviewRequests") or []]
 
 
-def review_pending(detail):
-    """Whether someone else still owes a review on the PR in `detail`: the
-    repo requires one and none is in, or a reviewer has been asked."""
+def review_wait(detail, me):
+    """The row note for a review `me` is waiting on the PR in `detail`, or None.
+
+    reviewDecision is GitHub's answer wherever the repo sets one. Without it
+    (no review required) only a pending request from someone else counts: a
+    request to `me` is one the user answers, not one they wait on."""
     d = detail or {}
-    return d.get("reviewDecision") == "REVIEW_REQUIRED" or \
-        bool(d.get("reviewRequests"))
+    decision = d.get("reviewDecision")
+    if decision == "REVIEW_REQUIRED":
+        return "waiting on review"
+    if decision == "CHANGES_REQUESTED":
+        return "waiting on re-review"
+    if decision:
+        return None
+    others = [r for r in d.get("reviewRequests") or []
+              if (r.get("login") or r.get("name")) != me]
+    return "waiting on review" if others else None
 
 
 def pr_review_comments(detail):
@@ -1503,10 +1514,16 @@ def scan(state, refresh=False, info=None):
             # comment PR waiting on its author does.
             first = layer_detail(k, it, it["stack"][0]["pr"]) \
                 if it.get("stack") else d
-            if review_pending(first):
+            if it.get("stack") and not first:
+                rows.append(("WORKING", k, f"mode=fix {smeta} "
+                                           f"layer=#{it['stack'][0]['pr']} "
+                                           "detail unavailable"))
+                continue
+            note = review_wait(first, me)
+            if note:
                 active -= 1
                 rows.append(("DONE", k, f"mode=fix {smeta} checks={checks} "
-                                        "-> waiting on review"))
+                                        f"-> {note}"))
             else:
                 rows.append(("READY", k, f"mode=fix {smeta} checks={checks} "
                                          "-> you merge"))

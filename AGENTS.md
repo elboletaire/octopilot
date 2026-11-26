@@ -69,9 +69,13 @@ git worktree add --no-track -b feat/x .worktrees/feat-x origin/main
 ## Testing safely
 
 - **Never test against the live state.** `~/.local/state/octopilot` is the
-  running octopilot. Set `OCTOPILOT_STATE_DIR` to a scratch directory, and narrow
-  the scan with `HOME_REPOS`, `ISSUE_ORGS` and `CLONE_ROOTS`. Do not start the
-  orchestrator or spawn workers on the live checkout to try a change.
+  running octopilot. Set `OCTOPILOT_STATE_DIR` to a scratch directory when you go
+  through `scan.sh` or `dashboard.sh`. `scan.py` and `dashboard.py` ignore it and
+  read `STATE_FILE` (default `~/.local/state/octopilot/state.json`; every other
+  state file sits next to it), so when you run or import them directly, set
+  `STATE_FILE=<scratch>/state.json` before the import. Narrow the scan with
+  `HOME_REPOS`, `ISSUE_ORGS` and `CLONE_ROOTS`. Do not start the orchestrator or
+  spawn workers on the live checkout to try a change.
 - **GUI test space**: `open-gui.sh` refuses without `OCTOPILOT_STATE_DIR`. Run it
   from your worktree, then close the test space with
   `herdr-app do space.close --id <space> --confirmed true`. The
