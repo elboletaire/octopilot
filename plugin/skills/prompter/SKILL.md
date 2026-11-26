@@ -144,7 +144,8 @@ time whose kind is one of: `go`, `investigate`, `held`, `go-refused`,
 `sent` (a re-review prompt), `tick-asked`, `pause`, `resume`, `engine-error`,
 `send-waiting`, `send-code`, `send-code-pending`. When the request names an
 item, the event's `key` must match too: the engine logs other items' events in
-the same window. An `ack` logs no event: confirm it from its `push_acked` in
+the same window. A refusal can carry no key (an unknown repo, an unresolvable
+target): it counts as the outcome too. An `ack` logs no event: confirm it from its `push_acked` in
 `$A status`. Report the outcome in one line, with the item's title. If nothing
 arrives in time, say the request is queued and the engine picks it up on its
 next tick; the outcome shows on the dashboard.
@@ -170,15 +171,13 @@ explains the steps, and the user runs them. The branch is the `branch=` field
 of the `detach` event in events.jsonl. The mode is `fix` for the user's own work
 (their PR, or an issue) and `comment` for a review-only PR. Then:
 
-- Bring the worktree back as a session: TUI, `herdr worktree open --cwd <repo>
+- Bring the worktree back as a session. Its path is the one `git -C <repo>
+  worktree list` shows for the branch. TUI: `herdr worktree open --cwd <repo>
   --path <worktree>`, start claude in it, and pass the workspace id (`w…`).
-  GUI, `herdr-app do space.new --folder <worktree>` with the claude command
+  GUI: `herdr-app do space.new --folder <worktree>` with the claude command
   (see `herdr/open-gui.sh`), then label its terminal `hc label <t>
   octopilot.agent=<agent name>` (the `ap-<repo>-<n>` name) and pass the space
   id (`sp…`) that `space.new` prints. The label comes first, so `track` finds
   the agent.
 - Then `$A track <key> <mode> <branch> <session> [pr]`, with the session id
   from the step above and the optional `pr` number for a PR item.
-
-If the user names the session by title, find it with `herdr workspace list`
-(TUI) or `herdr-app ls` (GUI) and match it to the row's `session=`.
