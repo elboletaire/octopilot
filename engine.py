@@ -10,8 +10,15 @@ forward re-key (issue key -> PR key) is not mapped by prev_keys, so an issue
 row cannot be followed to the PR it became.
 """
 import time
+from collections import namedtuple
 from dataclasses import dataclass
 from typing import Callable
+
+# Row kinds the executor acts on, and the action each one becomes.
+PLANNED = {"MERGED": "cleanup", "RESTACK": "restack", "REVIEW": "review",
+           "BOOTING": "boot", "FEEDBACK": "feedback"}
+
+Action = namedtuple("Action", "kind key data")
 
 # Rows built from a tracked item. GONE is left out: its item was just dropped.
 TRACKED = {"BOOTING", "CAPPED", "CLOSED", "DONE", "FEEDBACK", "MERGED", "PUSHED",
@@ -78,6 +85,35 @@ def revalidate_row(row, state):
         return (it is None and key not in state.get("declined", [])
                 and key not in layer_keys(state))
     return True
+
+
+def plan_rows(rows, state):
+    """The actions for the rows still valid against `state`, in row order.
+
+    Every kind not in PLANNED is left to the user, CAPPED included. Nothing
+    is planned while paused.
+    """
+    if state.get("paused"):
+        return []
+    out = []
+    for row in rows:
+        kind, key = row["kind"], row["key"]
+        if kind not in PLANNED:
+            continue
+        fields = row.get("fields", {})
+        # Comment-mode items are answered by their review, never by feedback.
+        assert not (kind == "FEEDBACK" and fields.get("mode") == "comment"), key
+        if not revalidate_row(row, state):
+            continue
+        if kind == "BOOTING":
+            data = {"template": fields.get("template"), "prev": fields.get("PREV")}
+        elif kind == "FEEDBACK":
+            data = {"since": fields.get("since"), "pr": fields.get("pr"),
+                    "branch": fields.get("branch")}
+        else:
+            data = {}
+        out.append(Action(PLANNED[kind], key, data))
+    return out
 
 
 # Outcomes kept on a pending send's `error`: a blocked entry is logged once.
