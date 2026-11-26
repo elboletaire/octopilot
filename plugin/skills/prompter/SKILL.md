@@ -178,8 +178,8 @@ of the `detach` event in events.jsonl. The mode is `fix` for the user's own work
   conversation; a resumed session needs no send below.
   GUI: `herdr-app do space.new --folder <worktree>` with the claude command
   (see `herdr/open-gui.sh`; `claude --resume` for the old conversation), then
-  label its terminal `hc label <t>
-  octopilot.agent=<agent name>` (the `ap-<repo>-<n>` name) and pass the space
+  label its terminal `hc label <t> octopilot.agent=<agent name>` (the
+  `ap-<repo>-<n>` name) and pass the space
   id (`sp…`) that `space.new` prints. The label comes first, so `track` finds
   the agent.
 - Then `$A track <key> <mode> <branch> <session> [pr]`, with the session id
@@ -193,4 +193,4 @@ of the `detach` event in events.jsonl. The mode is `fix` for the user's own work
   <slug> --json baseRefName -q .baseRefName`; for an issue, it is
   `registry.<slug>.base` in `$A status` (what `spawn` prints as `BASE=`).
   A `comment` item needs nothing: track sets driver=orchestrator, and the
-  engine's REVIEW row reviews it.
+  engine's REVIEW row reviews it when it has new commits.
