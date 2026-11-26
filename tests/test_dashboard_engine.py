@@ -1,5 +1,5 @@
-"""The dashboard's GitHub pass rings the orchestrator only when the engine
-does not act: with the engine on there is nobody to wake."""
+"""The dashboard's GitHub pass refreshes snapshot.json: a tick where the engine
+may act, else a plain snapshot."""
 import contextlib
 import json
 import os
@@ -27,23 +27,30 @@ class GithubPassTest(unittest.TestCase):
         self.addCleanup(env.stop)
         self.model = dashboard.Model.__new__(dashboard.Model)
         self.model.refresh_snapshot = mock.Mock()
-        self.model.wake_orchestrator = mock.Mock()
 
-    def test_engine_on_does_not_wake_the_orchestrator(self):
-        os.environ["OCTOPILOT_ENGINE"] = "on"
-        self.model.github_pass(False)
-        self.model.refresh_snapshot.assert_called_once()
-        self.model.wake_orchestrator.assert_not_called()
+    def test_engine_allowed_refreshes_with_a_tick(self):
+        with mock.patch.object(dashboard.scan, "engine_allowed", return_value=True):
+            self.model.github_pass(False)
+        self.model.refresh_snapshot.assert_called_once_with(False, "tick")
 
-    def test_engine_off_still_wakes_the_orchestrator(self):
-        os.environ.pop("OCTOPILOT_ENGINE", None)
-        self.model.github_pass(False)
-        self.model.wake_orchestrator.assert_called_once()
+    def test_engine_not_allowed_refreshes_with_a_snapshot(self):
+        with mock.patch.object(dashboard.scan, "engine_allowed", return_value=False):
+            self.model.github_pass(True)
+        self.model.refresh_snapshot.assert_called_once_with(True, "snapshot")
 
-    def test_engine_plan_still_wakes_the_orchestrator(self):
-        os.environ["OCTOPILOT_ENGINE"] = "plan"
-        self.model.github_pass(False)
-        self.model.wake_orchestrator.assert_called_once()
+    def test_nothing_rings_an_orchestrator(self):
+        self.assertFalse(hasattr(dashboard.Model, "wake_orchestrator"))
+
+
+@unittest.skipIf(dashboard is None, "dashboard needs rich")
+class OpenPrompterTest(unittest.TestCase):
+    def test_no_prompter_running_is_refused_without_the_orchestrator(self):
+        with mock.patch.object(dashboard.scan, "OCTOPILOT_BACKEND", "herdr"), \
+                mock.patch.object(dashboard.scan, "herdr", return_value=(1, "", "")), \
+                mock.patch.object(dashboard.scan, "orchestrator_target") as target:
+            res = dashboard.open_prompter()
+        self.assertEqual(res, dashboard.Result(False, "no prompter running"))
+        target.assert_not_called()
 
 
 @unittest.skipIf(dashboard is None, "dashboard needs rich")
@@ -116,18 +123,18 @@ class StartHoldsTest(unittest.TestCase):
     def test_go_over_the_cap_is_held_until_confirmed_and_then_marked(self):
         cap = dashboard.scan.MAX_ACTIVE
         model = self.model(active=cap)
-        with mock.patch.object(dashboard, "to_orch", return_value="queued") as queue:
-            held = dashboard.go_orch(model, "owner/repo#3")
+        with mock.patch.object(dashboard, "queue_request", return_value="queued") as queue:
+            held = dashboard.go_request(model, "owner/repo#3")
             self.assertTrue(held.kitchen)
             queue.assert_not_called()
-            dashboard.go_orch(model, "owner/repo#3", confirmed=True)
+            dashboard.go_request(model, "owner/repo#3", confirmed=True)
         queue.assert_called_once_with("go owner/repo#3 (confirmed over cap)")
 
     def test_both_holds_send_both_markers_on_one_confirmation(self):
         self.wind.return_value = "yes"
         cap = dashboard.scan.MAX_ACTIVE
-        with mock.patch.object(dashboard, "to_orch", return_value="queued") as queue:
-            dashboard.investigate_orch(self.model(active=cap), "owner/repo",
+        with mock.patch.object(dashboard, "queue_request", return_value="queued") as queue:
+            dashboard.investigate_request(self.model(active=cap), "owner/repo",
                                        "why?", False, confirmed=True)
         queue.assert_called_once_with(
             "/investigate owner/repo why? (confirmed past wind-down) (confirmed over cap)")
@@ -144,20 +151,20 @@ class StartHoldsTest(unittest.TestCase):
         self.wind.return_value = "yes"
         cap = dashboard.scan.MAX_ACTIVE
         model = self.model(active=cap)
-        with mock.patch.object(dashboard, "to_orch", return_value="queued") as queue:
+        with mock.patch.object(dashboard, "queue_request", return_value="queued") as queue:
             # The alert showed the cap; wind-down came up since: ask again.
-            again = dashboard.go_orch(model, "owner/repo#3", confirmed=("cap",))
+            again = dashboard.go_request(model, "owner/repo#3", confirmed=("cap",))
             self.assertTrue(again.kitchen)
             self.assertEqual(again.holds, ("wind-down", "cap"))
             queue.assert_not_called()
-            dashboard.go_orch(model, "owner/repo#3", confirmed=again.holds)
+            dashboard.go_request(model, "owner/repo#3", confirmed=again.holds)
         queue.assert_called_once_with(
             "go owner/repo#3 (confirmed past wind-down) (confirmed over cap)")
 
     def test_a_shown_hold_that_no_longer_applies_is_not_marked(self):
         cap = dashboard.scan.MAX_ACTIVE
-        with mock.patch.object(dashboard, "to_orch", return_value="queued") as queue:
-            dashboard.go_orch(self.model(active=cap), "owner/repo#3",
+        with mock.patch.object(dashboard, "queue_request", return_value="queued") as queue:
+            dashboard.go_request(self.model(active=cap), "owner/repo#3",
                               confirmed=("wind-down", "cap"))
         queue.assert_called_once_with("go owner/repo#3 (confirmed over cap)")
 
@@ -172,7 +179,7 @@ class StartHoldsTest(unittest.TestCase):
         view.alert = ("owner/repo#3", "a title", dashboard.KITCHEN_SECS,
                       "⚠ At the cap", ("cap",))
         queued = dashboard.Result(True, "queued")
-        with mock.patch.object(dashboard, "to_orch", return_value=queued) as queue:
+        with mock.patch.object(dashboard, "queue_request", return_value=queued) as queue:
             view.handle("g", None, None)
             queue.assert_not_called()
             self.assertEqual(view.alert[4], ("wind-down", "cap"))
@@ -187,7 +194,7 @@ class StartHoldsTest(unittest.TestCase):
         cap = dashboard.scan.MAX_ACTIVE
         args = {"repo": "owner/repo", "question": "why?", "confirmed": "1",
                 "holds": "wind-down"}
-        with mock.patch.object(dashboard, "to_orch", return_value="queued") as queue:
+        with mock.patch.object(dashboard, "queue_request", return_value="queued") as queue:
             res = dashboard.run_action(self.model(active=cap), "investigate", None, args)
         self.assertTrue(res.kitchen)
         self.assertEqual(res.holds, ("wind-down", "cap"))
@@ -208,7 +215,7 @@ if __name__ == "__main__":
 
 @unittest.skipIf(dashboard is None, "dashboard needs rich")
 class DrainKickTest(unittest.TestCase):
-    def test_a_request_or_report_wakes_the_drain_and_other_events_do_not(self):
+    def test_a_request_wakes_the_drain_and_other_events_do_not(self):
         with tempfile.TemporaryDirectory() as d:
             events = os.path.join(d, "events.jsonl")
             with open(events, "w") as fh:
@@ -223,6 +230,7 @@ class DrainKickTest(unittest.TestCase):
                 model.poll_files()
                 with open(events, "a") as fh:
                     fh.write(json.dumps({"kind": "sent"}) + "\n")
+                    fh.write(json.dumps({"kind": "report"}) + "\n")
                 model.poll_files()
                 self.assertFalse(model.drain_kick.is_set())
                 with open(events, "a") as fh:
