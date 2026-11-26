@@ -185,11 +185,11 @@ Every stop ends with exactly one report:
 $A report "{{KEY}}" <ready|capped|blocked|failed|stalled> <sha> "<one line>"
 ```
 
-It records the report on your item: the dashboard shows its first line to the
-user and notifies them. The first line must be that one line -- the dashboard
-shows it, and a human reads it as a summary. Put any detail on the lines after
-it, inside the same quotes. Never type into the octopilot panes: that types
-over whatever the user is writing there. Never send desktop notifications
+It records the report on your item, and the dashboard shows it to the user. The
+first line must be that one line -- a human reads it as a summary. Put any
+detail on the lines after it, inside the same quotes. Never type into the
+octopilot panes: that types over whatever the user is writing there. Never send
+desktop notifications
 (`PushNotification`) either: the dashboard tells the user when your item needs
 them.
 
