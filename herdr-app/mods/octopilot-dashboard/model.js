@@ -50,10 +50,10 @@ export const isStale = (view, now) => elapsed(view, now) > STALE_S;
 export function engineLabel(engine, view, now) {
   if (!engine) return null;
   const since = liveAge(engine.since_s, view, now);
-  if (engine.state === "stale") return { text: `engine hung? ${ago(since)}`, tone: "blocked" };
-  if (engine.mode === "off") return { text: "engine off", tone: "dim" };
-  if (engine.mode === "plan") return { text: "engine plan", tone: "dim" };
+  if (engine.state === "stale") return { text: `engine running ${ago(since)}+ (hung?)`, tone: "blocked" };
+  if (engine.mode === "off") return { text: "engine off here", tone: "dim" };
   if (engine.state === "acting") return { text: `⏭ acting ${ago(since)}`, tone: "working" };
+  if (engine.mode === "plan") return { text: "engine plan (logs only)", tone: "dim" };
   return { text: "engine on", tone: "dim" };
 }
 

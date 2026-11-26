@@ -79,7 +79,8 @@ export function header(v, t, now) {
   const elapsedSecs = elapsed(view, now);
   const lastTick = liveAge(h.last_tick_s, view, now);
   const stale = isStale(view, now);
-  const engine = engineLabel(h.engine, view, now);
+  // A dead view says nothing about the engine, so its label would only count up from a stale write.
+  const engine = stale ? null : engineLabel(h.engine, view, now);
   const on = v.machine() ?? null;
   return v_flex().gap(6)
     .child(h_flex().items_center().gap(12)
@@ -98,7 +99,7 @@ export function header(v, t, now) {
       .child(div().text_size(12).text_color(t.dim).child(clockText(now))))
     .child(h_flex().items_center().gap(14).text_size(11.5).text_color(t.dim)
       .when(stale, (el) => el.child(div().font_semibold().text_color(t.blocked)
-        .child(`engine not running (view ${Math.floor(elapsedSecs)} s old)`)))
+        .child(`headless dashboard not running (view ${Math.floor(elapsedSecs)} s old)`)))
       .child(github(t, h.github ?? {}, elapsedSecs))
       .child(`last tick ${lastTick == null ? "never" : `${ago(lastTick)} ago`}`)
       .when(Boolean(engine), (el) => el.child(div().text_color(t[engine.tone]).child(engine.text))));

@@ -16,8 +16,8 @@
     "last_tick_s": 120,
     "engine": {
       "mode": "on",
-      "state": "idle",
-      "since_s": null,
+      "state": "acting",
+      "since_s": 40,
       "last": {
         "at": 1795615550.4,
         "verb": "tick",

@@ -20,14 +20,21 @@ test("an acting engine shows how long it has acted, counted from the view's age"
     "⏭ acting 35s");
 });
 
-test("a plan or off engine says so, whatever its state", () => {
-  assert.equal(engineLabel({ mode: "plan", state: "idle", since_s: null, last: null }, view, now).text, "engine plan");
-  assert.equal(engineLabel({ mode: "off", state: "off", since_s: null, last: null }, view, now).text, "engine off");
+test("a plan or off engine says so when it is idle", () => {
+  assert.equal(engineLabel({ mode: "plan", state: "idle", since_s: null, last: null }, view, now).text,
+    "engine plan (logs only)");
+  assert.equal(engineLabel({ mode: "off", state: "off", since_s: null, last: null }, view, now).text,
+    "engine off here");
 });
 
-test("a hung engine is red and says how long it has hung", () => {
+test("a plan-mode engine that is acting shows acting, as the TUI and pan.busy do", () => {
+  const label = engineLabel({ mode: "plan", state: "acting", since_s: 40, last: null }, view, now);
+  assert.deepEqual(label, { text: "⏭ acting 45s", tone: "working" });
+});
+
+test("a hung engine is red and says how long it has run", () => {
   const label = engineLabel({ mode: "on", state: "stale", since_s: 600, last: null }, view, now);
-  assert.deepEqual(label, { text: "engine hung? 10m", tone: "blocked" });
+  assert.deepEqual(label, { text: "engine running 10m+ (hung?)", tone: "blocked" });
 });
 
 test("a view with no engine block has no engine label", () => {
