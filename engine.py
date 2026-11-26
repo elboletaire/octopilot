@@ -1305,20 +1305,22 @@ SPENT = Request("spent", (), False, False)
 
 
 def _request_text(message):
-    """An inbox message as the request it carries: the dashboard's `REQUEST `
-    prefix goes. An agent's OCTOPILOT line is parsed as it is."""
-    return message[len("REQUEST "):] if message.startswith("REQUEST ") else message
+    """A REQUEST inbox message as the request it carries: the prefix goes."""
+    return message[len("REQUEST "):]
 
 
 def _next_request(ctx):
     """Pop the first inbox message this drain handles -> its Request. None when
     none is left to handle, SPENT when the budget is gone with one left. Held
-    messages stay where they are, so the rest keep their order."""
+    messages stay where they are, so the rest keep their order. Agent reports
+    are left for the orchestrator (scan.inbox_shown) until layer 4."""
     import scan
     with scan.locked():
         state = scan.load()
         box = state.get("inbox") or []
         for i, m in enumerate(box):
+            if not m["text"].startswith("REQUEST "):
+                continue
             req = parse_request(_request_text(m["text"]))
             # Read per message: a resume earlier in this drain releases the held ones.
             if state.get("paused") and req.verb in HELD_WHILE_PAUSED:
@@ -1372,12 +1374,14 @@ def _plan_inbox(ctx):
     snap = _snapshot()
     lines = []
     for m in state.get("inbox") or []:
+        if not m["text"].startswith("REQUEST "):
+            first = (m["text"].strip().splitlines() or [""])[0][:120]
+            lines.append(f"left for the orchestrator: {first}")
+            continue
         text = _request_text(m["text"])
         req = parse_request(text)
         first = (text.strip().splitlines() or [""])[0][:120]
-        if req.verb == "report":
-            lines.append(f"would drop: {first}")
-        elif state.get("paused") and req.verb in HELD_WHILE_PAUSED:
+        if state.get("paused") and req.verb in HELD_WHILE_PAUSED:
             lines.append(f"held while paused: {first}")
         elif req.verb in ("go", "investigate", "investigate-read-only"):
             lines.append(f"would {_verdict(req, state, snap)}: {first}")

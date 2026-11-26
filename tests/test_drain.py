@@ -52,10 +52,19 @@ class DrainTest(RequestCase):
         self.assertEqual(lines, [f"{PR}: declined", "paused", "resumed",
                                  "unknown request: nonsense here"])
         self.assertEqual(scan.load()["declined"], [PR])
-        self.assertEqual(self.inbox_texts(), [])
+        self.assertEqual(self.inbox_texts(), [f"OCTOPILOT {PR} ready {HEAD} done"])
         self.assertFalse(scan.load()["paused"])
         self.assertLess(self.events().index('"kind": "decline"'),
                         self.events().index('"kind": "pause"'))
+
+    def test_reports_are_left_for_the_orchestrator_while_requests_run(self):
+        self.save({}, inbox=inbox(f"OCTOPILOT {PR} blocked {HEAD} waiting",
+                                  f"REQUEST no {PR}",
+                                  f"OCTOPILOT {ISSUE} failed {HEAD} boom"))
+        self.assertEqual(self.drain(), [f"{PR}: declined"])
+        self.assertEqual(self.inbox_texts(), [
+            f"OCTOPILOT {PR} blocked {HEAD} waiting",
+            f"OCTOPILOT {ISSUE} failed {HEAD} boom"])
 
     def test_a_paused_drain_holds_go_and_investigate_but_runs_no(self):
         self.save({}, paused=True, inbox=inbox(
@@ -117,8 +126,9 @@ class DrainTest(RequestCase):
             f"REQUEST no {PR}", f"OCTOPILOT {PR} ready {HEAD} done"))
         before = scan.load()
         lines = self.drain(mode="plan")
-        self.assertEqual(lines, [f"would handle: no {PR}",
-                                 f"would drop: OCTOPILOT {PR} ready {HEAD} done"])
+        self.assertEqual(lines, [
+            f"would handle: no {PR}",
+            f"left for the orchestrator: OCTOPILOT {PR} ready {HEAD} done"])
         self.assertEqual(scan.load(), before)
         self.assertEqual(self.addresses(), [])
 
