@@ -73,6 +73,15 @@ Before queueing a `go` or an `/investigate`, run `$A wind-down`. If it says
 `$A request "go vocdoni/x#1 (confirmed past wind-down)"`, so the orchestrator
 does not ask again.
 
+Then the cap. Read `active`, `untracked` and `max_active` from snapshot.json
+(the header's `ACTIVE` and `UNTRACKED` against `MAX`; `$A status` does not show
+them). If `active + untracked` is at least `max_active`, ask the same way:
+`⚠ It's at the cap (<n>/<max>) -- start <item> "<title>" anyway? (yes / no)`.
+Only on an explicit yes, append `(confirmed over cap)`, e.g.
+`$A request "go vocdoni/x#1 (confirmed over cap)"`. When both apply, ask once
+with both facts, and append both markers. The snapshot is the last scan, so a
+start since then is not counted: the orchestrator's own check is the real one.
+
 ### Changes to octopilot itself
 
 The "Octopilot (code changes)" tab runs the agent `octopilot-code`,

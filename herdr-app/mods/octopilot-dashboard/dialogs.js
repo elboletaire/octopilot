@@ -1,6 +1,6 @@
-// The two dialogs the mod opens over itself: the kitchen-closed alert, and the
-// investigate form. Both draw from the view's state (main.js owns it and the
-// actions they send).
+// The two dialogs the mod opens over itself: the held-start alert (past
+// wind-down or at the cap), and the investigate form. Both draw from the view's
+// state (main.js owns it and the actions they send).
 
 import { div } from "gpui-kit";
 import { v_flex, h_flex, Input } from "gpui-base";
@@ -10,13 +10,13 @@ export function kitchenDialog(v, t, p) {
   return v_flex().id("kitchen").track_focus(v.handle).on_key_down((e, cx) => v.dialogKey(e, cx))
     .size_full().p(20).gap(12).rounded(14).bg(t.popover).border_1().border_color(t.blocked)
     .child(h_flex().items_center().gap(10)
-      .child(div().text_size(16).font_semibold().text_color(t.blocked).child("🍳 Kitchen closed"))
+      .child(div().text_size(16).font_semibold().text_color(t.blocked).child("🍳 Start held"))
       .child(div().flex_1())
       .child(div().text_size(11).text_color(t.dim).child(`cancels in ${v.left}s`)))
     .child(div().text_size(12.5).text_color(t.foreground).child(p.message || "The kitchen is closed."))
     .when(Boolean(p.key), (el) => el.child(div().px(12).py(9).rounded(10).bg(t.surface)
       .font_semibold().text_size(13).child(p.key)))
-    .child(div().text_size(12).text_color(t.muted).child("Start it anyway, or leave it for tomorrow."))
+    .child(div().text_size(12).text_color(t.muted).child("Start it anyway, or leave it."))
     .child(div().flex_1())
     .child(h_flex().justify_end().gap(8)
       .child(button(t, "kitchen-cancel", "Cancel", { key: "n", on: (_e, cx) => v.dialogClose(cx) }))

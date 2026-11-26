@@ -945,19 +945,25 @@ def _hold(ctx, key, title, reason):
     return f"{key or 'request'} held ({reason}): {title}"
 
 
+def slots_used(state, snap):
+    """The slots the cap counts now: the snapshot's active and untracked, and the
+    items started after it."""
+    # The snapshot cannot count what started after it: those items are added
+    # later than its generated_at (the same second counts as later, to be safe).
+    snap = snap or {}
+    since = int(snap.get("generated_at") or 0)
+    late = sum(1 for it in (state or {}).get("items", {}).values()
+               if int(it.get("added") or 0) >= since)
+    return int(snap.get("active") or 0) + int(snap.get("untracked") or 0) + late
+
+
 def _held(req, state, snap):
     """Why a session may not start now -> "wind-down", "cap" or None. A request
     confirmed past wind-down passes that; one confirmed over the cap passes the cap."""
     import scan
     if scan.wind_down() == "yes" and not req.confirmed:
         return "wind-down"
-    # The snapshot cannot count what started after it: those items are added
-    # later than its generated_at (the same second counts as later, to be safe).
-    since = int(snap.get("generated_at") or 0)
-    late = sum(1 for it in state.get("items", {}).values()
-               if int(it.get("added") or 0) >= since)
-    slots = int(snap.get("active") or 0) + int(snap.get("untracked") or 0) + late
-    if slots >= scan.MAX_ACTIVE and not req.over_cap:
+    if slots_used(state, snap) >= scan.MAX_ACTIVE and not req.over_cap:
         return "cap"
     return None
 

@@ -293,8 +293,9 @@ needs changing is a valid outcome, not a failure.
 
 Respect `ACTIVE n/MAX` in the header. `UNTRACKED n` counts worktree sessions
 already running that octopilot did not start -- they are real load. If
-`ACTIVE + UNTRACKED` is at or above the cap, say so and spawn nothing until the
-user tells you to go ahead anyway.
+`ACTIVE + UNTRACKED` is at or above the cap, say so and spawn nothing unless the
+command ends with `(confirmed over cap)` -- the prompter or the dashboard already
+asked the user.
 queued rather than spawning past it.
 
 ## Pacing
@@ -347,8 +348,8 @@ the `REQUEST` lines are the engine's (`$A drain`), and stay queued for it.
 - Handle `OCTOPILOT` lines with the table below. Handle a `REQUEST` exactly as
   if the user had typed that command to you (`go`, `no`, `re-review`,
   `/investigate`, ...), with the same rules, wind-down included. A trailing
-  `(confirmed past wind-down)` is the user's confirmation, not part of the
-  command: strip it before acting, and never pass it into an investigation's
+  `(confirmed past wind-down)` or `(confirmed over cap)` is the user's
+  confirmation, not part of the command: strip it before acting, and never pass it into an investigation's
   question. The dashboard runs `reset-rounds`, `ack-push`, `detach`, `pause`
   and `resume` itself, so those reach you only as events, never as requests.
 - A `REQUEST /octopilot-code <text>` is for the code-changes agent, not you:

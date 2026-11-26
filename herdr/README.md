@@ -276,7 +276,7 @@ engine acts on the Next tick rows itself and nothing rings the orchestrator.
 | `a` | go to the prompter (the orchestrator if there is none) |
 | `t` | shell in the item's worktree |
 | `o` | PR or issue in the browser, opened on the computer you are at (the mod runs `xdg-open`, `open` or `start`), not on the octopilot's machine; no URL: `dashboard.sh --action browser` |
-| `g` / `n` | on a Pick next row: queue `go <key>` / `no <key>` for the orchestrator (press twice; past `WIND_DOWN_AT` the second press confirms starting anyway) |
+| `g` / `n` | on a Pick next row: queue `go <key>` / `no <key>` for the orchestrator (press twice; past `WIND_DOWN_AT`, or with the slots full (`ACTIVE + UNTRACKED` at `MAX_ACTIVE`), the second press confirms starting anyway, and the alert's `g` sends it with `(confirmed past wind-down)` and/or `(confirmed over cap)`) |
 | `R` | on a CAPPED row: grant another `MAX_REVIEW_ROUNDS` review rounds (press twice) |
 | `e` / `x` | on a PUSHED (stale) row: queue a re-review / ack the new commits (press twice) |
 | `i` | start an investigation: type the repo, the question, and whether it is read-only |

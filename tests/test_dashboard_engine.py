@@ -4,6 +4,7 @@ import contextlib
 import json
 import os
 import tempfile
+import types
 import unittest
 from unittest import mock
 
@@ -55,6 +56,71 @@ class EngineErrorViewTest(unittest.TestCase):
         ev = {"kind": "engine-error", "key": "owner/repo#8",
               "msg": "boot failed: worktree has uncommitted changes"}
         self.assertEqual(dashboard.event_detail(ev), ev["msg"])
+
+
+
+@unittest.skipIf(dashboard is None, "dashboard needs rich")
+class StartHoldsTest(unittest.TestCase):
+    """A go or an investigation started now is held past wind-down and at the cap."""
+
+    def model(self, active, untracked=0, items=None, generated_at=1000):
+        snap = {"active": active, "untracked": untracked, "generated_at": generated_at}
+        state = {"items": items or {}}
+        return types.SimpleNamespace(snap=snap, state=state)
+
+    def setUp(self):
+        env = mock.patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
+        wind = mock.patch.object(dashboard.scan, "wind_down", return_value="no")
+        self.wind = wind.start()
+        self.addCleanup(wind.stop)
+
+    def test_no_hold_below_the_cap(self):
+        self.assertEqual(dashboard.start_holds(self.model(active=5)), [])
+
+    def test_the_cap_holds_with_its_marker(self):
+        cap = dashboard.scan.MAX_ACTIVE
+        [(mark, msg)] = dashboard.start_holds(self.model(active=cap - 1, untracked=1))
+        self.assertEqual(mark, dashboard.engine.CONFIRMED_OVER)
+        self.assertIn(f"{cap}/{cap}", msg)
+
+    def test_untracked_counts_toward_the_cap(self):
+        cap = dashboard.scan.MAX_ACTIVE
+        self.assertEqual(dashboard.start_holds(self.model(active=cap - 2, untracked=1)), [])
+        self.assertEqual(len(dashboard.start_holds(self.model(active=cap - 2, untracked=2))), 1)
+
+    def test_an_item_started_after_the_snapshot_counts(self):
+        cap = dashboard.scan.MAX_ACTIVE
+        items = {"owner/repo#1": {"added": 1000}, "owner/repo#2": {"added": 999}}
+        model = self.model(active=cap - 1, items=items)
+        self.assertEqual(len(dashboard.start_holds(model)), 1)
+
+    def test_wind_down_and_the_cap_both_hold(self):
+        self.wind.return_value = "yes"
+        cap = dashboard.scan.MAX_ACTIVE
+        holds = dashboard.start_holds(self.model(active=cap))
+        self.assertEqual([m for m, _ in holds],
+                         [dashboard.CONFIRMED, dashboard.engine.CONFIRMED_OVER])
+
+    def test_go_over_the_cap_is_held_until_confirmed_and_then_marked(self):
+        cap = dashboard.scan.MAX_ACTIVE
+        model = self.model(active=cap)
+        with mock.patch.object(dashboard, "to_orch", return_value="queued") as queue:
+            held = dashboard.go_orch(model, "owner/repo#3")
+            self.assertTrue(held.kitchen)
+            queue.assert_not_called()
+            dashboard.go_orch(model, "owner/repo#3", confirmed=True)
+        queue.assert_called_once_with("go owner/repo#3 (confirmed over cap)")
+
+    def test_both_holds_send_both_markers_on_one_confirmation(self):
+        self.wind.return_value = "yes"
+        cap = dashboard.scan.MAX_ACTIVE
+        with mock.patch.object(dashboard, "to_orch", return_value="queued") as queue:
+            dashboard.investigate_orch(self.model(active=cap), "owner/repo",
+                                       "why?", False, confirmed=True)
+        queue.assert_called_once_with(
+            "/investigate owner/repo why? (confirmed past wind-down) (confirmed over cap)")
 
 
 if __name__ == "__main__":

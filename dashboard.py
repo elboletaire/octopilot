@@ -48,6 +48,7 @@ DIR = os.path.dirname(os.path.abspath(__file__))
 # how to reach it.
 sys.path.insert(0, DIR)
 import scan  # noqa: E402
+import engine  # noqa: E402
 STATE_FILE = os.environ.get(
     "STATE_FILE", os.path.expanduser("~/.local/state/octopilot/state.json"))
 STATE_DIR = os.path.dirname(STATE_FILE)
@@ -827,6 +828,20 @@ def kitchen_message():
     return f"🍳 The kitchen is closed (past {scan.WIND_DOWN_AT})"
 
 
+def start_holds(model):
+    """What a go or an investigation started now must be confirmed past: a list
+    of (the marker the request ends with, the message). Past wind-down and
+    at the cap (the engine's count, as engine._held makes it) are the two."""
+    holds = []
+    if scan.wind_down() == "yes":
+        holds.append((CONFIRMED, kitchen_message()))
+    used = engine.slots_used(model.state, model.snap)
+    if used >= scan.MAX_ACTIVE:
+        holds.append((engine.CONFIRMED_OVER,
+                      f"⚠ At the cap: {used}/{scan.MAX_ACTIVE} slots in use"))
+    return holds
+
+
 def to_orch(text):
     """Queue a command in the orchestrator's inbox. Typing it into its pane
     would also send whatever the user is half-way through there."""
@@ -837,23 +852,25 @@ def to_orch(text):
     return Result(False, f"queue failed: {(err or out)[:100]}")
 
 
-def go_orch(key, confirmed=False):
-    """`go KEY`. Past wind-down it needs confirmed: the kitchen-closed alert's
-    second press."""
-    if scan.wind_down() != "yes":
+def go_orch(model, key, confirmed=False):
+    """`go KEY`. Past wind-down or at the cap it needs confirmed: the second
+    press of the held-start alert."""
+    holds = start_holds(model)
+    if not holds:
         return to_orch(f"go {key}")
     if not confirmed:
-        return Result(False, kitchen_message(), kitchen=True)
-    return to_orch(f"go {key} {CONFIRMED}")
+        return Result(False, "\n".join(msg for _, msg in holds), kitchen=True)
+    return to_orch(f"go {key} " + " ".join(mark for mark, _ in holds))
 
 
-def investigate_orch(repo, question, read_only, confirmed=False):
-    """`/investigate`, which past wind-down needs confirmed like go_orch."""
+def investigate_orch(model, repo, question, read_only, confirmed=False):
+    """`/investigate`, which a hold needs confirmed like go_orch."""
     cmd = f"/investigate {'--read-only ' if read_only else ''}{repo} {question}"
-    if scan.wind_down() == "yes":
+    holds = start_holds(model)
+    if holds:
         if not confirmed:
-            return Result(False, kitchen_message(), kitchen=True)
-        cmd += f" {CONFIRMED}"
+            return Result(False, "\n".join(msg for _, msg in holds), kitchen=True)
+        cmd += "".join(f" {mark}" for mark, _ in holds)
     return to_orch(cmd)
 
 
@@ -1037,9 +1054,10 @@ def row_confirm(model, aid, e):
     key = e["key"]
     it = tracked_item(model, key) or {}
     if aid == "go":
-        if scan.wind_down() == "yes":
-            return f"🍳 kitchen closed -- press g again to start {key} anyway"
-        return f"press g again to send 'go {key}' to the orchestrator"
+        if not start_holds(model):
+            return f"press g again to send 'go {key}' to the orchestrator"
+        why = "🍳 kitchen closed" if scan.wind_down() == "yes" else "⚠ at the cap"
+        return f"{why} -- press g again to start {key} anyway"
     if aid == "no":
         return f"press n again to send 'no {key}' to the orchestrator"
     if aid == "grant":
@@ -1067,8 +1085,8 @@ def row_confirm(model, aid, e):
 
 def perform(model, aid, e, confirmed=False, suspend=None):
     """Run the row action aid on e; the caller has checked row_refusal().
-    `confirmed` lets go past wind-down through. `suspend` runs a shell in the
-    dashboard's own terminal when no popup can."""
+    `confirmed` lets go past its holds (wind-down, the cap) through. `suspend`
+    runs a shell in the dashboard's own terminal when no popup can."""
     key = e["key"]
     if aid == "focus":
         return focus_row(model, e)
@@ -1079,7 +1097,7 @@ def perform(model, aid, e, confirmed=False, suspend=None):
     if aid == "browser":
         return browse_row(e)
     if aid == "go":
-        return go_orch(key, confirmed)
+        return go_orch(model, key, confirmed)
     if aid == "no":
         return to_orch(f"no {key}")
     if aid == "grant":
@@ -1432,7 +1450,8 @@ def run_action(model, aid, key, args):
         question = args.get("question", "").strip()
         if not (repo and question):
             return Result(False, "investigate needs a repo and a question")
-        return investigate_orch(repo, question, truthy(args.get("read_only")),
+        return investigate_orch(model, repo, question,
+                                truthy(args.get("read_only")),
                                 truthy(args.get("confirmed")))
     if aid == "prompter":
         return open_prompter(model)
@@ -1533,15 +1552,14 @@ class Dashboard:
 
     def kitchen(self):
         """The kitchen-closed alert, alone and centered on the screen."""
-        key, title, _ = self.alert
+        key, title, _, message = self.alert
         body = Text(justify="center")
-        body.append(f"🍳 The kitchen is closed (past {scan.WIND_DOWN_AT})\n\n",
-                    style="bold red")
+        body.append(f"{message}\n\n", style="bold red")
         body.append(f"{key}\n", style="bold")
         body.append(f"{title or ''}\n\n")
         body.append("Press g to start it anyway", style="bold yellow")
         body.append(" · any other key cancels", style="dim")
-        panel = Panel(body, title="🍳 Kitchen closed", border_style="bold red",
+        panel = Panel(body, title="🍳 Start held", border_style="bold red",
                       box=box.DOUBLE, padding=(1, 4), expand=False)
         return Align.center(panel, vertical="middle",
                             height=self.console.height)
@@ -1930,7 +1948,8 @@ class Dashboard:
         res = perform(self.m, aid, e, suspend=lambda cmd: term.suspend(
             live, cmd, cwd=e["path"]))
         if res.kitchen:
-            self.alert = (e["key"], e["title"], time.time() + KITCHEN_SECS)
+            self.alert = (e["key"], e["title"], time.time() + KITCHEN_SECS,
+                          res.message)
         else:
             self.report(res)
 
@@ -1942,7 +1961,7 @@ class Dashboard:
             # Only g gets through the alert; anything else (q too) cancels.
             k, self.alert = self.alert[0], None
             if key == "g":
-                self.report(go_orch(k, confirmed=True))
+                self.report(go_orch(self.m, k, confirmed=True))
             else:
                 self.say("start cancelled")
             return True
@@ -2015,14 +2034,15 @@ class Dashboard:
         ro = term.read_line(live, "Read-only (a report, no commits or PR)? "
                             "[y/N] ")
         read_only = ro.lower() in ("y", "yes")
-        res = investigate_orch(repo, question, read_only)
+        res = investigate_orch(self.m, repo, question, read_only)
         if res.kitchen:
-            ok = term.read_line(live, f"🌇 Past {scan.WIND_DOWN_AT} -- start it "
-                                "anyway? [y/N] ")
+            held = " · ".join(res.message.splitlines())
+            ok = term.read_line(live, f"{held} -- start it anyway? [y/N] ")
             if ok.lower() not in ("y", "yes"):
-                self.say("investigation not started (wind-down)")
+                self.say("investigation not started (held)")
                 return
-            res = investigate_orch(repo, question, read_only, confirmed=True)
+            res = investigate_orch(self.m, repo, question, read_only,
+                                   confirmed=True)
         self.report(res)
 
 

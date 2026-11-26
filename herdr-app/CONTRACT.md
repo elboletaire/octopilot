@@ -132,7 +132,12 @@ filtering uses `hidden`/`open` fields).
 Runs the same code path as the TUI key (refusals, messages, wind-down rules). Prints one JSON line:
 `{"ok": true, "message": "queued for the orchestrator: go …"}`.
 `go` past wind-down without `--arg confirmed=1` returns `{"ok": false, "kitchen": true, "message": "🍳 The kitchen is closed (past 16:00)"}`;
-the mod shows the kitchen-closed dialog and re-sends with `confirmed=1`. Same for `investigate`.
+the mod shows the held-start dialog ("Start held") and re-sends with `confirmed=1`. Same for `investigate`.
+At the cap (slots in use, as the header counts them, plus items started since the snapshot, `>= MAX_ACTIVE`) a go or
+investigate gets the same answer with `"message": "⚠ At the cap: 6/6 slots in use"`; both holds at once give both
+lines in one message (joined by `\n`). One `confirmed=1` sends the request with each marker
+(`(confirmed past wind-down)`, `(confirmed over cap)`) the holds need. `kitchen` means "held, needs a second press"
+for either hold.
 `refresh` kicks the headless daemon (it must start a GitHub refresh within a second); with no daemon running
 (view.json older than 15 s) it returns `{"ok": false, "message": "no headless dashboard running"}`.
 Every call prints exactly one JSON line and exits 0, usage errors included. A row action on a row whose
