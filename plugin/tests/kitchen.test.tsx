@@ -53,10 +53,10 @@ test('/takoyaki opens the kitchen above the prompt', async ($, on) => {
   await closed.unmount()
 })
 
-test('/octopilot:messenger opens the kitchen on its own', async ($, on) => {
+test('/octopilot:prompter opens the kitchen on its own', async ($, on) => {
   on('ui.render', engineBand)
   on('command.run', () => ({ text: '' }))
-  await $.command.run({ ...TAKOYAKI, command: 'octopilot:messenger' })
+  await $.command.run({ ...TAKOYAKI, command: 'octopilot:prompter' })
   const ui = await $.ui.mount({ plugin: 'octopilot', surface: 'terminal', ...BAND })
   expect(await ui.find({ type: 'Raster', key: 'kitchen' })).toBeDefined()
   await ui.unmount()

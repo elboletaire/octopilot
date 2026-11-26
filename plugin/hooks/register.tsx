@@ -7,7 +7,7 @@ import type { OctopilotEvent, Kitchen, Reaction } from './feed'
 import { COLUMNS, PALETTE, ROWS, encode, holeX, paint, step } from './scene'
 import type { Mood, Particle, Scene } from './scene'
 
-const ORCH_AGENT = 'octopilot' // scan.py's ORCH_AGENT
+const PROMPTER_AGENT = 'octopilot-prompter' // scan.py's PROMPTER_AGENT
 const RASTER = 'kitchen'
 const FRAME_MS = 100
 const POLL_MS = 1000
@@ -241,13 +241,13 @@ async function activate($: EngineInterface, isOn: boolean) {
   }
 }
 
-// The orchestrator is the herdr TUI agent named ORCH_AGENT, or, in the Herdr
-// app, the hc terminal labelled octopilot.agent=<ORCH_AGENT>.
-async function isOrchestrator($: EngineInterface) {
-  return (await isTuiOrchestrator($)) || (await isGuiOrchestrator($))
+// The prompter is the herdr TUI agent named PROMPTER_AGENT, or, in the Herdr
+// app, the hc terminal labelled octopilot.agent=<PROMPTER_AGENT>.
+async function isPrompter($: EngineInterface) {
+  return (await isTuiPrompter($)) || (await isGuiPrompter($))
 }
 
-async function isGuiOrchestrator($: EngineInterface) {
+async function isGuiPrompter($: EngineInterface) {
   const terminal = await $.env.get('HC_TERMINAL_ID')
   if (!terminal) return false
   const got = await $.process
@@ -256,13 +256,13 @@ async function isGuiOrchestrator($: EngineInterface) {
   if (!got || got.exitCode !== 0) return false
   try {
     const data = JSON.parse(got.stdout) as { labels?: Record<string, string> }
-    return data.labels?.['octopilot.agent'] === ORCH_AGENT
+    return data.labels?.['octopilot.agent'] === PROMPTER_AGENT
   } catch {
     return false
   }
 }
 
-async function isTuiOrchestrator($: EngineInterface) {
+async function isTuiPrompter($: EngineInterface) {
   const pane = await $.env.get('HERDR_PANE_ID')
   if (!pane) return false
   const got = await $.process
@@ -271,15 +271,15 @@ async function isTuiOrchestrator($: EngineInterface) {
   if (!got || got.exitCode !== 0) return false
   try {
     const data = JSON.parse(got.stdout) as { result?: { agent?: { name?: string } } }
-    return data.result?.agent?.name === ORCH_AGENT
+    return data.result?.agent?.name === PROMPTER_AGENT
   } catch {
     return false
   }
 }
 
-async function detectOrchestrator($: EngineInterface) {
+async function detectPrompter($: EngineInterface) {
   for (let i = 0; i < DETECT_TRIES && !k.active; i++) {
-    if (await isOrchestrator($)) return activate($, true)
+    if (await isPrompter($)) return activate($, true)
     await $.clock.sleep(DETECT_MS)
   }
 }
@@ -308,7 +308,7 @@ export const register: Register = on => {
 
     // A reload keeps the session's state: pick the kitchen up where it was.
     if (await read($, isActive)) await activate($, true)
-    else void detectOrchestrator($)
+    else void detectPrompter($)
 
     return next(e)
   })
@@ -333,17 +333,8 @@ export const register: Register = on => {
     return { text: isOn ? 'Takoyaki kitchen open.' : 'Takoyaki kitchen closed.' }
   })
 
-  // The orchestrator's own scan is the surest sign this session drives octopilot.
-  on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
-    // The skill calls it as `$A <cmd>` with A=.../scan.sh, so accept both spellings.
-    if (!k.active && /(octopilot\/scan\.sh|\$A)"?\s+(scan|inbox|doorbell|pause|resume)\b/.test(e.command)) {
-      await activate($, true)
-    }
-    return next(e)
-  })
-
   // Slash commands run through command.run, never prompt.submit.
-  on('command.run', { command: 'octopilot:messenger' }, async ($, e, next) => {
+  on('command.run', { command: 'octopilot:prompter' }, async ($, e, next) => {
     if (!k.active) await activate($, true)
     return next(e)
   })
