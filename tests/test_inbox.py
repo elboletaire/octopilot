@@ -1,4 +1,4 @@
-"""The orchestrator's `inbox` lists the queued requests and never clears them:
+"""`scan.py inbox` lists the queued requests and never clears them:
 the engine's drain takes them. A report is logged, not queued."""
 import contextlib
 import io
