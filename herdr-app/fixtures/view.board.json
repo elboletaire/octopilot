@@ -92,7 +92,7 @@
               "id": "remove",
               "key": "Delete",
               "label": "remove",
-              "confirm": "⚠ its agent is working -- remove widgets#452? (workspace and worktree deleted, untracked)"
+              "confirm": "⚠ its agent is working -- press del (⌫) again to remove widgets#452 (workspace and worktree deleted, untracked)"
             }
           ],
           "driver": "agent"

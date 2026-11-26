@@ -166,8 +166,8 @@ terminal: `hc get <t> --json` gives `foreground.pid` (when `foreground.name` is
 `~/.claude/projects/*/<sessionId>.jsonl`. A `/clear` starts a new session, so this
 follows it; the `octopilot.session` label is only the fallback when no claude is in
 the foreground (a live session with no transcript yet gives none, not the stale
-label). There is no guess from the terminal's folder (the prompter and the code
-agent share one). The chat reports the session it read; with `--after`, a session
+label). There is no guess from the terminal's folder (other claude sessions, the
+user's own included, may run in the prompter's folder). The chat reports the session it read; with `--after`, a session
 that changed (unknown anchor, or no transcript yet) answers `"reset": true`.
 
 - `scan.sh speech --json` → `{"agent": "hc:t7", "terminal": "t7", "status": "working|blocked|idle|offline",

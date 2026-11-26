@@ -55,7 +55,8 @@ git worktree add --no-track -b feat/x .worktrees/feat-x origin/main
   aliases of `tick`.
 - `engine.py`: the engine, run by `scan.py tick` (the rows: MERGED, RESTACK, REVIEW,
   BOOTING, FEEDBACK) and `scan.py drain` (the queued requests and sends). Behind
-  `OCTOPILOT_ENGINE` (`on`, `plan` or `off`).
+  `OCTOPILOT_ENGINE` (`on` by default; `plan` logs the row actions without acting; `off`
+  acts on nothing).
 - `naming.py`: the branch and session-title names for a spawn, by heuristic.
 - `tests/`: the unit tests. `fake.py` fakes GitHub, herdr and git for them; `frame.sh`
   prints the TUI frame for the visual checks.
@@ -77,7 +78,7 @@ git worktree add --no-track -b feat/x .worktrees/feat-x origin/main
 
 ## Testing safely
 
-- **`OCTOPILOT_ENGINE=on` (or `plan`) acts on what the scratch state holds.** A
+- **`OCTOPILOT_ENGINE=on` acts on what the scratch state holds.** A
   scratch state that carries real sessions makes `on` clean up real worktrees
   and send real prompts. Use fakes (`tests/fake.py`) or an empty state.
 - **Never test against the live state.** `~/.local/state/octopilot` is the

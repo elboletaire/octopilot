@@ -257,6 +257,25 @@ neither, so they run the live scan.sh and plugin.
 
 Close the test space with `herdr-app do space.close --id <space> --confirmed true`.
 
+## Upgrading from the orchestrator
+
+The engine replaces the messenger (the `octopilot` agent). Before switching, clear
+the old requests: `scan.sh inbox` lists them, and the engine runs them on its first
+drain. Either let them run, or remove the stale `REQUEST` entries from the `inbox`
+list of `state.json` while the dashboards are stopped (there is no command for that).
+To stage the switch, run with `OCTOPILOT_ENGINE=plan` first: it logs what the engine
+would do, and `scan.py drain --plan` shows what a drain would do with each request.
+Set `on` once that looks right.
+
+- **GUI**: run Open Octopilot (or `herdr/open-gui.sh`). It retires this checkout's
+  orchestrator and restarts the headless. Then `/clear` the prompter and run
+  `/octopilot:prompter`, and reload the mods (or restart herdr-app) so the new mod
+  code reads `view.json`.
+- **TUI**: close the old `octopilot` pane (the messenger). Restart the dashboard pane:
+  `q`, then reopen it (`prefix+a`). The curses dashboard is the engine's host and keeps
+  running the old code until it is restarted. Then `/clear` the prompter and run
+  `/octopilot:prompter` in it.
+
 ## What it shows
 
 | Section | Rows |
@@ -273,10 +292,12 @@ they are written, and GitHub (PR state, CI) every `DASHBOARD_REFRESH_SECS`
 dashboards share one refresh. GitHub notifications are polled every 60s
 (`NOTIFY_POLL_SECS`) and trigger an early refresh. Each GitHub pass runs `scan.py tick`
 (`snapshot`, which saves nothing, where the engine may not run), and the engine acts on
-the Next tick rows itself. `OCTOPILOT_ENGINE` picks what it does: `on` (the default)
-acts, `plan` only logs what it would do, and `off` acts on nothing, leaving requests
-queued. The dashboard runs `scan.py drain` at once on each request it sees, and at
-least every 60s (`DRAIN_EVERY`). The `g`/`n`/`i` keys and the prompter's commands are
+the Next tick rows itself. `OCTOPILOT_ENGINE` picks what it does: `on` (the default,
+set in config.sh) acts; `plan` logs the tick's row actions as "would ..." without acting,
+and `off` acts on nothing. The dashboard drains the inbox only under `on`, so under
+`plan` and `off` requests wait there (`scan.py drain --plan` prints what a drain would
+do). Under `on`, the dashboard runs `scan.py drain` at once on each request it sees, and
+at least every 60s (`DRAIN_EVERY`). The `g`/`n`/`i` keys and the prompter's commands are
 requests, queued for the engine.
 
 ## Keys
@@ -295,7 +316,7 @@ requests, queued for the engine.
 | `i` | start an investigation: type the repo, the question, and whether it is read-only. Past `WIND_DOWN_AT` or with the slots full, the second press confirms starting anyway, as for `g` |
 | `P` | pause / resume octopilot (press twice) |
 | `z` | detach a tracked item: closes its workspace, keeps the worktree, stops tracking it (press twice) |
-| `del` / `⌫` | remove a tracked item: deletes its workspace and worktree, stops tracking it (press twice). Not on MERGED rows: the engine cleans those up |
+| `del` / `⌫` | remove a tracked item: deletes its workspace and worktree, stops tracking it (press twice). Refused on MERGED and RESTACK rows: the engine handles those |
 | `r` | refresh from GitHub now |
 | `d` | on a tracked card: move it to Done / back (press twice). It keeps its workspace and holds no slot; the engine still merges and cleans up |
 | `D` | show / hide done rows (DONE, GONE) |

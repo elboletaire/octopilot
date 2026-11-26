@@ -98,7 +98,7 @@
               "id": "remove",
               "key": "Delete",
               "label": "remove",
-              "confirm": "press del again to remove acme/widgets#120 (workspace and worktree deleted, untracked)"
+              "confirm": "press del (⌫) again to remove acme/widgets#120 (workspace and worktree deleted, untracked)"
             }
           ],
           "driver": "agent"
@@ -154,7 +154,7 @@
               "id": "remove",
               "key": "Delete",
               "label": "remove",
-              "confirm": "press del again to remove acme/sprockets#31 (workspace and worktree deleted, untracked)"
+              "confirm": "press del (⌫) again to remove acme/sprockets#31 (workspace and worktree deleted, untracked)"
             }
           ],
           "driver": "agent"
@@ -222,7 +222,7 @@
               "id": "remove",
               "key": "Delete",
               "label": "remove",
-              "confirm": "press del again to remove acme/gizmo-sdk#14 (workspace and worktree deleted, untracked)"
+              "confirm": "press del (⌫) again to remove acme/gizmo-sdk#14 (workspace and worktree deleted, untracked)"
             }
           ],
           "driver": "orchestrator"
@@ -290,7 +290,7 @@
               "id": "remove",
               "key": "Delete",
               "label": "remove",
-              "confirm": "press del again to remove acme/explorer#45 (workspace and worktree deleted, untracked)"
+              "confirm": "press del (⌫) again to remove acme/explorer#45 (workspace and worktree deleted, untracked)"
             }
           ],
           "driver": "orchestrator"
@@ -364,7 +364,7 @@
               "id": "remove",
               "key": "Delete",
               "label": "remove",
-              "confirm": "press del again to remove acme/widgets#2018 (workspace and worktree deleted, untracked)"
+              "confirm": "press del (⌫) again to remove acme/widgets#2018 (workspace and worktree deleted, untracked)"
             }
           ],
           "driver": "orchestrator"
@@ -432,7 +432,7 @@
               "id": "remove",
               "key": "Delete",
               "label": "remove",
-              "confirm": "press del again to remove acme/site#286 (workspace and worktree deleted, untracked)"
+              "confirm": "press del (⌫) again to remove acme/site#286 (workspace and worktree deleted, untracked)"
             }
           ],
           "driver": "orchestrator"
@@ -506,7 +506,7 @@
               "id": "remove",
               "key": "Delete",
               "label": "remove",
-              "confirm": "press del again to remove acme/ledger#90 (workspace and worktree deleted, untracked)"
+              "confirm": "press del (⌫) again to remove acme/ledger#90 (workspace and worktree deleted, untracked)"
             }
           ],
           "driver": "agent"
@@ -580,7 +580,7 @@
               "id": "remove",
               "key": "Delete",
               "label": "remove",
-              "confirm": "press del again to remove acme/auth#7 (workspace and worktree deleted, untracked)"
+              "confirm": "press del (⌫) again to remove acme/auth#7 (workspace and worktree deleted, untracked)"
             }
           ],
           "driver": "agent"
@@ -636,13 +636,13 @@
               "id": "rereview",
               "key": "e",
               "label": "re-review",
-              "confirm": "press e again to queue a re-review of acme/gizmo-client#1172"
+              "confirm": "press e again to ask for a re-review of acme/gizmo-client#1172"
             },
             {
               "id": "ack",
               "key": "x",
               "label": "ack",
-              "confirm": "press x again to acknowledge the new commits on acme/gizmo-client#1172"
+              "confirm": "press x again to ack the new commits on acme/gizmo-client#1172"
             },
             {
               "id": "detach",
@@ -660,7 +660,7 @@
               "id": "remove",
               "key": "Delete",
               "label": "remove",
-              "confirm": "press del again to remove acme/gizmo-client#1172 (workspace and worktree deleted, untracked)"
+              "confirm": "press del (⌫) again to remove acme/gizmo-client#1172 (workspace and worktree deleted, untracked)"
             }
           ],
           "driver": "agent"
@@ -734,7 +734,7 @@
               "id": "remove",
               "key": "Delete",
               "label": "remove",
-              "confirm": "press del again to remove acme/ledger#74 (workspace and worktree deleted, untracked)"
+              "confirm": "press del (⌫) again to remove acme/ledger#74 (workspace and worktree deleted, untracked)"
             }
           ],
           "driver": "agent"
@@ -796,13 +796,13 @@
               "id": "park",
               "key": "d",
               "label": "back",
-              "confirm": "press d again to move acme/ledger#88 back to the board"
+              "confirm": "press d again to move acme/ledger#88 out of Done"
             },
             {
               "id": "remove",
               "key": "Delete",
               "label": "remove",
-              "confirm": "press del again to remove acme/ledger#88 (workspace and worktree deleted, untracked)"
+              "confirm": "press del (⌫) again to remove acme/ledger#88 (workspace and worktree deleted, untracked)"
             }
           ],
           "driver": "agent"
@@ -870,7 +870,7 @@
               "id": "remove",
               "key": "Delete",
               "label": "remove",
-              "confirm": "press del again to remove acme/widgets#2024 (workspace and worktree deleted, untracked)"
+              "confirm": "press del (⌫) again to remove acme/widgets#2024 (workspace and worktree deleted, untracked)"
             }
           ],
           "driver": "agent"
@@ -926,7 +926,7 @@
               "id": "remove",
               "key": "Delete",
               "label": "remove",
-              "confirm": "press del again to remove acme/gizmo-client#1160 (workspace and worktree deleted, untracked)"
+              "confirm": "press del (⌫) again to remove acme/gizmo-client#1160 (workspace and worktree deleted, untracked)"
             }
           ],
           "driver": null
