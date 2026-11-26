@@ -604,33 +604,51 @@ class HcBackend:
         code, _, raw = hc(["wait", target, "--timeout", "60"], timeout=90)
         return code, raw
 
-    def focus(self, session, target, timeout=60):
-        code, _, raw = app_do("space.select", ["--id", session], timeout=timeout)
-        if code == 0:
-            code, _, raw = app_do("agent.focus", ["--terminal", target],
-                                  timeout=timeout)
+    def focus(self, session, target=None, timeout=60):
+        """Show the session's space, then its tab, then the target agent."""
+        steps = [("space.select", ["--id", session])]
+        if is_tab(session):
+            spaces = self.spaces()
+            if spaces is None:
+                return False, "herdr-app did not answer"
+            space = next((sp["id"] for sp in spaces for t in sp.get("tabs", [])
+                          if t.get("id") == session), None)
+            if space is None:
+                return False, f"{session} is not open in herdr-app"
+            steps = [("space.select", ["--id", space]),
+                     ("tab.select", ["--id", session])]
+        if target:
+            steps.append(("agent.focus", ["--terminal", target]))
+        code, raw = 0, ""
+        for command, args in steps:
+            code, _, raw = app_do(command, args, timeout=timeout)
+            if code != 0:
+                break
         return code == 0, raw
 
     def rename(self, entry, name):
         return hc(["label", entry["pane"], f"octopilot.agent={name}"])[0] == 0
 
     def close(self, session):
-        code, _, raw = app_do("space.close", ["--id", session, "--confirmed", "true"])
+        """Close the session's tab, or its space."""
+        command = "tab.close" if is_tab(session) else "space.close"
+        code, _, raw = app_do(command, ["--id", session, "--confirmed", "true"])
         return code, raw
 
     def discard(self, session, wt):
-        """Close the space, then remove its worktree -> (code, message). A
+        """Close the space or tab, then remove its worktree -> (code, message). A
         tracked item has none on record: its space's worktree stands in, and
         when the space list is unreadable the worktree is kept."""
         spaces = self.spaces()
         if not wt:
             wt = self.checkout_of(spaces, session)
         code, raw = self.close(session)
-        if code != 0:
+        # A closed tab is checked against the list too, whatever close said.
+        if code != 0 or is_tab(session):
             remaining = self.spaces()
-            if remaining is None or any(s.get("id") == session for s in remaining):
+            if remaining is None or session in open_ids(remaining):
                 # Still open, or unknown: its worktree is still in use.
-                return code, raw
+                return code or 1, raw or "still open: its worktree is kept"
             code, raw = 0, ""
         if not wt and spaces is None:
             spaces = self.spaces()
