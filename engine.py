@@ -167,7 +167,6 @@ class Ctx:
     merging: frozenset = frozenset()  # keys whose cleanup is planned this run
     restacked: set = field(default_factory=set)  # identities already covered
     need_tick: bool = False  # a `tick` request: left to the next scheduled tick
-    spawned: int = 0         # sessions this run started, counted against the cap
 
 
 def _over_budget(ctx):
@@ -947,14 +946,18 @@ def _hold(ctx, key, title, reason):
     return f"{key or 'request'} held ({reason}): {title}"
 
 
-def _held(req, snap, ctx):
+def _held(req, state, snap):
     """Why a session may not start now -> "wind-down", "cap" or None. A request
     confirmed past wind-down passes that; one confirmed over the cap passes the cap."""
     import scan
     if scan.wind_down() == "yes" and not req.confirmed:
         return "wind-down"
-    slots = (int(snap.get("active") or 0) + int(snap.get("untracked") or 0)
-             + ctx.spawned)
+    # The snapshot cannot count what started after it: those items are added
+    # later than its generated_at (the same second counts as later, to be safe).
+    since = int(snap.get("generated_at") or 0)
+    late = sum(1 for it in state.get("items", {}).values()
+               if int(it.get("added") or 0) >= since)
+    slots = int(snap.get("active") or 0) + int(snap.get("untracked") or 0) + late
     if slots >= scan.MAX_ACTIVE and not req.over_cap:
         return "cap"
     return None
@@ -1024,7 +1027,7 @@ def do_go(req, ctx):
     if slug not in state.get("registry", {}):
         return _refuse(ctx, "go", key, f"{slug} has no local clone under CLONE_ROOTS: "
                        "clone it first", title=title)
-    held = _held(req, snap, ctx)
+    held = _held(req, state, snap)
     if held:
         return _hold(ctx, key, title, held)
 
@@ -1057,12 +1060,14 @@ def do_go(req, ctx):
         tracked = _tracked(state, start)
         if tracked:
             return _refuse(ctx, "go", start, f"already tracked as {tracked}", title=title)
+        held = _held(req, state, snap)
+        if held:
+            return _hold(ctx, start, title, held)
         try:
             r = scan.spawn_item(state, start, branch, title, kind == "issue",
                                 stack_spec=stack_spec)
         except (Exception, SystemExit) as exc:
             return _refuse(ctx, "go", start, f"spawn failed: {exc}", title=title)
-        ctx.spawned += 1
         return _first_prompt(state, ctx, start, r, branch, slug, num, title,
                              layers, kind == "issue")
 
@@ -1117,12 +1122,16 @@ def do_investigate(req, ctx):
     if err:
         return _refuse(ctx, req.verb, None, err)
     title = question.split("\n", 1)[0][:60]
-    held = _held(req, _snapshot(), ctx)
+    snap = _snapshot()
+    held = _held(req, state, snap)
     if held:
         return _hold(ctx, None, title, held)
     read_only = req.verb == "investigate-read-only"
     with scan.locked():
         state = scan.load()
+        held = _held(req, state, snap)
+        if held:
+            return _hold(ctx, None, title, held)
         name, branch, title = naming.pick_investigation(
             question, read_only, state["registry"][slug]["path"], slug,
             taken_keys=list(state.get("items", {})),
@@ -1133,7 +1142,6 @@ def do_investigate(req, ctx):
                                 read_only=read_only)
         except (Exception, SystemExit) as exc:
             return _refuse(ctx, req.verb, key, f"spawn failed: {exc}", title=title)
-        ctx.spawned += 1
         ctx.log("investigate", key, title=title, template=r["template"])
         return _send_in(state, ctx, key, r["template"],
                         {"KEY": key, "REPO": slug, "BASE": r["base"]}, "go")

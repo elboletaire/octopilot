@@ -2,6 +2,7 @@
 engine would have sent. GitHub, herdr and git are faked (tests/stand.py); the
 prompts are rendered from the real templates and sent through the real
 send_item, to a fake send_to."""
+import time
 import unittest
 from unittest import mock
 
@@ -125,6 +126,23 @@ class GoTest(RequestCase):
             self.assertIn("held (cap)", out)
             self.handle(f"go {ISSUE} (confirmed over cap)")
         self.assertEqual(len(self.spawns()), 1)
+
+    def test_a_start_after_the_snapshot_counts_against_the_cap(self):
+        # Two starts in two drains, on one snapshot taken a minute earlier: the
+        # second is over the cap even though the snapshot still shows one slot.
+        self.snapshot(active=scan.MAX_ACTIVE - 1, generated_at=int(time.time()) - 60)
+        with mock.patch.object(scan, "wind_down", return_value=None):
+            self.assertNotIn("held", self.handle(f"go {ISSUE}"))
+            self.assertIn("held (cap)", self.handle(f"go {PR}"))
+        self.assertEqual(len(self.spawns()), 1)
+
+    def test_an_item_the_snapshot_already_counted_is_not_counted_twice(self):
+        now = int(time.time())
+        self.save({f"{REPO}#99": {"mode": "fix", "branch": "feat/z", "session": "w1",
+                                  "phase": "working", "pr": 99, "added": now - 1000}})
+        self.snapshot(active=scan.MAX_ACTIVE - 1, generated_at=now)
+        with mock.patch.object(scan, "wind_down", return_value=None):
+            self.assertNotIn("held", self.handle(f"go {ISSUE}"))
 
     def test_untracked_sessions_count_against_the_cap(self):
         self.snapshot(active=scan.MAX_ACTIVE - 1, untracked=1)

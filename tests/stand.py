@@ -125,10 +125,10 @@ class RequestCase(unittest.TestCase):
         state.update(extra)
         scan.save(state)
 
-    def snapshot(self, active=0, untracked=0, rows=()):
+    def snapshot(self, active=0, untracked=0, rows=(), generated_at=0):
         with open(scan.SNAPSHOT_FILE, "w") as fh:
-            json.dump({"active": active, "untracked": untracked,
-                       "rows": list(rows)}, fh)
+            json.dump({"active": active, "untracked": untracked, "rows": list(rows),
+                       "generated_at": generated_at}, fh)
 
     def handle(self, text):
         """The outcome line of one request, as the drain would produce it."""
