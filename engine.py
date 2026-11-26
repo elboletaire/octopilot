@@ -1164,12 +1164,14 @@ def do_investigate(req, ctx):
 
 def _target_of(req, ctx):
     """The item key a one-target request names -> (key, None), or (None, the
-    refusal line) when the target is unknown or ambiguous."""
+    refusal line) when the target is unknown or ambiguous. A stack layer names
+    its stack's item."""
     import scan
-    key, err = resolve_target(req.args[0], scan.load(), _snapshot().get("rows", []))
+    state = scan.load()
+    key, err = resolve_target(req.args[0], state, _snapshot().get("rows", []))
     if err:
         return None, _refuse(ctx, req.verb, None, err)
-    return key, None
+    return _tracked(state, key) or key, None
 
 
 def do_no(req, ctx):
