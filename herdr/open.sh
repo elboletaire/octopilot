@@ -36,6 +36,23 @@ add_prompter() {
   start_prompter "$pane"
 }
 
+# Put the prompter in the left column beside the dashboard: split the dashboard
+# right, then swap the two so the prompter takes the dashboard's old place.
+add_prompter_left() {
+  local split pane
+  split=$("$H" pane split "$1" --direction right --focus)
+  pane=$(jq -r '.result.pane.pane_id // .result.pane_id' <<<"$split")
+  "$H" pane swap --source-pane "$pane" --target-pane "$1" >/dev/null
+  start_prompter "$pane"
+}
+
+# Print a note, and raise it as a herdr notification: a plugin action's output
+# is not shown to anyone.
+note() {
+  echo "$1"
+  "$H" notification show "$LABEL" --body "$1" >/dev/null 2>&1 || true
+}
+
 # The code-changes tab, unless the workspace has one; a claude starts in it.
 add_code_tab() {
   local tabs created pane
@@ -67,7 +84,7 @@ agent_pane() {
 # The dashboard's pane in workspace $ws, or the workspace's first pane.
 dashboard_pane() {
   "$H" pane list --workspace "$ws" | jq -r --arg t "$DASHBOARD_TITLE" \
-    '(first(.result.panes[] | select(.title == $t)) // .result.panes[0]).pane_id'
+    '(first(.result.panes[] | select(.title == $t or .label == $t)) // .result.panes[0]).pane_id'
 }
 
 ws=$("$H" workspace list | jq -r --arg l "$LABEL" \
@@ -79,22 +96,25 @@ if [ -n "$ws" ]; then
     name_main_tab "$prompter_pane"
   elif ! "$H" agent get "$PROMPTER_AGENT" >/dev/null 2>&1; then
     # No prompter anywhere: split it from the retired agent's pane if one runs
-    # here, else from the dashboard.
+    # here (below it, the left column), else beside the dashboard.
     anchor=$(agent_pane "$RETIRED_AGENT")
-    [ -n "$anchor" ] || anchor=$(dashboard_pane)
-    add_prompter "$anchor"
+    if [ -n "$anchor" ]; then
+      add_prompter "$anchor"
+    else
+      add_prompter_left "$(dashboard_pane)"
+    fi
   fi
   if [ -n "$(agent_pane "$RETIRED_AGENT")" ]; then
-    echo "Octopilot: a retired 'octopilot' agent still runs in this workspace; close its pane."
+    note "Octopilot: a retired 'octopilot' agent still runs in this workspace; close its pane."
   fi
   add_code_tab "$ws"
   exit 0
 fi
 
-# A prompter already running elsewhere: go to it rather than starting a second one.
-if "$H" agent get "$PROMPTER_AGENT" >/dev/null 2>&1; then
-  exec "$H" agent focus "$PROMPTER_AGENT"
-fi
+# A prompter already running elsewhere is not started a second time; it is
+# focused once the workspace is built.
+elsewhere=0
+"$H" agent get "$PROMPTER_AGENT" >/dev/null 2>&1 && elsewhere=1
 
 set -a
 # shellcheck source=../config.sh
@@ -105,10 +125,12 @@ created=$("$H" workspace create --label "$LABEL" \
   --cwd "${OCTOPILOT_ORCH_CWD:-$HOME}" --focus)
 root=$(jq -r '.result.root_pane.pane_id' <<<"$created")
 name_main_tab "$root"
-start_prompter "$root"
+[ "$elsewhere" = 1 ] || start_prompter "$root"
 
-# The dashboard beside the prompter, which keeps the left column.
+# The dashboard beside the root pane, which keeps the left column.
 "$H" plugin pane open --plugin elboletaire.octopilot --entrypoint dashboard \
   --placement split --target-pane "$root" \
   --direction right --no-focus >/dev/null
 add_code_tab "$(jq -r '.result.workspace.workspace_id // .result.workspace_id' <<<"$created")"
+[ "$elsewhere" = 1 ] && exec "$H" agent focus "$PROMPTER_AGENT"
+exit 0
