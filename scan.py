@@ -73,9 +73,6 @@ EVENTS_MAX_BYTES = 512 * 1024
 EVENTS_KEEP = 1000
 # Backend new sessions spawn on: "herdr" (the TUI) or "hc" (herdr-app's GUI).
 OCTOPILOT_BACKEND = os.environ.get("OCTOPILOT_BACKEND", "herdr")
-# Where worker sessions open: "tab" in the Octopilot space or workspace, or "space"
-# for a space or workspace of their own (the old layout).
-WORKER_HOST = os.environ.get("WORKER_HOST", "tab")
 # Settle a new worker tab at spawn ("1") or leave it as herdr opened it ("0").
 SETTLE_WORKER_TABS = os.environ.get("SETTLE_WORKER_TABS", "1") == "1"
 # The octopilot code dir: where workers find scan.sh and their plugin.
@@ -649,6 +646,9 @@ HERDR = HerdrBackend()
 HC = HcBackend()
 # Both are listed on every scan; a session id belongs to exactly one of them.
 BACKENDS = {"herdr": HERDR, "hc": HC}
+# Every label a discard is logged under, so a failed removal is recognised.
+REMOVE_LABELS = (HERDR.remove_label, HC.remove_label, "herdr tab remove",
+                 "herdr-app tab remove")
 
 
 def backend_for(session):
@@ -689,6 +689,14 @@ def spawn_backend():
         raise SystemExit(f"OCTOPILOT_BACKEND must be herdr or hc, not "
                          f"{OCTOPILOT_BACKEND!r}")
     return backend
+
+
+def worker_host():
+    """Where worker sessions open, read at use: "tab" or "space"."""
+    host = os.environ.get("WORKER_HOST", "tab")
+    if host not in ("tab", "space"):
+        raise SystemExit(f"WORKER_HOST must be tab or space, not {host!r}")
+    return host
 
 
 def split_address(address):
@@ -3269,8 +3277,9 @@ def dispatch(cmd, args, state):
         pr = int(args[5]) if len(args) > 5 else None
         backend = backend_for(session)
         if backend is None:
-            print(f"{session} is not a herdr workspace id (like w12) or a "
-                  "herdr-app space id (like sp<hex>)", file=sys.stderr)
+            print(f"{session} is not a herdr workspace (w12), herdr tab (w12:t1), "
+                  "herdr-app space (sp<hex>) or herdr-app tab (tb<hex>) id",
+                  file=sys.stderr)
             return 1
         _, answered, open_ws = all_sessions()
         if listed(answered, session) and session not in open_ws:

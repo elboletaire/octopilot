@@ -1,5 +1,10 @@
 """The session id shapes: whole workspaces and spaces, and their tabs, per backend."""
+import contextlib
+import io
+import os
+import sys
 import unittest
+from unittest import mock
 
 from tests import SCRATCH  # noqa: F401  (imports the scratch state before scan)
 import scan
@@ -45,6 +50,32 @@ class HostIdsTest(unittest.TestCase):
         for session in JUNK:
             self.assertEqual(scan.remove_label_for(scan.HERDR, session),
                              scan.HERDR.remove_label, session)
+
+    def test_every_remove_label_is_listed(self):
+        for session, backend in {**TABS, **WHOLE}.items():
+            self.assertIn(scan.remove_label_for(backend, session), scan.REMOVE_LABELS)
+
+    def test_worker_host_reads_at_use(self):
+        with mock.patch.dict(os.environ):
+            os.environ.pop("WORKER_HOST", None)
+            self.assertEqual(scan.worker_host(), "tab")
+            os.environ["WORKER_HOST"] = "space"
+            self.assertEqual(scan.worker_host(), "space")
+            os.environ["WORKER_HOST"] = "Tab"
+            with self.assertRaises(SystemExit) as ctx:
+                scan.worker_host()
+            self.assertEqual(str(ctx.exception),
+                             "WORKER_HOST must be tab or space, not 'Tab'")
+
+    def test_track_names_the_tab_shapes(self):
+        argv = ["scan.py", "track", "k", "comment", "b", "junk"]
+        err = io.StringIO()
+        with mock.patch.object(sys, "argv", argv), \
+                mock.patch.object(scan, "all_sessions", side_effect=AssertionError), \
+                contextlib.redirect_stderr(err):
+            self.assertEqual(scan.main(), 1)
+        self.assertIn("herdr tab (w12:t1)", err.getvalue())
+        self.assertIn("herdr-app tab (tb<hex>)", err.getvalue())
 
 
 if __name__ == "__main__":
