@@ -1844,18 +1844,21 @@ def check_stack(slug, num, branch, base, layers, me):
     return modes
 
 
-def spawn_item(state, key, branch, title, new_branch, question=None,
+def spawn_item(state, key_, branch, title, new_branch, question=None,
                read_only=False, stack_spec=None):
-    """Create the item's worktree and session, and track it. The caller prints
-    the result and renders the prompt. Raises SystemExit, before anything is
-    created, on a refusal, and when the host cannot start the session.
+    """Create the item's worktree and session, and track it.
 
-    -> {"key", "template", "base", "slug", "prev", "stack", "warning", "model"}:
-    template is the prompt to render, prev the sha a re-review follows (or
-    None), stack the parsed layers (or None), warning the host's startup
-    warning (or None)."""
+    Raises SystemExit on a refusal (unknown repo, a stack that does not check
+    out, a session already open on the branch), on a failed git fetch, and when
+    the host cannot start the session. A host failure can come after
+    add_worktree has created the worktree, which is left in place.
+
+    -> {"ok", "error", "key", "template", "base", "slug", "prev", "stack",
+    "warning", "model"}: ok is always True here (refusals raise), template is
+    the prompt to render, prev the sha a re-review follows (or None), stack the
+    parsed layers (or None), warning the host's startup warning (or None)."""
     me = whoami(state)
-    slug, num, kind = split_key(key)
+    slug, num, kind = split_key(key_)
     reg = state.get("registry", {})
     if slug not in reg:
         raise SystemExit(f"{slug} is not in the registry -- no local clone under "
@@ -1878,7 +1881,7 @@ def spawn_item(state, key, branch, title, new_branch, question=None,
                              "(mode=comment). A stack is all yours or none of "
                              "it: spawn the yours and the others separately")
         held = {layer["pr"] for k2, it2 in state.get("items", {}).items()
-                if k2 != key and k2.startswith(slug + "#")
+                if k2 != key_ and k2.startswith(slug + "#")
                 for layer in it2.get("stack") or [{"pr": it2.get("pr")}]}
         busy = [f"#{layer['pr']}" for layer in stack[1:] if layer["pr"] in held]
         if busy:
@@ -1908,7 +1911,7 @@ def spawn_item(state, key, branch, title, new_branch, question=None,
         tmpl = "investigate-readonly"
     model = MODEL_FOR.get(tmpl, "")
 
-    host = spawn_host(key, path, base, branch, title, new_branch, model)
+    host = spawn_host(key_, path, base, branch, title, new_branch, model)
 
     item = {"mode": mode, "branch": branch, "pr": num if kind == "pr" else None,
             "reviewed_sha": reviewed, "phase": "working", "added": int(time.time()),
@@ -1920,13 +1923,13 @@ def spawn_item(state, key, branch, title, new_branch, question=None,
         item["question"] = question
     if read_only:
         item["read_only"] = True
-    state["items"][key] = item
+    state["items"][key_] = item
     save(state)
-    log_event("spawn", key, mode=mode, branch=branch, session=item["session"],
+    log_event("spawn", key_, mode=mode, branch=branch, session=item["session"],
               title=title)
-    return {"key": key, "template": tmpl, "base": base, "slug": slug,
-            "prev": reviewed, "stack": stack, "warning": host.get("warning"),
-            "model": model}
+    return {"ok": True, "error": None, "key": key_, "template": tmpl, "base": base,
+            "slug": slug, "prev": reviewed, "stack": stack,
+            "warning": host.get("warning"), "model": model}
 
 
 def spawn(state, key_, branch, title, new_branch, question=None,
@@ -2052,19 +2055,23 @@ def print_siblings(state, slug, exclude=None):
 def cleanup_item(state, key_):
     """Remove a merged item's session and worktree, then mark it handled.
 
-    -> {"ok", "msg", "siblings", "base"}: msg is what the CLI prints for it
-    (stderr when not ok), siblings the rebase fan-out set afterwards, base the
-    repo's base branch."""
+    -> {"ok", "error", "msg", "discard_error", "siblings", "base"}: error is the
+    refusal (untracked item); msg is the text the CLI prints for it, including
+    the failed discard line; discard_error is the backend's message when its
+    discard failed, which does not stop the cleanup; siblings is the rebase
+    fan-out set afterwards and base the repo's base branch."""
     it = state.get("items", {}).get(key_)
     if not it:
-        return {"ok": False, "msg": f"{key_} is not tracked; nothing to clean up",
-                "siblings": [], "base": None}
-    lines = []
+        return {"ok": False, "error": f"{key_} is not tracked; nothing to clean up",
+                "msg": None, "discard_error": None, "siblings": [], "base": None}
+    lines, discard_error = [], None
     sess = it.get("session")
     backend = backend_for(sess)
     if backend:
         code, raw = backend.discard(sess, it.get("worktree"))
         lines.append(f"{backend.remove_label} {sess}: {'ok' if code == 0 else raw}")
+        if code != 0:
+            discard_error = raw
     if key_ not in state["handled_merges"]:
         state["handled_merges"].append(key_)
     state["items"].pop(key_, None)
@@ -2072,8 +2079,8 @@ def cleanup_item(state, key_):
     log_event("cleanup", key_)
     lines.append(f"cleaned up {key_}")
     slug = key_.split("#")[0].split("!")[0]
-    return {"ok": True, "msg": "\n".join(lines),
-            "siblings": siblings(state, slug),
+    return {"ok": True, "error": None, "msg": "\n".join(lines),
+            "discard_error": discard_error, "siblings": siblings(state, slug),
             "base": state.get("registry", {}).get(slug, {}).get("base", "main")}
 
 
@@ -2081,7 +2088,7 @@ def cleanup(state, key_):
     """cleanup <key>: remove a merged item's session and worktree."""
     r = cleanup_item(state, key_)
     if not r["ok"]:
-        print(r["msg"], file=sys.stderr)
+        print(r["error"], file=sys.stderr)
         return 1
     print(r["msg"])
     print_sibling_rows(r["siblings"], r["base"])
@@ -2098,7 +2105,7 @@ def restack_item(state, k):
     prompt to render, and siblings the rebase fan-out set without the item."""
     def refused(error):
         return {"ok": False, "error": error, "new_key": None, "template": None,
-                "subs": {}, "siblings": []}
+                "subs": {}, "siblings": [], "base": None}
 
     k = resolve_key(state, k)
     it = state.get("items", {}).get(k)
@@ -2161,7 +2168,8 @@ def restack_item(state, k):
         template = "rebase"
         subs = {"REPO": slug, "PR": nxt["pr"], "BRANCH": nxt["branch"], "BASE": base}
     return {"ok": True, "error": None, "new_key": nk, "template": template,
-            "subs": subs, "siblings": siblings(state, slug, exclude=nk)}
+            "subs": subs, "siblings": siblings(state, slug, exclude=nk),
+            "base": base}
 
 
 def restack(state, k):
@@ -2182,30 +2190,32 @@ def restack(state, k):
     else:
         print(f"next: `$A send {nk} \"$($A render rebase REPO={subs['REPO']} "
               f"PR={subs['PR']} BRANCH={subs['BRANCH']} BASE={subs['BASE']})\"`")
-    print_sibling_rows(r["siblings"], subs["BASE"])
+    print_sibling_rows(r["siblings"], r["base"])
     return 0
+
+
 def mark_reviewed(state, k, sha):
     """Record a review of `k` at `sha`: the item moves to fixing and counts one
-    more round. -> {"ok", "round"}; ok is False when the item is not tracked."""
+    more round. -> {"ok", "error", "round"}; error names an untracked item."""
     it = state["items"].get(k)
     if it is None:
-        return {"ok": False, "round": None}
+        return {"ok": False, "error": f"{k} is not tracked", "round": None}
     it["reviewed_sha"] = sha
     it["phase"] = "fixing"
     it["review_rounds"] = int(it.get("review_rounds", 0)) + 1
     save(state)
     log_event("reviewed", k, sha=sha[:7], round=it["review_rounds"])
-    return {"ok": True, "round": it["review_rounds"]}
+    return {"ok": True, "error": None, "round": it["review_rounds"]}
 
 
 def mark_feedback(state, k, since, pr=None):
     """Move `k`'s feedback watermark to `since` and reset its review rounds. On a
     stack, `pr` names the layer whose watermark moves; a plain PR ignores it.
-    -> {"ok", "error", "pr"}: ok is False with no error when the item is not
-    tracked, and with the refusal in error when `pr` is not one of its layers."""
+    -> {"ok", "error", "pr"}: error names an untracked item or a `pr` that is
+    not one of the stack's layers."""
     it = state["items"].get(k)
     if it is None:
-        return {"ok": False, "error": None, "pr": None}
+        return {"ok": False, "error": f"{k} is not tracked", "pr": None}
     if it.get("stack"):
         if pr not in [layer["pr"] for layer in it["stack"]]:
             names = " ".join(str(layer["pr"]) for layer in it["stack"])
@@ -2223,8 +2233,8 @@ def mark_feedback(state, k, since, pr=None):
 
 
 def decline(state, keys):
-    """Add `keys` to the declined list, each once, and log each. -> the keys
-    added by this call."""
+    """Add `keys` to the declined list, each once, and log each. -> {"ok",
+    "error", "added"}: added holds the keys this call added."""
     added = []
     for k in keys:
         if k not in state["declined"]:
@@ -2233,13 +2243,13 @@ def decline(state, keys):
     save(state)
     for k in keys:
         log_event("decline", k)
-    return added
+    return {"ok": True, "error": None, "added": added}
 
 
 def ack_push(state, k):
     """The user has seen the PUSHED flag: stop flagging this head. A re-request
-    or a further push brings the PR back. -> {"ok", "error", "push_acked"}; ok is
-    False when the item is untracked or has no PR yet."""
+    or a further push brings the PR back. -> {"ok", "error", "push_acked"}; error
+    names an untracked item or one without a PR yet."""
     it = state["items"].get(k)
     if it and it.get("pr"):
         d = pr_detail(k.split("#")[0], it["pr"]) or {}
@@ -2251,32 +2261,34 @@ def ack_push(state, k):
 
 def detach_item(state, k):
     """Close the item's workspace or space, keep its worktree and branch, and
-    drop the item so it holds no slot (it is proposed again). -> (code, msg):
-    msg is the line to print, on stderr when code is not 0."""
+    drop the item so it holds no slot (it is proposed again). -> {"ok", "error",
+    "msg"}: msg is the line to print on success; error is the refusal."""
     it = state["items"].get(k)
     if not it:
-        return 1, f"unknown item {k}"
+        return {"ok": False, "error": f"unknown item {k}", "msg": None}
     sess = it.get("session")
     backend = backend_for(sess)
     if backend:
         code, raw = backend.close(sess)
         if code != 0:
-            return 1, f"{backend.noun} close failed: {raw}"
+            return {"ok": False, "error": f"{backend.noun} close failed: {raw}",
+                    "msg": None}
     state["items"].pop(k)
     save(state)
     log_event("detach", k, branch=it.get("branch"))
     worktree = f", worktree kept at {it['worktree']}" if it.get("worktree") \
         else ", worktree kept"
-    return 0, (f"detached {k} session={sid(sess)} branch={it.get('branch')} "
-               f"-> workspace closed{worktree}, untracked")
+    return {"ok": True, "error": None,
+            "msg": (f"detached {k} session={sid(sess)} branch={it.get('branch')} "
+                    f"-> workspace closed{worktree}, untracked")}
 
 
 def set_paused(state, paused):
-    """Pause or resume the orchestrator's work. -> the flag as now set."""
+    """Pause or resume the orchestrator's work. -> {"ok", "error", "paused"}."""
     state["paused"] = paused
     save(state)
     log_event("pause" if paused else "resume")
-    return paused
+    return {"ok": True, "error": None, "paused": paused}
 
 
 ORDER = ["MERGED", "RESTACK", "REVIEW", "FEEDBACK", "BOOTING", "WORKING",
@@ -3171,7 +3183,7 @@ def dispatch(cmd, args, state):
         print(json.dumps(state, indent=2, sort_keys=True))
         return 0
     if cmd in ("pause", "resume"):
-        print(f"paused={set_paused(state, cmd == 'pause')}")
+        print(f"paused={set_paused(state, cmd == 'pause')['paused']}")
         return 0
     if cmd == "decline":
         decline(state, args[1:])
@@ -3278,9 +3290,12 @@ def dispatch(cmd, args, state):
         # detach <key>: close its workspace or space, keep the worktree and
         # branch, and drop the item so it holds no slot (it is proposed again).
         # Reverse by hand: reopen the worktree, start claude in it, then `track`.
-        code, msg = detach_item(state, args[1])
-        print(msg, file=sys.stderr if code else sys.stdout)
-        return code
+        r = detach_item(state, args[1])
+        if not r["ok"]:
+            print(r["error"], file=sys.stderr)
+            return 1
+        print(r["msg"])
+        return 0
     if cmd == "untrack":
         for k in args[1:]:
             state["items"].pop(k, None)
@@ -3305,19 +3320,22 @@ def dispatch(cmd, args, state):
         k, when = args[1], args[2]
         pr = int(args[3]) if len(args) > 3 and args[3].isdigit() else None
         r = mark_feedback(state, k, when, pr)
-        if r["error"]:
-            print(r["error"], file=sys.stderr)
-            return 1
-        if r["ok"]:
-            layer = f" layer=#{r['pr']}" if r["pr"] else ""
-            print(f"{k}{layer} feedback_seen={when} rounds=0")
+        if not r["ok"]:
+            # An untracked key is a silent no-op, as it has always been.
+            if k in state["items"]:
+                print(r["error"], file=sys.stderr)
+                return 1
+            return 0
+        layer = f" layer=#{r['pr']}" if r["pr"] else ""
+        print(f"{k}{layer} feedback_seen={when} rounds=0")
         return 0
     if cmd == "mark-reviewed":
         k, sha = args[1], args[2]
         r = mark_reviewed(state, k, sha)
-        if r["ok"]:
-            print(f"{k} reviewed={sha[:7]} "
-                  f"round={r['round']}/{MAX_REVIEW_ROUNDS}")
+        if not r["ok"]:
+            # An untracked key is a silent no-op, as it has always been.
+            return 0
+        print(f"{k} reviewed={sha[:7]} round={r['round']}/{MAX_REVIEW_ROUNDS}")
         return 0
     if cmd == "review-base":
         # The base sha a review merged the PR into, so a later base move

@@ -49,8 +49,8 @@ class CleanupItemTest(unittest.TestCase):
         state = new_state()
         with fake.fake_world():
             r = scan.cleanup_item(state, "octo/app#99")
-        self.assertEqual(r, {"ok": False, "msg": "octo/app#99 is not tracked; nothing to clean up",
-                             "siblings": [], "base": None})
+        self.assertEqual(r, {"ok": False, "error": "octo/app#99 is not tracked; nothing to clean up",
+                             "msg": None, "discard_error": None, "siblings": [], "base": None})
 
     def test_cleanup_drops_the_item_and_names_the_siblings(self):
         state = new_state()
@@ -61,12 +61,23 @@ class CleanupItemTest(unittest.TestCase):
             r = scan.cleanup_item(state, KEY)
             self.assertIn("cleanup", events())
         self.assertTrue(r["ok"])
+        self.assertIsNone(r["error"])
+        self.assertIsNone(r["discard_error"])
         self.assertEqual(r["msg"], "removed w1: ok\ncleaned up octo/app#5")
         self.assertEqual(r["base"], "main")
         self.assertEqual([k for k, _ in r["siblings"]], ["octo/app#6"])
         self.assertNotIn(KEY, state["items"])
         self.assertEqual(state["handled_merges"], [KEY])
         self.assertEqual(host.discarded, [("w1", None)])
+
+    def test_a_failed_discard_is_reported_but_the_cleanup_goes_on(self):
+        state = new_state()
+        with fake.fake_world(backend_for=FakeHost(discard=(1, "busy"))):
+            r = scan.cleanup_item(state, KEY)
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["discard_error"], "busy")
+        self.assertEqual(r["msg"], "removed w1: busy\ncleaned up octo/app#5")
+        self.assertNotIn(KEY, state["items"])
 
     def test_no_backend_means_no_backend_line(self):
         state = new_state()
@@ -97,6 +108,7 @@ class RestackItemTest(unittest.TestCase):
         self.assertFalse(r["ok"])
         self.assertEqual(r["error"], f"{KEY} is not a stack")
         self.assertIsNone(r["new_key"])
+        self.assertIsNone(r["base"])
 
     def test_refuses_when_the_bottom_is_not_merged(self):
         state = self.stack_state([{"pr": 1, "branch": "feat/a"}, {"pr": 2, "branch": "feat/b"}])
@@ -117,6 +129,7 @@ class RestackItemTest(unittest.TestCase):
         self.assertEqual(r["template"], "rebase-stack")
         self.assertEqual(r["subs"], {"REPO": "octo/app", "BASE": "main",
                                      "KEY": "octo/app#2", "RESTACK_FROM": "sha1"})
+        self.assertEqual(r["base"], "main")
         self.assertEqual(r["siblings"], [])
         item = state["items"]["octo/app#2"]
         self.assertEqual(item["branch"], "feat/b")
@@ -162,9 +175,10 @@ class SpawnItemTest(unittest.TestCase):
                 mock.patch.object(scan, "spawn_host", side_effect=self.host()):
             r = scan.spawn_item(state, "octo/app!40", "feat/x", "Title", True)
             self.assertIn("spawn", events())
-        self.assertEqual(r, {"key": "octo/app!40", "template": "work", "base": "main",
-                             "slug": "octo/app", "prev": None, "stack": None,
-                             "warning": None, "model": scan.MODEL_FOR.get("work", "")})
+        self.assertEqual(r, {"ok": True, "error": None, "key": "octo/app!40",
+                             "template": "work", "base": "main", "slug": "octo/app",
+                             "prev": None, "stack": None, "warning": None,
+                             "model": scan.MODEL_FOR.get("work", "")})
         item = state["items"]["octo/app!40"]
         self.assertEqual((item["mode"], item["branch"], item["session"]), ("fix", "feat/x", "w7"))
 
@@ -213,7 +227,7 @@ class StateFunctionsTest(unittest.TestCase):
         state = new_state()
         with fake.fake_world():
             r = scan.mark_reviewed(state, KEY, "abcdef1234")
-        self.assertEqual(r, {"ok": True, "round": 2})
+        self.assertEqual(r, {"ok": True, "error": None, "round": 2})
         self.assertEqual(state["items"][KEY]["reviewed_sha"], "abcdef1234")
         self.assertEqual(state["items"][KEY]["phase"], "fixing")
 
@@ -221,7 +235,8 @@ class StateFunctionsTest(unittest.TestCase):
         state = new_state()
         with fake.fake_world():
             self.assertEqual(scan.mark_reviewed(state, "octo/app#99", "abc"),
-                             {"ok": False, "round": None})
+                             {"ok": False, "error": "octo/app#99 is not tracked",
+                              "round": None})
         self.assertEqual(state["items"][KEY]["review_rounds"], 1)
 
     def test_mark_feedback_on_a_plain_pr_resets_rounds(self):
@@ -259,15 +274,15 @@ class StateFunctionsTest(unittest.TestCase):
     def test_mark_feedback_on_an_untracked_key_is_silent(self):
         with fake.fake_world():
             r = scan.mark_feedback(new_state(), "octo/app#99", "x")
-        self.assertEqual(r, {"ok": False, "error": None, "pr": None})
+        self.assertEqual(r, {"ok": False, "error": "octo/app#99 is not tracked", "pr": None})
 
     def test_decline_adds_each_key_once(self):
         state = new_state()
         state["declined"] = ["octo/app#2"]
         with fake.fake_world():
-            added = scan.decline(state, ["octo/app#2", "octo/app#3", "octo/app#3"])
+            r = scan.decline(state, ["octo/app#2", "octo/app#3", "octo/app#3"])
             self.assertEqual(events().count("decline"), 3)
-        self.assertEqual(added, ["octo/app#3"])
+        self.assertEqual(r, {"ok": True, "error": None, "added": ["octo/app#3"]})
         self.assertEqual(state["declined"], ["octo/app#2", "octo/app#3"])
 
     def test_ack_push_stores_the_head(self):
@@ -288,10 +303,11 @@ class StateFunctionsTest(unittest.TestCase):
         state = new_state()
         host = FakeHost(close=(0, ""))
         with fake.fake_world(backend_for=host):
-            code, msg = scan.detach_item(state, KEY)
-        self.assertEqual(code, 0)
-        self.assertEqual(msg, f"detached {KEY} session=w1 branch=feat/x -> workspace closed, "
-                              "worktree kept, untracked")
+            r = scan.detach_item(state, KEY)
+        self.assertEqual(r["ok"], True)
+        self.assertIsNone(r["error"])
+        self.assertEqual(r["msg"], f"detached {KEY} session=w1 branch=feat/x -> workspace closed, "
+                                   "worktree kept, untracked")
         self.assertEqual(host.closed, ["w1"])
         self.assertNotIn(KEY, state["items"])
 
@@ -299,21 +315,22 @@ class StateFunctionsTest(unittest.TestCase):
         state = new_state()
         host = FakeHost(close=(1, "busy"))
         with fake.fake_world(backend_for=host):
-            code, msg = scan.detach_item(state, KEY)
-        self.assertEqual((code, msg), (1, "workspace close failed: busy"))
+            r = scan.detach_item(state, KEY)
+        self.assertEqual(r, {"ok": False, "error": "workspace close failed: busy", "msg": None})
         self.assertIn(KEY, state["items"])
 
     def test_detach_untracked_key(self):
         with fake.fake_world():
             self.assertEqual(scan.detach_item(new_state(), "octo/app#99"),
-                             (1, "unknown item octo/app#99"))
+                             {"ok": False, "error": "unknown item octo/app#99", "msg": None})
 
     def test_set_paused_sets_the_flag_and_logs_it(self):
         state = new_state()
         with fake.fake_world():
-            self.assertTrue(scan.set_paused(state, True))
+            self.assertEqual(scan.set_paused(state, True),
+                             {"ok": True, "error": None, "paused": True})
             self.assertTrue(state["paused"])
-            self.assertFalse(scan.set_paused(state, False))
+            self.assertEqual(scan.set_paused(state, False)["paused"], False)
             self.assertFalse(state["paused"])
             self.assertEqual(events(), ["pause", "resume"])
 
