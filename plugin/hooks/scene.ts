@@ -160,7 +160,7 @@ function drawPan(scene: Scene, set: (x: number, y: number, c: number) => void) {
     set(hx + 1, 8, mid)
     set(hx + 2, 8, edge)
   }
-  // Flames: always a low simmer, roaring while the orchestrator works.
+  // Flames: always a low simmer, roaring while the engine acts.
   for (let x = 16; x < W - 1; x += 2) {
     const flicker = Math.floor(t / 120 + x * 7) % 5
     if (!isWorking && flicker > 1) continue

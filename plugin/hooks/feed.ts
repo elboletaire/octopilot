@@ -43,6 +43,31 @@ function doneKinds(snapshotText: string): Map<string, string> {
 
 const isDone = (b: Ball) => b.state === 'done'
 
+// The engine's state, from the headless dashboard's view.json header
+// (../../herdr-app/CONTRACT.md). `at` is the view's generated_at, in ms.
+export type EngineView = { acting: boolean; at: number }
+
+// The headless dashboard rewrites the view at least every 5 s, so a view older
+// than this is stale (no dashboard running).
+export const ENGINE_STALE_MS = 15000
+
+export function readEngine(viewText: string): EngineView | undefined {
+  try {
+    const view = JSON.parse(viewText) as { generated_at?: unknown; header?: { engine?: { state?: unknown } } }
+    const state = view.header?.engine?.state
+    if (typeof view.generated_at !== 'number' || typeof state !== 'string') return undefined
+    return { acting: state === 'acting', at: view.generated_at * 1000 }
+  } catch {
+    return undefined
+  }
+}
+
+// Whether the engine is acting, or undefined when its view is missing or stale.
+export function engineActing(engine: EngineView | undefined, nowMs: number): boolean | undefined {
+  if (!engine || nowMs - engine.at > ENGINE_STALE_MS) return undefined
+  return engine.acting
+}
+
 export function readKitchen(
   stateText: string,
   nowSec: number,
@@ -135,6 +160,29 @@ export function react(ev: OctopilotEvent): Reaction {
   switch (ev.kind) {
     case 'engine-error':
       return { mood: 'worried', ms: 3000, burst: 'smoke', key, line: line(str(ev.msg) || `engine-error ${k}`, 'bad') }
+    case 'engine-skip':
+      return {
+        mood: 'worried',
+        ms: 3000,
+        burst: 'smoke',
+        line: line(`skipped: ${str(ev.left) || str(ev.reason)}`, 'bad'),
+      }
+    case 'held':
+      return {
+        mood: 'worried',
+        ms: 2500,
+        burst: 'smoke',
+        key,
+        line: line(`held ${k || 'request'}: ${str(ev.reason)}`),
+      }
+    case 'go-refused':
+    case 'request-refused': {
+      const verb = str(ev.verb) || (ev.kind === 'go-refused' ? 'go' : 'request')
+      const text = [verb, k, 'refused:', str(ev.reason)].filter(Boolean).join(' ')
+      return { mood: 'sad', ms: 3500, burst: 'smoke', key, line: line(text, 'bad') }
+    }
+    case 'go':
+      return { mood: 'flip', ms: 2000, key, line: line(`started ${k} ${str(ev.title)}`.trim(), 'good') }
     case 'tick': {
       const active = typeof ev.active === 'number' ? ev.active : 0
       return { mood: 'flip', ms: 2500, burst: 'steam', line: line(`tick · ${active} cooking`) }

@@ -2,9 +2,9 @@
 
 The takoyaki kitchen, as a pane or a floating block: the octopus chef (white hachimaki, pick in one
 tentacle) behind a cast-iron pan with one takoyaki per tracked item, flames under it, a
-shelf of served boats, and a speech bubble with the orchestrator's last message and the
+shelf of served boats, and a speech bubble with the engine's last actions and the
 kitchen log. It is the GUI version of the band `plugin/hooks/scene.ts` draws in the
-orchestrator's session.
+prompter's session.
 
 ## As a pane
 
@@ -32,7 +32,7 @@ or bottom edge it sits to its left. Either way its tail points at the chef.
 
 Either way:
 
-- Click the chef: peek the orchestrator's terminal (`terminal.peek`).
+- Click the chef: peek the headless dashboard's terminal, where the engine logs (`terminal.peek`).
 - Click the message: the whole text in a dialog (the same mod, `full` props).
 
 Props, all optional: `dir` (the octopilot code, default `~/src/octopilot`) and
@@ -62,7 +62,7 @@ it or a `pane.split` puts it, so the same folder serves both.
 | `stalled` | cold and frosted, no steam |
 
 The focused ball has a ring and the chef's pick over it (the batter jug while he pours);
-while the orchestrator is busy the pick walks along the pan. Flames roar while `busy`
+while the engine is acting the pick walks along the pan. Flames roar while `busy`
 and drop to a pilot light otherwise, paused too; they only go out when offline. Paused,
 the chef sleeps, but an event's mood still shows for its time. Chef moods: `idle`, `busy`,
 `flip`, `pour`, `happy`, `serve`, `worried`, `sad`, `surprised`, `sleep`, `doze`.
