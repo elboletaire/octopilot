@@ -1253,3 +1253,96 @@ def _handle(req, ctx):
     if req.verb == "unknown":
         return _unknown(req, ctx)
     return HANDLERS[req.verb](req, ctx)
+
+
+# ------------------------------------------------------------------- drain
+#
+# The inbox is the queue the dashboard and the agents write to. A drain takes
+# one message at a time under the state lock, so a request that arrives while
+# another is handled waits its turn rather than being lost.
+
+# Requests that wait in the inbox while paused (Q1): the rest run at once.
+HELD_WHILE_PAUSED = {"go", "investigate", "investigate-read-only", "re-review"}
+# _next_request's answer when the budget is spent and a request is waiting.
+SPENT = Request("spent", (), False, False)
+
+
+def _request_text(message):
+    """An inbox message as the request it carries: the dashboard's `REQUEST `
+    prefix goes. An agent's OCTOPILOT line is parsed as it is."""
+    return message[len("REQUEST "):] if message.startswith("REQUEST ") else message
+
+
+def _next_request(ctx):
+    """Pop the first inbox message this drain handles -> its Request. None when
+    none is left to handle, SPENT when the budget is gone with one left. Held
+    messages stay where they are, so the rest keep their order."""
+    import scan
+    with scan.locked():
+        state = scan.load()
+        box = state.get("inbox") or []
+        for i, m in enumerate(box):
+            req = parse_request(_request_text(m["text"]))
+            # Read per message: a resume earlier in this drain releases the held ones.
+            if state.get("paused") and req.verb in HELD_WHILE_PAUSED:
+                continue
+            if _over_budget(ctx):
+                return SPENT
+            state["inbox"] = box[:i] + box[i + 1:]
+            scan.save(state)
+            return req
+    return None
+
+
+def _run_inbox(ctx):
+    """Handle the inbox's requests in order -> their outcome lines."""
+    lines = []
+    while True:
+        req = _next_request(ctx)
+        if req is None:
+            return lines
+        if req is SPENT:
+            lines.append("budget spent: the inbox waits for the next drain")
+            return lines
+        try:
+            line = _handle(req, ctx)
+        except (Exception, SystemExit) as exc:
+            # The request is consumed; one bad request must not end the drain.
+            ctx.log("request-failed", None, verb=req.verb,
+                    error=f"{type(exc).__name__}: {exc}"[:200])
+            line = f"{req.verb} failed: {type(exc).__name__}: {exc}"
+        if line:
+            lines.append(line)
+
+
+def _plan_inbox(ctx):
+    """What a drain would do with each inbox message, changing nothing."""
+    import scan
+    state = scan.load()
+    lines = []
+    for m in state.get("inbox") or []:
+        text = _request_text(m["text"])
+        req = parse_request(text)
+        first = (text.strip().splitlines() or [""])[0][:120]
+        if req.verb == "report":
+            lines.append(f"would drop: {first}")
+        elif state.get("paused") and req.verb in HELD_WHILE_PAUSED:
+            lines.append(f"held while paused: {first}")
+        else:
+            lines.append(f"would handle: {first}")
+    return lines
+
+
+def drain(mode, started, clock=time.monotonic):
+    """Handle the inbox's requests in order, then deliver the queued sends -> the
+    outcome lines. Plan mode says what each would do and changes nothing. A
+    `tick` request is left to the next scheduled tick. Caller holds exec.lock,
+    not the state lock."""
+    import scan
+    ctx = Ctx(dry_run=mode == "plan", sent_keys=set(), log=scan.log_event,
+              rows=_snapshot().get("rows", []),
+              deadline=started + ACT_BUDGET_SECS, clock=clock)
+    lines = _plan_inbox(ctx) if ctx.dry_run else _run_inbox(ctx)
+    if ctx.need_tick:
+        lines.append("tick: left to the next scheduled tick")
+    return lines + deliver_pending(ctx)

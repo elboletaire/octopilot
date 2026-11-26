@@ -2954,7 +2954,7 @@ def chat_keys(args):
     return result_code
 
 
-SELF_LOCKING = {"tick"}
+SELF_LOCKING = {"tick", "drain"}
 READ_ONLY = {"render", "status", "siblings", "snapshot", "wind-down", "plugin-settings",
              "installed-dir", "speech", "chat", "chat-send", "chat-keys"}
 
@@ -3082,6 +3082,24 @@ def tick(args):
     return 0
 
 
+def drain(args):
+    """drain [--quiet] [--plan]: handle the inbox's requests in order, then the
+    queued sends. The dashboard runs it quiet when a request or report lands."""
+    mode = engine_mode(args)
+    if mode == "off":
+        if "--quiet" not in args:
+            print("engine off here: nothing drained")
+        return 0
+    import engine
+    os.makedirs(os.path.dirname(EXEC_LOCK), exist_ok=True)
+    with open(EXEC_LOCK, "w") as ex:
+        fcntl.flock(ex.fileno(), fcntl.LOCK_EX)
+        lines = engine.drain(mode, time.monotonic())
+    if "--quiet" not in args and lines:
+        print("\n".join(lines))
+    return 0
+
+
 def main():
     args = sys.argv[1:]
     cmd = args[0] if args else "scan"
@@ -3100,6 +3118,8 @@ def main():
 def dispatch(cmd, args, state):
     if cmd == "tick":
         return tick(args)
+    if cmd == "drain":
+        return drain(args)
     if cmd in ("scan", "refresh"):
         info = {}
         rows, active, n, untracked = scan(state, refresh=(cmd == "refresh"),
@@ -3442,7 +3462,7 @@ def dispatch(cmd, args, state):
         return 0
 
     print(f"unknown command: {cmd}", file=sys.stderr)
-    print("usage: scan.sh [scan|refresh|status|pause|resume|decline|undecline|"
+    print("usage: scan.sh [scan|refresh|drain|status|pause|resume|decline|undecline|"
           "track|untrack|detach|park|unpark|set-phase|mark-reviewed|claim-round|heartbeat|"
           "reset-rounds|review-base|"
           "mark-merged|restack|"
