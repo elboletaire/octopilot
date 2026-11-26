@@ -2185,10 +2185,17 @@ def snapshot(state):
     work = copy.deepcopy(state)
     info = {}
     rows, active, nrepos, untracked = scan(work, info=info)
-    rows.sort(key=row_order)
+    snap = snapshot_doc(state, work, rows, active, nrepos, untracked, info)
+    write_snapshot(snap)
+    return snap
+
+
+def snapshot_doc(state, work, rows, active, nrepos, untracked, info):
+    """The dashboard's JSON view of one scan: its rows with their item and
+    GitHub details, and the header numbers. `work` is the scanned state."""
     items = work.get("items", {})
     out = []
-    for kind, k, extra in rows:
+    for kind, k, extra in sorted(rows, key=row_order):
         r = {"kind": kind, "key": k, "extra": extra}
         r.update(parse_extra(extra))
         it = items.get(k)
@@ -2204,7 +2211,7 @@ def snapshot(state):
         elif m:
             r.update({f: v for f, v in m.items() if v is not None})
         out.append(r)
-    snap = {"generated_at": int(time.time()),
+    return {"generated_at": int(time.time()),
             "paused": bool(state.get("paused")),
             "repos": nrepos, "active": active, "max_active": MAX_ACTIVE,
             "untracked": untracked, "max_rounds": MAX_REVIEW_ROUNDS,
@@ -2212,12 +2219,15 @@ def snapshot(state):
             "last_tick": state.get("last_tick"),
             "orch": orchestrator_target(state),
             "rows": out}
+
+
+def write_snapshot(snap):
+    """Replace SNAPSHOT_FILE atomically: the dashboard reads it at any time."""
     os.makedirs(os.path.dirname(SNAPSHOT_FILE), exist_ok=True)
     tmp = f"{SNAPSHOT_FILE}.tmp.{os.getpid()}"
     with open(tmp, "w") as fh:
         json.dump(snap, fh, indent=2, sort_keys=True)
     os.replace(tmp, SNAPSHOT_FILE)
-    return snap
 
 
 def orchestrator_target(state):
