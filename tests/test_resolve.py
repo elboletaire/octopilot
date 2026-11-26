@@ -34,6 +34,20 @@ class ResolveTargetTest(unittest.TestCase):
     def test_re_keyed_item_by_prev_key(self):
         self.assertEqual(self.resolve("vocdoni/sdk!4"), ("vocdoni/sdk#12", None))
 
+    def test_short_form_follows_prev_keys(self):
+        self.assertEqual(self.resolve("sdk!4"), ("vocdoni/sdk#12", None))
+        self.assertEqual(self.resolve("sdk!04"), ("vocdoni/sdk#12", None))
+
+    def test_other_separator_of_a_tracked_item(self):
+        self.state["items"]["solo/tool!6"] = {}
+        self.assertEqual(self.resolve("tool#6"), ("solo/tool!6", None))
+
+    def test_other_separator_of_a_proposed_row(self):
+        self.assertEqual(self.resolve("vocdoni/app#9"), ("vocdoni/app!9", None))
+
+    def test_typed_separator_kept_when_nothing_is_tracked(self):
+        self.assertEqual(self.resolve("tool!3"), ("solo/tool!3", None))
+
     def test_repo_suffix_and_number(self):
         self.assertEqual(self.resolve("sdk#12"), ("vocdoni/sdk#12", None))
         self.assertEqual(self.resolve("tool#5"), ("solo/tool#5", None))

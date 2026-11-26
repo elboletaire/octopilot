@@ -87,9 +87,11 @@ class ParseRequestTest(unittest.TestCase):
         self.assertEqual(parse_request("/octopilot-code fix the scan\nsecond line"),
                          Request("code", ("fix the scan\nsecond line",), False, False))
 
-    def test_code_with_past_suffix(self):
+    def test_code_keeps_trailing_markers(self):
         self.assertEqual(parse_request(f"/octopilot-code fix it {PAST}"),
-                         Request("code", ("fix it",), True, False))
+                         Request("code", (f"fix it {PAST}",), False, False))
+        self.assertEqual(parse_request(f"/octopilot-code fix it {OVER}"),
+                         Request("code", (f"fix it {OVER}",), False, False))
 
     def test_code_needs_text(self):
         self.assertEqual(parse_request("/octopilot-code").verb, "unknown")

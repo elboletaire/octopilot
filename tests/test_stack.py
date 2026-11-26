@@ -45,11 +45,17 @@ class StackFromTest(unittest.TestCase):
                          ([{"pr": 1, "branch": "a"}, {"pr": 2, "branch": "b"}], None))
         self.assertEqual(stack_from(prs, 2, "main"), (None, None))
 
-    def test_fork_above_is_an_error(self):
+    def test_fork_above_is_an_error_from_every_layer(self):
         # 706 and 707 both stand on 705's branch: a fork above 705.
         prs = CHAIN[:2] + [CHAIN[2], pr(707, "payg/2-api", "payg/1-foundation")]
-        self.assertEqual(stack_from(prs, 704, "main"),
-                         (None, "stack forks at #705"))
+        for num in (704, 705, 706, 707):
+            self.assertEqual(stack_from(prs, num, "main"),
+                             (None, "stack forks at #705"), num)
+
+    def test_fork_at_the_top_is_an_error(self):
+        prs = CHAIN + [pr(707, "x", "payg/2-ui"), pr(708, "y", "payg/2-ui")]
+        self.assertEqual(stack_from(prs, 705, "main"),
+                         (None, "stack forks at #706"))
 
     def test_fork_below_is_an_error(self):
         prs = [pr(1, "a", "main"), pr(2, "a", "main"), pr(3, "b", "a")]

@@ -26,15 +26,21 @@ TRACKED = {"BOOTING", "CAPPED", "CLOSED", "DONE", "FEEDBACK", "MERGED", "PUSHED"
            "READY", "RESTACK", "REVIEW", "STALLED", "UNKNOWN", "WORKING"}
 
 
-def find_item(state, key):
-    """The item tracked under `key`, or under a key it was re-keyed from."""
+def locate_item(state, key):
+    """(key, item) of the item tracked under `key` or a key it was re-keyed
+    from, else (None, None)."""
     items = state.get("items", {})
     if key in items:
-        return items[key]
-    for it in items.values():
-        if key in it.get("prev_keys", []):
-            return it
-    return None
+        return key, items[key]
+    for k, it in items.items():
+        if key in (it.get("prev_keys") or []):
+            return k, it
+    return None, None
+
+
+def find_item(state, key):
+    """The item tracked under `key`, or under a key it was re-keyed from."""
+    return locate_item(state, key)[1]
 
 
 def layer_keys(state):
@@ -768,15 +774,17 @@ def parse_request(text):
             return unknown
         msg = parts[4] if len(parts) > 4 else ""
         return Request("report", (parts[1], parts[2], parts[3], msg), False, False)
+    # Code text is verbatim: nothing appends a marker to it, so a trailing one
+    # is part of what the user wrote.
+    m = CODE.fullmatch(line)
+    if m:
+        return Request("code", (m.group(1),), False, False)
     line, confirmed, over_cap = _strip_confirmations(line)
     m = INVESTIGATE.fullmatch(line)
     if m:
         read_only, repo, question = m.groups()
         verb = "investigate-read-only" if read_only else "investigate"
         return Request(verb, (repo, question), confirmed, over_cap)
-    m = CODE.fullmatch(line)
-    if m:
-        return Request("code", (m.group(1),), confirmed, over_cap)
     words = line.split(maxsplit=1)
     if not words:
         return unknown
@@ -794,41 +802,45 @@ def _key_number(key):
     return int(m.group(1)) if m else None
 
 
-def _tracked_key(state, token):
-    """The key of the item called `token`, by its own key or a re-keyed one."""
-    items = state.get("items", {})
-    if token in items:
-        return token
-    for k, it in items.items():
-        if token in (it.get("prev_keys") or []):
-            return k
+def _known_key(state, snap_rows, key):
+    """The item key `key` names: a tracked item's, by its key or a re-keyed
+    one, else `key` itself when a row has it, else None."""
+    item_key, _ = locate_item(state, key)
+    if item_key:
+        return item_key
+    if any(r["key"] == key for r in snap_rows):
+        return key
     return None
 
 
 def resolve_target(token, state, snap_rows):
-    """The item key a request's target names -> (key, error).
+    """Resolves a request target to an item key -> (key, error).
 
-    Accepts an exact key (tracked or a row's), a re-keyed one, `repo#N` or
-    `repo!N` with repo a registry slug or a unique suffix of one, and a bare
-    N that names exactly one PROPOSE or tracked row. Pick-list numbers are
-    the prompter's job, so they are not read here."""
-    key = _tracked_key(state, token)
+    Accepts a key or prev_key, repo#N or repo!N (either separator, repo a
+    registry slug or a unique suffix of one), or a bare N naming one row.
+    Pick-list numbers are the prompter's job, so they are not read here."""
+    key = _known_key(state, snap_rows, token)
     if key:
         return key, None
-    if any(r["key"] == token for r in snap_rows):
-        return token, None
     m = re.fullmatch(r"(.+?)([#!])(\d+)", token)
     if m:
         repo, sep, num = m.groups()
         slugs = list(state.get("registry", {}))
         if repo in slugs:
-            return f"{repo}{sep}{int(num)}", None
-        found = sorted(s for s in slugs if s.endswith("/" + repo))
-        if not found:
-            return None, f"{repo} is not in the registry"
-        if len(found) > 1:
-            return None, f"{repo} is ambiguous: {' '.join(found)}"
-        return f"{found[0]}{sep}{int(num)}", None
+            slug = repo
+        else:
+            found = sorted(s for s in slugs if s.endswith("/" + repo))
+            if not found:
+                return None, f"{repo} is not in the registry"
+            if len(found) > 1:
+                return None, f"{repo} is ambiguous: {' '.join(found)}"
+            slug = found[0]
+        # The messenger accepted either separator for an item: prefer the one
+        # that is tracked or proposed, else keep the one typed.
+        built = f"{slug}{sep}{int(num)}"
+        other = f"{slug}{'!' if sep == '#' else '#'}{int(num)}"
+        return (_known_key(state, snap_rows, built)
+                or _known_key(state, snap_rows, other) or built), None
     if token.isdigit():
         n = int(token)
         keys = sorted({r["key"] for r in snap_rows
@@ -844,12 +856,16 @@ def resolve_target(token, state, snap_rows):
 
 # ------------------------------------------------------------------- stacks
 
-def stack_from(open_prs, num, base):
-    """The stack that PR `num` belongs to -> (layers, error).
+def _children(open_prs, pr):
+    """The open PRs based on `pr`'s branch."""
+    return [p for p in open_prs if p["baseRefName"] == pr["headRefName"]]
 
-    layers runs bottom to top as [{pr, branch}], the shape parse_stack and an
-    item's `stack` use. None with no error is a plain PR: alone, or its
-    bottom is not based on the default branch `base`. A fork is an error."""
+
+def stack_from(open_prs, num, base):
+    """The stack PR `num` is in, as [{pr, branch}] bottom to top -> (layers, error).
+
+    (None, None) is a plain PR: alone, or its bottom is not based on `base`.
+    (None, error) names a fork or an unknown PR; no layer may have two children."""
     by_num = {p["number"]: p for p in open_prs}
     if num not in by_num:
         return None, f"#{num} is not an open PR"
@@ -870,17 +886,16 @@ def stack_from(open_prs, num, base):
     above = []
     top = by_num[num]
     while True:
-        kids = [p for p in open_prs if p["baseRefName"] == top["headRefName"]]
-        if not kids:
+        kids = _children(open_prs, top)
+        if len(kids) != 1 or kids[0]["number"] in seen:
             break
-        if len(kids) > 1:
-            return None, f"stack forks at #{top['number']}"
         top = kids[0]
-        if top["number"] in seen:
-            return None, f"stack loops at #{top['number']}"
         seen.add(top["number"])
         above.append(top)
     chain = below + [by_num[num]] + above
+    for p in chain:
+        if len(_children(open_prs, p)) > 1:
+            return None, f"stack forks at #{p['number']}"
     if len(chain) < 2:
         return None, None
     return [{"pr": p["number"], "branch": p["headRefName"]} for p in chain], None
