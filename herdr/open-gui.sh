@@ -44,9 +44,8 @@ CODE_CWD="$DIR"                        # the octopilot dir: its AGENTS.md is the
 TERMINALS=0
 CLOSE_LAUNCHER=0
 HIDE_ENGINE=0
-# The chat and kitchen panes of a retired agent (octopilot.chat, octopilot.kitchen).
-SAVED_CHAT=""
-SAVED_KITCHEN=""
+# The terminals this run has ended, space-separated and padded: find_agent never adopts them.
+ENDED=" "
 LOG=""
 TEE_PID=""
 # The terminal's stdout and stderr, kept on fds 3 and 4 while the log tee runs.
@@ -206,6 +205,7 @@ is_mine() {
 find_agent() {
   local t
   for t in $("$HC" ls --json --label "octopilot.agent=$1" | jq -r '.terminals[].address'); do
+    case "$ENDED" in *" $t "*) continue ;; esac
     if is_mine "$t"; then echo "$t"; return 0; fi
   done
 }
@@ -217,6 +217,19 @@ find_host() { find_agent "$HEADLESS_AGENT"; }
 # The value of a label of a terminal, if it has it.
 label_of() {
   "$HC" get "$1" --json | jq -r --arg k "$2" '.labels[$k] // empty'
+}
+
+# Ends a terminal of this checkout: kill, wait (bounded) until herdr lists it live no
+# more, then rm. Remembered as ended, so find_agent never adopts it while it dies.
+end_terminal() {
+  local i
+  "$HC" kill "$1" >/dev/null || true
+  for i in $(seq 10); do
+    "$HC" ls --json | jq -e --arg t "$1" '.terminals[] | select(.address == $t)' >/dev/null || break
+    sleep 0.5
+  done
+  "$HC" rm "$1" >/dev/null || true
+  ENDED="$ENDED$1 "
 }
 
 # Ends this checkout's terminals of an agent that are not running its program (a
@@ -235,8 +248,7 @@ reap_dead() {
       zsh|bash|sh|fish)
         if [ $(( $(date +%s%3N) - created )) -lt 30000 ]; then continue; fi ;;
     esac
-    "$HC" kill "$t" >/dev/null || true
-    "$HC" rm "$t" >/dev/null || true
+    end_terminal "$t"
   done
 }
 
@@ -302,17 +314,17 @@ add_prompter() {
   name_agent "$term" "$PROMPTER_AGENT" "$session"
 }
 
-# Starts the headless dashboard (the loops that feed view.json, which the mods show) beside
-# pane $2 in direction $3: the engine's host.
-add_headless() {
+# Starts the engine's host (the headless, or the --terminals curses dashboard) beside pane
+# $2 in direction $3, with argv $4, its pane named $5.
+add_host() {
   local term
-  term=$(start_engine_term "$1" "$2" "$3" "$(headless_argv)" headless)
+  term=$(start_engine_term "$1" "$2" "$3" "$4" "$5")
   name_agent "$term" "$HEADLESS_AGENT"
 }
 
 # The engine tab's helpers beside the host (space, pane), those that are missing.
 add_engine_agents() {
-  if [ -z "$(find_agent "$HEADLESS_AGENT")" ]; then add_headless "$1" "$2" down; fi
+  if [ -z "$(find_agent "$HEADLESS_AGENT")" ]; then add_host "$1" "$2" down "$(headless_argv)" headless; fi
   if [ -z "$(find_agent "$PROMPTER_AGENT")" ]; then add_prompter "$1" "$2" right; fi
 }
 
@@ -646,18 +658,13 @@ stop_engine() {
   local label t
   for label in "$HEADLESS_AGENT" "$PROMPTER_AGENT"; do
     for t in $("$HC" ls --json --label "octopilot.agent=$label" | jq -r '.terminals[].address'); do
-      if is_mine "$t"; then
-        "$HC" kill "$t" >/dev/null || true
-        "$HC" rm "$t" >/dev/null || true
-      fi
+      if is_mine "$t"; then end_terminal "$t"; fi
     done
   done
 }
 
-# The space a new host starts in: the one of a terminal labelled with this checkout's
-# dir (after a restart the parked engine is gone but the spaces are back), never a match
-# by name. Empty: a new space. The retired agent is last: its space is the one a
-# migrated space keeps.
+# The space a new host starts in: the one of a terminal labelled with this checkout's dir,
+# never a match by name. Empty: a new space. ORCH is the last fallback, for a migrated space.
 existing_space() {
   local label t s
   for label in "$CODE_AGENT" "$HEADLESS_AGENT" "$PROMPTER_AGENT" "$ORCH_AGENT"; do
@@ -668,51 +675,94 @@ existing_space() {
   done
 }
 
-# Retires the agent of an earlier launcher (octopilot.agent=octopilot): this
-# checkout's is ended with its headless (old code and env: the normal path starts a new
-# one), and its chat and kitchen records are kept for the new host. The prompter keeps
-# running, so the user clears its chat. Another checkout's is left alone.
+# The terminal that keeps a retired agent's chat and kitchen labels until the new host
+# takes them: this checkout's prompter, else its code agent. Empty if neither runs.
+records_holder() {
+  local t
+  t=$(find_agent "$PROMPTER_AGENT")
+  if [ -z "$t" ]; then t=$(find_agent "$CODE_AGENT"); fi
+  echo "$t"
+}
+
+# This checkout's curses dashboard of the TUI layout in space $1, if any: unlabelled, run
+# from this checkout's dashboard.sh, never the labelled host.
+own_curses_dashboard() {
+  local t
+  if [ -z "$1" ]; then return 0; fi
+  for t in $("$APP" ls | jq -r --arg s "$1" \
+    '.spaces[] | select(.id == $s) | .tabs[].terminals[].terminal'); do
+    if "$HC" get "$t" --json | jq -e --arg d "$DIR/dashboard.sh" '
+      (.labels["octopilot.agent"] == null) and
+      ([(.argv // []), (.foreground.argv // [])] |
+        any(join(" ") | contains($d) and (contains("--headless") | not)))' >/dev/null; then
+      echo "$t"
+      return 0
+    fi
+  done
+}
+
+# Retires this checkout's agent of an earlier launcher (octopilot.agent=octopilot), with its
+# headless and its old curses dashboard (old code). Its chat and kitchen labels move to
+# records_holder; the prompter keeps running.
 retire_orchestrator() {
-  local t retired=0
+  local space=$1 t v holder retired=0
+  holder=$(records_holder)
   for t in $("$HC" ls --json --label "octopilot.agent=$ORCH_AGENT" | jq -r '.terminals[].address'); do
     if ! is_mine "$t"; then
       echo "open-gui.sh: the $ORCH_AGENT agent ($t) runs from another octopilot; left as it is" >&2
       continue
     fi
     echo "open-gui.sh: retiring the $ORCH_AGENT agent ($t)" >&2
-    if [ -n "$(label_of "$t" octopilot.chat)" ]; then SAVED_CHAT=$(label_of "$t" octopilot.chat); fi
-    if [ -n "$(label_of "$t" octopilot.kitchen)" ]; then SAVED_KITCHEN=$(label_of "$t" octopilot.kitchen); fi
-    "$HC" kill "$t" >/dev/null || true
-    "$HC" rm "$t" >/dev/null || true
+    for v in octopilot.chat octopilot.kitchen; do
+      if [ -z "$(label_of "$t" "$v")" ]; then continue; fi
+      if [ -n "$holder" ]; then
+        record_label "$holder" "$v" "$(label_of "$t" "$v")"
+      else
+        echo "open-gui.sh: no prompter or code agent keeps $v; add it by hand" >&2
+      fi
+    done
+    end_terminal "$t"
     retired=1
   done
   if [ "$retired" = 0 ]; then return 0; fi
   t=$(find_agent "$HEADLESS_AGENT")
   if [ -n "$t" ]; then
-    echo "open-gui.sh: ending the $HEADLESS_AGENT agent ($t): it runs the old dashboard code" >&2
-    "$HC" kill "$t" >/dev/null || true
-    "$HC" rm "$t" >/dev/null || true
+    echo "open-gui.sh: ending this checkout's $HEADLESS_AGENT agent ($t): it runs the old code" >&2
+    end_terminal "$t"
+  fi
+  t=$(own_curses_dashboard "$space")
+  if [ -n "$t" ]; then
+    echo "open-gui.sh: ending the old curses dashboard ($t) of the TUI layout" >&2
+    end_terminal "$t"
   fi
   if [ -n "$(find_agent "$PROMPTER_AGENT")" ]; then
     echo "open-gui.sh: the prompter keeps its chat: /clear it, then run /octopilot:prompter" >&2
   fi
 }
 
-# Records the chat and kitchen panes of a retired agent on the new host (argument),
-# so a kept OCTOPILOT tab can take its kitchen.
+# Moves the chat and kitchen labels a retired agent left on records_holder to the new host
+# (argument), and clears them there, so a kept OCTOPILOT tab can take its kitchen.
 keep_saved_records() {
-  if [ -n "$SAVED_CHAT" ]; then record_label "$1" octopilot.chat "$SAVED_CHAT"; fi
-  if [ -n "$SAVED_KITCHEN" ]; then record_label "$1" octopilot.kitchen "$SAVED_KITCHEN"; fi
+  local holder v value
+  holder=$(records_holder)
+  if [ -z "$holder" ]; then return 0; fi
+  for v in octopilot.chat octopilot.kitchen; do
+    value=$(label_of "$holder" "$v")
+    if [ -z "$value" ]; then continue; fi
+    record_label "$1" "$v" "$value"
+    "$HC" label "$holder" "$v=" >/dev/null
+  done
 }
 
-# The pane of this checkout's prompter when it is shown in space $1 (a retired
-# retired agent's, in the engine tab), so the new host is split beside it; nothing otherwise.
+# The pane of this checkout's prompter when it is in tab $2 of space $1, so a host can be
+# split beside it; nothing otherwise.
 prompter_pane_in() {
   local t located
   t=$(find_agent "$PROMPTER_AGENT")
-  if [ -z "$t" ]; then return 0; fi
+  if [ -z "$t" ] || [ -z "$2" ]; then return 0; fi
   located=$(locate "$t")
-  if [ -n "$located" ] && [ "$(cut -f1 <<<"$located")" = "$1" ]; then
+  if [ -n "$located" ] && [ "$(cut -f1 <<<"$located")" = "$1" ] \
+    && [ "$(cut -f2 <<<"$located")" = "$2" ]; then
     cut -f3 <<<"$located"
   fi
 }
@@ -754,7 +804,29 @@ focus_main() {
 
 # The space is found before the retirement and the reap, which may end the terminals that prove it.
 known_space=$(existing_space)
-retire_orchestrator
+# Layouts this run cannot build over are refused before anything is ended.
+if [ -n "$known_space" ] && [ "$TERMINALS" = 0 ]; then
+  old=$(legacy_dashboard "$known_space")
+  if [ -n "$old" ]; then
+    echo "open-gui.sh: terminal $old is the curses dashboard of the TUI layout;" \
+      "close its pane first (two dashboards would run), or use --terminals" >&2
+    exit 1
+  fi
+fi
+if [ -n "$known_space" ] && [ "$TERMINALS" = 1 ] && [ -z "$(find_host)" ]; then
+  main=$(tab_named "$known_space" "$MAIN_TAB")
+  if [ -n "$main" ] && [ -z "$(tab_terminals "$main")" ]; then
+    echo "open-gui.sh: the space already has an $MAIN_TAB tab (the GUI layout);" \
+      "run without --terminals" >&2
+    exit 1
+  fi
+  if [ -n "$main" ] && [ -z "$(prompter_pane_in "$known_space" "$main")" ]; then
+    echo "open-gui.sh: the $MAIN_TAB tab holds no $PROMPTER_AGENT to put the dashboard beside;" \
+      "close the tab first" >&2
+    exit 1
+  fi
+fi
+retire_orchestrator "$known_space"
 for a in "$HEADLESS_AGENT" "$PROMPTER_AGENT"; do reap_dead "$a"; done
 host=$(find_host)
 if [ -n "$host" ]; then
@@ -825,25 +897,21 @@ if [ -n "$host" ]; then
 fi
 
 # No host running: it starts in this checkout's space, or in a new one, and the prompter
-# beside it. --terminals starts the curses dashboard as the host instead (its OCTOPILOT
-# tab). A kept prompter in the space (a retired agent's) gets the host beside it.
+# beside it. --terminals starts the curses dashboard as the host. A kept prompter in the
+# host's tab (a retired agent's) gets the host beside it, to its right.
 space="$known_space"
 tab_name="$ENGINE_TAB"
+host_argv=$(headless_argv)
+host_name=headless
 if [ "$TERMINALS" = 1 ]; then
   tab_name="$MAIN_TAB"
   host_argv=$(argv_json env "${envs[@]}" bash "$DIR/dashboard.sh")
-else
-  host_argv=$(headless_argv)
+  host_name=dashboard
 fi
 beside=""
-if [ -n "$space" ] && [ "$TERMINALS" = 0 ]; then beside=$(prompter_pane_in "$space"); fi
-if [ -n "$space" ] && [ "$TERMINALS" = 1 ] && [ -n "$(tab_named "$space" "$MAIN_TAB")" ]; then
-  echo "open-gui.sh: the space already has an $MAIN_TAB tab (the GUI layout);" \
-    "run without --terminals" >&2
-  exit 1
-fi
+if [ -n "$space" ]; then beside=$(prompter_pane_in "$space" "$(tab_named "$space" "$tab_name")"); fi
 if [ -n "$beside" ]; then
-  add_headless "$space" "$beside" right
+  add_host "$space" "$beside" right "$host_argv" "$host_name"
   host=$(find_host)
 elif [ -n "$space" ]; then
   created=$(app do tab.new --space "$space" --name "$tab_name" --argv "$host_argv" --focus false)
@@ -866,7 +934,7 @@ keep_saved_records "$host"
 
 if [ "$TERMINALS" = 1 ]; then
   app do pane.rename --pane "$root" --name dashboard >/dev/null
-  add_prompter_left "$space" "$root"
+  if [ -z "$(find_agent "$PROMPTER_AGENT")" ]; then add_prompter_left "$space" "$root"; fi
   add_code_terminal_tab "$space"
   app do agent.focus --terminal "$host" >/dev/null
 else
