@@ -469,8 +469,8 @@ class Model:
 
     def engine_loop(self):
         """Drain the engine's inbox (scan.py drain): once at start, then on each
-        request or report in the events log, and at least every DRAIN_EVERY
-        seconds. Only where the engine is on."""
+        request in the events log, and at least every DRAIN_EVERY seconds. Only
+        where the engine is on."""
         while True:
             # Cleared before the drain, so a request that lands during it wakes the next.
             self.drain_kick.clear()
@@ -917,7 +917,7 @@ def peek_hc(terminal):
     return scan.app_do("terminal.peek", ["--terminal", terminal], timeout=10)[0] == 0
 
 
-def open_prompter(model):
+def open_prompter():
     """Focus the prompter, where the user types. It is looked up only in the
     dashboard's own backend."""
     own = scan.HC if scan.OCTOPILOT_BACKEND == "hc" else scan.HERDR
@@ -1462,7 +1462,7 @@ def run_action(model, aid, key, args):
                                    truthy(args.get("read_only")),
                                    confirmed_holds(args))
     if aid == "prompter":
-        return open_prompter(model)
+        return open_prompter()
     if aid == "toggle_done":
         return Result(False, "toggle_done is the mod's own: the mod filters "
                              "Done")
@@ -1597,7 +1597,8 @@ class Dashboard:
         if engine["state"] == "acting":
             t.append("⏭ acting", style="cyan")
         elif engine["state"] == "stale":
-            t.append(f"engine running {ago(engine['since_s'])}+ (hung?)", style="red")
+            t.append(f"engine running {ago(engine['since_s'])}+ (hung?)",
+                     style="red")
         elif self.m.snap_running:
             t.append("GitHub ⟳ refreshing", style="cyan")
         elif gen:
@@ -2023,7 +2024,7 @@ class Dashboard:
             if self.ask("P", "", f"press P again to {verb} octopilot"):
                 self.report(set_paused(verb))
         elif key == "a":
-            self.report(open_prompter(self.m))
+            self.report(open_prompter())
         elif key == "i":
             self.investigate(live, term)
         elif key in (" ", "\r", "\n") and repo:

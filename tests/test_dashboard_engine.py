@@ -48,7 +48,7 @@ class OpenPrompterTest(unittest.TestCase):
         with mock.patch.object(dashboard.scan, "OCTOPILOT_BACKEND", "herdr"), \
                 mock.patch.object(dashboard.scan, "herdr", return_value=(1, "", "")), \
                 mock.patch.object(dashboard.scan, "orchestrator_target") as target:
-            res = dashboard.open_prompter(None)
+            res = dashboard.open_prompter()
         self.assertEqual(res, dashboard.Result(False, "no prompter running"))
         target.assert_not_called()
 
