@@ -62,6 +62,10 @@ STATE_FILE = os.environ.get(
 # rendered as JSON.
 EVENTS_FILE = os.path.join(os.path.dirname(STATE_FILE), "events.jsonl")
 SNAPSHOT_FILE = os.path.join(os.path.dirname(STATE_FILE), "snapshot.json")
+# The headless dashboard's view (dashboard.py VIEW_FILE): speech reads the
+# engine's last lines from it, and a view older than VIEW_STALE_SECS is no engine.
+VIEW_FILE = os.path.join(os.path.dirname(STATE_FILE), "view.json")
+VIEW_STALE_SECS = 15  # three times dashboard.py's VIEW_EVERY
 # One tick at a time: a tick that finds it held returns at once.
 TICK_LOCK = os.path.join(os.path.dirname(STATE_FILE), "tick.lock")
 # Held by each engine phase that acts (engine.run_rows), taken after the state
@@ -69,16 +73,14 @@ TICK_LOCK = os.path.join(os.path.dirname(STATE_FILE), "tick.lock")
 EXEC_LOCK = os.path.join(os.path.dirname(STATE_FILE), "exec.lock")
 EVENTS_MAX_BYTES = 512 * 1024
 EVENTS_KEEP = 1000
-# Address of the orchestrator ("herdr:<agent>"). Empty means "whichever agent
-# last ran a scan", recorded by the scan itself.
-OCTOPILOT_ORCH = os.environ.get("OCTOPILOT_ORCH", "")
 # Backend new sessions spawn on: "herdr" (the TUI) or "hc" (herdr-app's GUI).
 OCTOPILOT_BACKEND = os.environ.get("OCTOPILOT_BACKEND", "herdr")
 # The octopilot code dir: where workers find scan.sh and their plugin.
 OCTOPILOT_DIR = (os.environ.get("OCTOPILOT_DIR")
                  or os.path.dirname(os.path.abspath(__file__)))
-# herdr agent name the orchestrator runs under.
-ORCH_AGENT = "octopilot"
+# herdr-app's terminal running the headless dashboard (open-gui.sh), which writes
+# VIEW_FILE.
+HEADLESS_AGENT = "octopilot-headless"
 # herdr agent in the "Octopilot (code changes)" tab (herdr/open.sh): changes
 # and fixes to octopilot itself go there.
 CODE_AGENT = "octopilot-code"
@@ -512,11 +514,22 @@ class HcBackend:
 
     def find(self, name):
         """-> "hc:<terminal>" of the live terminal labelled octopilot.agent=<name>,
-        or None."""
+        or None. This checkout's terminal first, else one with no octopilot.dir
+        label (a worker's); another checkout's is never picked."""
         code, data, _ = hc(["ls", "--json", "--label", f"octopilot.agent={name}"],
                            timeout=10)
         terms = (data or {}).get("terminals", []) if code == 0 else []
-        return f"hc:{terms[0]['address']}" if terms else None
+        unlabelled = None
+        for t in terms:
+            code, info, _ = hc(["get", t["address"], "--json"], timeout=10)
+            if code != 0 or not isinstance(info, dict):
+                continue  # labels unknown: not ours, and not a worker's either
+            d = (info.get("labels") or {}).get("octopilot.dir")
+            if not d:
+                unlabelled = unlabelled or t["address"]
+            elif os.path.realpath(d) == os.path.realpath(OCTOPILOT_DIR):
+                return f"hc:{t['address']}"
+        return f"hc:{unlabelled}" if unlabelled else None
 
     def status(self, target):
         _, info, _ = hc(["get", target, "--json"])
@@ -2360,7 +2373,6 @@ def snapshot_doc(state, work, rows, active, nrepos, untracked, info):
             "untracked": untracked, "max_rounds": MAX_REVIEW_ROUNDS,
             "stall_min": AGENT_STALL_MIN,
             "last_tick": state.get("last_tick"),
-            "orch": orchestrator_target(state),
             "rows": out}
 
 
@@ -2371,15 +2383,6 @@ def write_snapshot(snap):
     with open(tmp, "w") as fh:
         json.dump(snap, fh, indent=2, sort_keys=True)
     os.replace(tmp, SNAPSHOT_FILE)
-
-
-def orchestrator_target(state):
-    """Where agent reports and dashboard commands are sent."""
-    if OCTOPILOT_ORCH or state.get("orch"):
-        return OCTOPILOT_ORCH or state["orch"]
-    if OCTOPILOT_BACKEND == "hc":
-        return HC.find(ORCH_AGENT) or f"hc:{ORCH_AGENT}"
-    return f"herdr:{ORCH_AGENT}"
 
 
 def item_or_exit(state, k):
@@ -2610,16 +2613,18 @@ def terminal_info(address):
     return info if code == 0 and isinstance(info, dict) else None
 
 
-def orchestrator_terminal(state):
-    """-> (address, info) of the orchestrator's terminal, the one labelled
-    octopilot.agent=octopilot else the one the last scan recorded; (None, None)
-    when there is none (the TUI backend, or nothing running)."""
-    address = agent_address(ORCH_AGENT)
-    recorded = state.get("orch") or ""
-    if address is None and recorded.startswith(HC.prefix):
-        address = recorded[len(HC.prefix):]
-    info = terminal_info(address) if address else None
-    return (address, info) if info else (None, None)
+def view_doc():
+    """The headless dashboard's view.json, or None when it is missing, unreadable
+    or older than VIEW_STALE_SECS (no headless dashboard is writing it)."""
+    try:
+        with open(VIEW_FILE) as fh:
+            view = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    gen = view.get("generated_at") if isinstance(view, dict) else None
+    if not isinstance(gen, (int, float)) or time.time() - gen > VIEW_STALE_SECS:
+        return None
+    return view
 
 
 def proc_start(pid):
@@ -2793,22 +2798,24 @@ def blocked_of(info):
 
 
 def speech_cmd(state):
-    """The orchestrator's last message with text, and its state."""
+    """The engine's last lines (view.json's header.engine.last) and its state."""
     out = {"agent": None, "terminal": None, "status": "offline",
            "paused": bool(state.get("paused")), "text": "", "at": None, "seq": 0}
-    address, info = orchestrator_terminal(state)
-    if info is None:
+    view = view_doc()
+    engine = ((view or {}).get("header") or {}).get("engine") or {}
+    if view is None or engine.get("mode") == "off":
         return out
-    out.update(agent=HC.prefix + address, terminal=address, status=status_of(info))
-    path = transcript_path(info)
-    last = None
-    for m in (chat_messages(tail_entries(path)) if path else []):
-        if m["role"] == "assistant" and m["text"]:
-            last = m
+    address = agent_address(HEADLESS_AGENT)
+    # A hung engine is one the user must look at: the kitchen shows it as blocked.
+    status = {"acting": "working", "stale": "blocked"}.get(engine.get("state"), "idle")
+    out.update(terminal=address, agent=HC.prefix + address if address else None,
+               status=status)
+    last = engine.get("last")
     if last:
-        # seq moves with the text, so a re-read of the same message is a no-op.
-        out.update(text=last["text"], at=last["at"],
-                   seq=zlib.crc32(f"{last['id']}\n{last['text']}".encode()))
+        text = "\n".join("- " + line for line in last.get("lines") or [])
+        at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(last["at"]))
+        # seq moves with the text, so a re-read of the same lines is a no-op.
+        out.update(text=text, at=at, seq=zlib.crc32(f"{at}\n{text}".encode()))
     return out
 
 

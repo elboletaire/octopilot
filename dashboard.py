@@ -92,7 +92,7 @@ VIEW_FILE = os.path.join(STATE_DIR, "view.json")
 VIEW_EVERY = 5         # rewrite at least this often, even when unchanged
 KICK_FILE = os.path.join(STATE_DIR, "kick")
 # A refresh is refused when view.json is older than this: no daemon is running.
-VIEW_STALE_SECS = 3 * VIEW_EVERY
+VIEW_STALE_SECS = scan.VIEW_STALE_SECS
 # How long the chef rests after the last event before dozing (register.tsx).
 DOZE_SECS = 10 * 60
 # Clock-relative fields move every second: left out of the change check.
