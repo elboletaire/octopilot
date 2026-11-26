@@ -263,9 +263,16 @@ The engine replaces the messenger (the `octopilot` agent). Before switching, cle
 the old requests: `scan.sh inbox` lists them, and the engine runs them on its first
 drain. Either let them run, or remove the stale `REQUEST` entries from the `inbox`
 list of `state.json` while the dashboards are stopped (there is no command for that).
-To stage the switch, run with `OCTOPILOT_ENGINE=plan` first: it logs what the engine
-would do, and `scan.py drain --plan` shows what a drain would do with each request.
-Set `on` once that looks right.
+
+Stage the switch while the orchestrator still runs (layers 1-3): run with
+`OCTOPILOT_ENGINE=plan` first, which logs what the engine would do, and
+`scan.py drain --plan` shows what a drain would do with each request. Set `on` once
+that looks right. Under this layer the orchestrator is retired, so `plan` leaves
+nobody acting: deploy with the engine already `on`.
+
+Rerun the launcher right after pulling this layer. Until it runs, the old headless
+keeps its code and engine mode: with the engine off nothing drains the requests, and
+the old orchestrator's doorbell exits at once.
 
 - **GUI**: run Open Octopilot (or `herdr/open-gui.sh`). It retires this checkout's
   orchestrator and restarts the headless. Then `/clear` the prompter and run
@@ -275,6 +282,12 @@ Set `on` once that looks right.
   `q`, then reopen it (`prefix+a`). The curses dashboard is the engine's host and keeps
   running the old code until it is restarted. Then `/clear` the prompter and run
   `/octopilot:prompter` in it.
+
+**Rollback.** Previous main with `OCTOPILOT_ENGINE=off` is not enough: the previous
+launcher never restarts a running headless, which keeps acting, and it starts a new
+messenger. End the `octopilot-headless` terminal first (GUI: `hc kill` it, or close its
+tab; TUI: `q` in the dashboard pane, then reopen it with the old code), unset any
+`OCTOPILOT_ENGINE=on` override, then rerun the old launcher.
 
 ## What it shows
 
@@ -294,7 +307,8 @@ dashboards share one refresh. GitHub notifications are polled every 60s
 (`snapshot`, which saves nothing, where the engine may not run), and the engine acts on
 the Next tick rows itself. `OCTOPILOT_ENGINE` picks what it does: `on` (the default,
 set in config.sh) acts; `plan` logs the tick's row actions as "would ..." without acting,
-and `off` acts on nothing. The dashboard drains the inbox only under `on`, so under
+and `off` acts on nothing. It is read when open-gui.sh (or the TUI dashboard pane)
+starts, so change it by restarting that. The dashboard drains the inbox only under `on`, so under
 `plan` and `off` requests wait there (`scan.py drain --plan` prints what a drain would
 do). Under `on`, the dashboard runs `scan.py drain` at once on each request it sees, and
 at least every 60s (`DRAIN_EVERY`). The `g`/`n`/`i` keys and the prompter's commands are
