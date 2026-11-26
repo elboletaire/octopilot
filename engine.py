@@ -660,8 +660,8 @@ def execute(action, ctx):
 
 
 def _deliver_code():
-    """Deliver the code-changes requests the dashboard queued, as `scan` does
-    after its own scan: under the state lock, so each goes out once."""
+    """Deliver the code-changes requests the dashboard queued, on each run:
+    under the state lock, so each goes out once."""
     import scan
     with scan.locked():
         state = scan.load()

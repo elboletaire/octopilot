@@ -90,17 +90,11 @@ _link_herdr_plugin() {
 }
 
 migrate_octopilot_state() {
-  # PR Autopilot was renamed Octopilot: carry its state over once, and point the
-  # recorded orchestrator at the renamed herdr agent.
+  # PR Autopilot was renamed Octopilot: carry its state over once.
   local root=${XDG_STATE_HOME:-$HOME/.local/state}
   local old=$root/pr-autopilot new=$root/octopilot
   [[ -d "$old" && ! -e "$new" ]] || return 0
   mv "$old" "$new" || return 0
-  if [[ -f "$new/state.json" ]]; then
-    sed 's/"herdr:autopilot"/"herdr:octopilot"/' "$new/state.json" > "$new/state.json.tmp" &&
-      mv "$new/state.json.tmp" "$new/state.json" ||
-      echo "WARNING: could not update the orchestrator in $new/state.json" >&2
-  fi
   echo "Moved Octopilot state: $old -> $new"
 }
 

@@ -189,9 +189,8 @@ It records the report on your item, and the dashboard shows it to the user. The
 first line must be that one line -- a human reads it as a summary. Put any
 detail on the lines after it, inside the same quotes. Never type into the
 octopilot panes: that types over whatever the user is writing there. Never send
-desktop notifications
-(`PushNotification`) either: the dashboard tells the user when your item needs
-them.
+desktop notifications (`PushNotification`) either: the dashboard tells the user
+when your item needs them.
 
 If you are going to be working for more than half an hour without pushing and
 without a CI wait in flight, call
