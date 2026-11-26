@@ -8,7 +8,7 @@ from unittest import mock
 
 from tests.fake import fake_world
 import scan
-from engine import Action, Ctx, deliver_pending, execute
+from engine import ACT_BUDGET_SECS, Action, Ctx, deliver_pending, execute, run_rows
 
 REPO = "owner/repo"
 MERGED, A, B, STACK, COMMENT = (f"{REPO}#7", f"{REPO}#8", f"{REPO}#9",
@@ -236,6 +236,109 @@ class ExecuteTest(unittest.TestCase):
         self.assertEqual(len(self.sends()), 1)
         self.assertEqual(self.state()["pending_sends"], [])
         self.assertEqual(self.state()["items"][A]["reviewed_sha"], HEAD)
+
+
+    def test_merge_and_restack_in_one_tick_send_each_prompt_once(self):
+        # The probe: a cleanup fans out to the stack item B on w2, and B's own
+        # restack then needs w2 too. One prompt goes out per run, the other waits.
+        self.save({MERGED: item(7, "feat/a", "w1"),
+                   B: item(9, "feat/c", "w2", stack=[
+                       {"pr": 9, "branch": "feat/c"}, {"pr": 10, "branch": "feat/d"},
+                       {"pr": 11, "branch": "feat/e"}])})
+        self.prs = {9: {"state": "MERGED", "headRefOid": "top9sha"},
+                    10: {"state": "OPEN", "headRefOid": "h10"},
+                    11: {"state": "OPEN", "headRefOid": "h11"}}
+        ctx = self.ctx()
+        execute(Action("cleanup", MERGED, {}), ctx)
+        execute(Action("restack", B, {}), ctx)
+        self.assertEqual(self.addresses(), ["herdr:w2"])
+        self.assertEqual(self.state()["pending_sends"][0]["reason"], "restack")
+        # Next run: the restack prompt goes out, with the merged head it needs.
+        deliver_pending(self.ctx())
+        self.assertEqual(self.addresses(), ["herdr:w2", "herdr:w2"])
+        self.assertIn("top9sha", self.sends()[1][1])
+        self.assertEqual(self.state()["pending_sends"], [])
+
+    def test_a_feedback_send_does_not_drop_a_queued_rebase(self):
+        self.save({A: item(8, "feat/b", "w2", phase="fixing",
+                           feedback_seen="2026-11-20T00:00:00Z",
+                           pending=None)},
+                  pending_sends=[{"key": A, "template": "rebase", "subs": {},
+                                  "at": 0, "tries": 0, "error": None,
+                                  "reason": "rebase"}])
+        execute(Action("feedback", A, {"since": "2026-11-26T00:00:00Z"}),
+                self.ctx())
+        self.assertEqual([p["reason"] for p in self.state()["pending_sends"]],
+                         ["rebase"])
+
+    def test_queued_wait_is_logged_once_and_never_as_an_error(self):
+        self.save({A: item(8, "feat/b", "w2", phase="booting")})
+        self.prs = {8: {"headRefOid": HEAD}}
+        self.reply = (False, "agent_blocked")
+        ctx = self.ctx()
+        execute(Action("boot", A, {}), ctx)
+        deliver_pending(self.ctx())
+        execute(Action("boot", A, {}), self.ctx())
+        self.assertEqual([kind for kind, _, _ in self.logs], ["send-waiting"])
+        self.assertNotIn("engine_error", self.state()["items"][A])
+
+    def test_reboot_blocked_is_a_wait_not_an_error(self):
+        self.save({A: item(8, "feat/b", "w2", review_rounds=1)})
+        self.reboot_code = 4
+        out = execute(Action("review", A, {}), self.ctx())
+        self.assertIn("waiting", out)
+        self.assertEqual([kind for kind, _, _ in self.logs], ["send-waiting"])
+        self.assertEqual(self.state()["items"][A]["engine_wait"][:7], "waiting")
+
+    def test_failure_is_on_the_item_and_logged_once_per_change(self):
+        self.save({A: item(8, "feat/b", "w2", phase="booting")})
+        self.prs = {8: {"headRefOid": HEAD}}
+        self.git_dirty = " M file.py"
+        execute(Action("boot", A, {}), self.ctx())
+        execute(Action("boot", A, {}), self.ctx())
+        it = self.state()["items"][A]
+        self.assertIn("uncommitted", it["last_note"])
+        self.assertEqual([kind for kind, _, _ in self.logs], ["engine-error"])
+        self.assertIn("boot failed", self.logs[0][2]["msg"])
+        # Once the worktree is clean the prompt goes out and the note clears.
+        self.git_dirty = ""
+        execute(Action("boot", A, {}), self.ctx())
+        it = self.state()["items"][A]
+        self.assertNotIn("engine_error", it)
+        self.assertNotIn("last_note", it)
+
+    def test_item_without_a_worktree_uses_its_session_folder(self):
+        self.save({A: item(8, "feat/b", "w2", phase="booting", worktree=None)})
+        self.prs = {8: {"headRefOid": HEAD}}
+        with mock.patch.object(scan, "all_sessions", return_value=(
+                [{"id": "w2", "path": "/wt/session-folder"}], set(), set())):
+            execute(Action("boot", A, {}), self.ctx())
+        git_calls = [args[0] for args, _ in self.world.named("sh")]
+        self.assertIn(["git", "-C", "/wt/session-folder", "rev-parse", "FETCH_HEAD"],
+                      git_calls)
+        self.assertEqual(self.addresses(), ["herdr:w2"])
+
+    def test_budget_stops_new_actions_and_leaves_the_rest(self):
+        self.save({A: item(8, "feat/b", "w2", phase="fixing",
+                           feedback_seen="2026-11-20T00:00:00Z"),
+                   B: item(9, "feat/c", "w3", phase="fixing",
+                           feedback_seen="2026-11-20T00:00:00Z")})
+        rows = [("FEEDBACK", A, "mode=fix since=2026-11-26T00:00:00Z"),
+                ("FEEDBACK", B, "mode=fix since=2026-11-26T00:00:00Z")]
+        clock = iter([0, ACT_BUDGET_SECS]).__next__
+        lines = run_rows(rows, "on", 0, clock=clock)
+        self.assertEqual(self.addresses(), ["herdr:w2"])
+        self.assertIn("1 action(s) left for the next tick", lines[-1])
+
+    def test_plan_logs_only_when_the_planned_set_changes(self):
+        self.save({MERGED: item(7, "feat/a", "w1")})
+        rows = [("MERGED", MERGED, "branch=feat/a mode=fix")]
+        for _ in range(2):
+            self.assertEqual(run_rows(rows, "plan", 0), [f"{MERGED}: would cleanup"])
+        with open(scan.EVENTS_FILE) as fh:
+            self.assertEqual(fh.read().count('"kind": "engine-plan"'), 1)
+        self.assertEqual(self.state()["items"][MERGED]["session"], "w1")
+        self.assertEqual(self.sends(), [])
 
 
 if __name__ == "__main__":

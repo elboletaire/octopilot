@@ -719,6 +719,8 @@ class Model:
             note = "agent not reporting"
         elif parked:
             note = "parked"
+        elif it.get("engine_error"):
+            note = it["engine_error"]
         elif kind in ORCH_ROWS:
             note = f"next tick: {ORCH_ROWS[kind]}"
         elif kind == "NEW":
@@ -1114,6 +1116,9 @@ def kitchen_reaction(ev):
                 "key": key if keyed else None, "text": line,
                 "good": good, "tone": tone}
 
+    if kind == "engine-error":
+        return rx("worried", 3000, "smoke", True, text("msg") or f"engine-error {k}",
+                  bad=True)
     if kind == "tick":
         active = ev.get("active")
         active = int(active) if isinstance(active, (int, float)) else 0

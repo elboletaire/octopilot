@@ -39,5 +39,20 @@ class GithubPassTest(unittest.TestCase):
         self.model.wake_orchestrator.assert_called_once()
 
 
+@unittest.skipIf(dashboard is None, "dashboard needs rich")
+class EngineErrorViewTest(unittest.TestCase):
+    def test_kitchen_says_the_reason_in_a_bad_tone(self):
+        ev = {"kind": "engine-error", "key": "owner/repo#8",
+              "msg": "boot failed: worktree has uncommitted changes"}
+        r = dashboard.kitchen_reaction(ev)
+        self.assertEqual(r["text"], ev["msg"])
+        self.assertEqual(r["tone"], "bad")
+
+    def test_activity_shows_the_reason(self):
+        ev = {"kind": "engine-error", "key": "owner/repo#8",
+              "msg": "boot failed: worktree has uncommitted changes"}
+        self.assertEqual(dashboard.event_detail(ev), ev["msg"])
+
+
 if __name__ == "__main__":
     unittest.main()

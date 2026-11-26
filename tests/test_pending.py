@@ -58,7 +58,7 @@ class DeliverTest(PendingTest):
         entries = self.pending()
         self.assertEqual(len(entries), 1)
         self.assertEqual((entries[0]["error"], entries[0]["tries"]), (BLOCKED, 0))
-        self.assertEqual([kind for kind, _, _ in self.logs], ["send-blocked"])
+        self.assertEqual([kind for kind, _, _ in self.logs], ["send-waiting"])
 
     def test_failed_entry_counts_tries(self):
         self.save_with_send()
@@ -100,14 +100,14 @@ class DeliverTest(PendingTest):
 
 
 class QueueTest(PendingTest):
-    def test_newer_entry_replaces_older_for_same_key(self):
+    def test_newer_entry_replaces_older_for_same_key_and_reason(self):
         state = {"items": {}}
         queue_send(state, K, "review-fix", {"n": "1"}, "first")
-        queue_send(state, K, "re-review", {"n": "2"}, "second")
+        queue_send(state, K, "re-review", {"n": "2"}, "first")
         self.assertEqual(len(state["pending_sends"]), 1)
         entry = state["pending_sends"][0]
         self.assertEqual((entry["template"], entry["subs"], entry["reason"]),
-                         ("re-review", {"n": "2"}, "second"))
+                         ("re-review", {"n": "2"}, "first"))
         self.assertEqual((entry["tries"], entry["error"]), (0, None))
 
     def test_other_keys_kept(self):
@@ -119,9 +119,16 @@ class QueueTest(PendingTest):
     def test_newer_entry_replaces_one_queued_under_a_prev_key(self):
         state = {"items": {"repo#9": {"prev_keys": ["repo!5"]}}}
         queue_send(state, "repo!5", "review-fix", {}, "first")
-        queue_send(state, "repo#9", "re-review", {}, "second")
+        queue_send(state, "repo#9", "re-review", {}, "first")
         self.assertEqual([p["key"] for p in state["pending_sends"]], ["repo#9"])
-        self.assertEqual(state["pending_sends"][0]["reason"], "second")
+        self.assertEqual(state["pending_sends"][0]["template"], "re-review")
+
+    def test_other_reason_queues_behind_for_the_same_item(self):
+        state = {"items": {K: {}}}
+        queue_send(state, K, "rebase", {}, "rebase")
+        queue_send(state, K, "address-feedback", {}, "feedback")
+        self.assertEqual([p["reason"] for p in state["pending_sends"]],
+                         ["rebase", "feedback"])
 
 
 class ReKeyedTest(PendingTest):

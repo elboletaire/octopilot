@@ -125,32 +125,41 @@ def plan_rows(rows, state):
 BLOCKED = "agent blocked"
 FAILED = "send failed"
 
+# How long one tick's act phase may start new actions. The dashboard gives the
+# whole tick 600s, and a fetch or a reboot can take minutes, so the rest waits
+# for the next tick.
+ACT_BUDGET_SECS = 300
+
 
 @dataclass
 class Ctx:
-    """One run of the executor. `sent_keys` holds the items already sent to
-    in this run, so each item gets at most one prompt per run."""
+    """One run of the executor. `sent_keys` holds the identities (sessions) of
+    the items already sent to or queued for in this run, so each item gets at
+    most one prompt per run."""
     dry_run: bool
     sent_keys: set
     log: Callable
     rows: list
 
 
-def _same_item(state, a, b):
-    """Whether two keys name the same tracked item, one maybe a prev key."""
-    if a == b:
-        return True
-    item = find_item(state, a)
-    return item is not None and item is find_item(state, b)
+def _identity(state, key):
+    """What names one item across re-keys: its session, else its current key."""
+    it = find_item(state, key)
+    if it is None:
+        return key
+    if it.get("session"):
+        return it["session"]
+    return next(k for k, v in state.get("items", {}).items() if v is it)
 
 
 def queue_send(state, key, template, subs, reason, mark=None):
-    """Queue a prompt for `key` to be rendered and sent at delivery. A newer
-    one for the same item replaces the older one, whatever key it was queued
-    under. `mark` is the state change the send stands for (see _apply_mark),
-    made only once the prompt has gone out."""
+    """Queue a prompt for `key`. It replaces a queued prompt for the same item
+    with the same reason only, so a rebase is never lost to a feedback prompt.
+    `mark` is applied once the prompt has gone out."""
+    ident = _identity(state, key)
     sends = [p for p in state.get("pending_sends", [])
-             if not _same_item(state, p["key"], key)]
+             if not (p.get("reason") == reason
+                     and _identity(state, p["key"]) == ident)]
     entry = {"key": key, "template": template, "subs": subs,
              "at": int(time.time()), "tries": 0, "error": None,
              "reason": reason}
@@ -161,26 +170,27 @@ def queue_send(state, key, template, subs, reason, mark=None):
 
 
 def deliver_pending(ctx):
-    """Try each queued send once. Returns one outcome line per entry tried.
-
-    Each entry takes the state lock on its own, so this must not run while
-    the caller holds it: the lock is not re-entrant.
-    """
+    """Try each queued send once, in queue order, one per item per run.
+    Returns one outcome line per entry tried. Each entry takes the state lock
+    itself, so the caller must not hold it (it is not re-entrant)."""
     # Imported late: scan will import engine for the tick.
     import scan
     out = []
-    keys = [p["key"] for p in scan.load().get("pending_sends", [])]
-    for key in keys:
+    refs = [(p["key"], p["reason"], p["at"])
+            for p in scan.load().get("pending_sends", [])]
+    for key, reason, at in refs:
         with scan.locked():
             state = scan.load()
             entry = next((p for p in state.get("pending_sends", [])
-                          if p["key"] == key), None)
+                          if (p["key"], p["reason"], p["at"]) == (key, reason, at)),
+                         None)
             if entry is None:
                 continue
-            # The item may have been re-keyed since queueing: sent_keys and the
-            # executor both use the item's current key.
+            # The item may have been re-keyed since queueing: the executor
+            # uses the item's current key and identity.
             resolved = scan.resolve_key(state, key)
-            if resolved in ctx.sent_keys:
+            ident = _identity(state, key)
+            if ident in ctx.sent_keys:
                 continue
             # send_item exits on an unknown item, so check before sending.
             if resolved not in state.get("items", {}):
@@ -188,12 +198,12 @@ def deliver_pending(ctx):
                     out.append(f"{key}: would drop, item gone")
                     continue
                 state["pending_sends"] = [p for p in state["pending_sends"]
-                                          if p["key"] != key]
+                                          if p is not entry]
                 scan.save(state)
                 ctx.log("send-dropped", key, template=entry["template"])
                 out.append(f"{key}: dropped, item gone")
                 continue
-            ctx.sent_keys.add(resolved)
+            ctx.sent_keys.add(ident)
             if ctx.dry_run:
                 out.append(f"{key}: would send {entry['template']}")
                 continue
@@ -212,11 +222,13 @@ def deliver_pending(ctx):
                 if entry.get("mark"):
                     _apply_mark(state, resolved, entry["mark"])
                 state["pending_sends"] = [p for p in state["pending_sends"]
-                                          if p["key"] != key]
+                                          if p is not entry]
                 out.append(f"{key}: sent")
             elif code == 4:
                 if entry["error"] != BLOCKED:
-                    ctx.log("send-blocked", key, template=entry["template"])
+                    _note(state, ctx, resolved, "engine_wait", "send-waiting",
+                          f"waiting: {entry['template']}, the agent is on an "
+                          "approval or question")
                 entry["error"] = BLOCKED
                 out.append(f"{key}: blocked, kept for retry")
             else:
@@ -242,27 +254,78 @@ def _apply_mark(state, key, mark):
     return scan.mark_feedback(state, key, mark["since"], mark["pr"])
 
 
+def _note(state, ctx, key, field, event, msg, **fields):
+    """Keep `msg` on the item under `field`, where the card shows it, and log
+    `event` only when the message is new for that item, so a stuck item logs
+    once rather than every tick. Caller holds the lock and saves."""
+    it = find_item(state, key)
+    if it is not None:
+        if it.get(field) == msg:
+            return
+        it[field] = msg
+        if field == "engine_error":
+            it["last_note"] = msg
+    ctx.log(event, key, msg=msg, **fields)
+
+
+def _record(ctx, key, field, event, msg, **fields):
+    """_note on its own: takes the lock, loads and saves."""
+    import scan
+    with scan.locked():
+        state = scan.load()
+        _note(state, ctx, key, field, event, msg, **fields)
+        scan.save(state)
+
+
+def _fail(ctx, key, action, error):
+    """An action that could not be done: the reason goes on the item."""
+    _record(ctx, key, "engine_error", "engine-error",
+            f"{action} failed: {error}", action=action)
+    return f"{key}: {action} failed: {error}"
+
+
+def _clear_notes(it):
+    """A prompt went out: the item's failure and wait notes no longer hold."""
+    if it.get("engine_error") and it.get("last_note") == it["engine_error"]:
+        it.pop("last_note")
+    it.pop("engine_error", None)
+    it.pop("engine_wait", None)
+
+
 def _send_in(state, ctx, key, template, subs, reason, mark=None):
-    """Send `template` to the item under `key`, or queue it when its agent
-    cannot take it now (exit 4, or a failed send). Caller holds the lock and
-    passes the state it loaded."""
+    """Send `template` to the item under `key`, or queue it when it cannot go
+    out now: its agent is busy on an approval (exit 4, logged once as waiting),
+    the send failed (logged as an error), or the item already got a prompt this
+    run. Caller holds the lock and passes the state it loaded."""
     import scan
     k = scan.resolve_key(state, key)
-    if k not in state.get("items", {}):
+    it = find_item(state, k)
+    if it is None:
         return f"{key}: not tracked, nothing sent"
-    if k in ctx.sent_keys:
-        return f"{k}: already sent this run"
-    ctx.sent_keys.add(k)
-    text = scan.render_for(state, template, dict(subs))
-    if scan.send_item(state, k, text) != 0:
+    ident = _identity(state, k)
+    if ident in ctx.sent_keys:
         queue_send(state, key, template, subs, reason, mark)
         scan.save(state)
-        ctx.log("send-queued", k, template=template, reason=reason)
+        return f"{k}: {template} queued, sent next run"
+    ctx.sent_keys.add(ident)
+    text = scan.render_for(state, template, dict(subs))
+    code = scan.send_item(state, k, text)
+    if code != 0:
+        queue_send(state, key, template, subs, reason, mark)
+        if code == 4:
+            _note(state, ctx, k, "engine_wait", "send-waiting",
+                  f"waiting: {template}, the agent is on an approval or question")
+        else:
+            _note(state, ctx, k, "engine_error", "engine-error",
+                  f"{reason} failed: the send to the agent failed", action=reason)
+        scan.save(state)
         return f"{k}: queued {template}, kept for retry"
-    # A fresh prompt supersedes any queued one for the item, so that one must
-    # not go out later as a stale duplicate.
+    # A fresh prompt supersedes a queued one with the same reason, so that one
+    # must not go out later as a stale duplicate.
     state["pending_sends"] = [p for p in state.get("pending_sends", [])
-                              if not _same_item(state, p["key"], k)]
+                              if not (p.get("reason") == reason
+                                      and _identity(state, p["key"]) == ident)]
+    _clear_notes(it)
     if mark:
         _apply_mark(state, k, mark)
     scan.save(state)
@@ -294,7 +357,7 @@ def checkout_pr_head(wt, pr, branch):
     never moved over uncommitted changes."""
     import scan
     if not wt:
-        return None, "no worktree recorded"
+        return None, "no worktree for the item"
     code, _, err = scan.sh(["git", "-C", wt, "fetch", "origin", f"pull/{pr}/head"],
                            timeout=180)
     if code != 0:
@@ -317,18 +380,32 @@ def checkout_pr_head(wt, pr, branch):
     return sha, ""
 
 
+def _worktree(it):
+    """The item's worktree, else its session's folder (items added by hand
+    with `track` have none recorded)."""
+    if it.get("worktree"):
+        return it["worktree"]
+    import scan
+    sessions, _, _ = scan.all_sessions()
+    for s in sessions:
+        if s.get("id") == it.get("session"):
+            return s.get("path")
+    return None
+
+
 def _cleanup(ctx, key):
     import scan
     with scan.locked():
         state = scan.load()
         r = scan.cleanup_item(state, scan.resolve_key(state, key))
     if not r["ok"]:
-        ctx.log("engine-error", key, action="cleanup", error=r["error"])
-        return f"{key}: cleanup refused: {r['error']}"
-    if r["discard_error"]:
-        ctx.log("engine-error", key, action="cleanup", error=r["discard_error"])
+        return _fail(ctx, key, "cleanup", r["error"])
     slug = scan.split_key(key)[0]
     sent = _fan_out(ctx, slug, r["base"], r["siblings"])
+    if r["discard_error"]:
+        _record(ctx, key, "engine_error", "engine-error",
+                f"cleanup: removing the workspace failed: {r['discard_error']}",
+                action="cleanup")
     return "; ".join([f"{key}: cleaned up"] + sent)
 
 
@@ -337,8 +414,7 @@ def _restack(ctx, key):
     with scan.locked():
         r = scan.restack_item(scan.load(), key)
     if not r["ok"]:
-        ctx.log("engine-error", key, action="restack", error=r["error"])
-        return f"{key}: restack refused: {r['error']}"
+        return _fail(ctx, key, "restack", r["error"])
     slug = scan.split_key(key)[0]
     sent = [_send(ctx, r["new_key"], r["template"], r["subs"], "restack")]
     sent += _fan_out(ctx, slug, r["base"], r["siblings"])
@@ -362,8 +438,11 @@ def _review(ctx, key):
         return _boot(ctx, k)
     if code == 3:
         return f"{k}: rebooting, not idle yet; booting next tick"
-    ctx.log("engine-error", k, action="review", error=f"reboot exit {code}")
-    return f"{k}: reboot failed (exit {code})"
+    if code == 4:
+        msg = "waiting: reboot, the agent is on an approval or question"
+        _record(ctx, k, "engine_wait", "send-waiting", msg)
+        return f"{k}: {msg}"
+    return _fail(ctx, k, "review", f"reboot exit {code}")
 
 
 def _boot(ctx, key):
@@ -380,15 +459,13 @@ def _boot(ctx, key):
     # gh and git are slow: neither runs under the lock.
     d = scan.pr_detail(slug, pr) if pr else None
     if d is None:
-        ctx.log("engine-error", k, action="boot", error="PR detail unavailable")
-        return f"{k}: boot not sent: PR detail unavailable"
+        return _fail(ctx, k, "boot", "PR detail unavailable")
     template, prev = scan.boot_template(it, d, me)
-    head, note = checkout_pr_head(it.get("worktree"), pr, branch)
+    head, note = checkout_pr_head(_worktree(it), pr, branch)
     if head is None:
         # Not sent: a review of a worktree that is not on the PR's head would
         # be a review of the wrong code. The row is still BOOTING next tick.
-        ctx.log("engine-error", k, action="boot", error=note)
-        return f"{k}: boot not sent: {note}"
+        return _fail(ctx, k, "boot", note)
     with scan.locked():
         state = scan.load()
         k = scan.resolve_key(state, k)
@@ -429,7 +506,7 @@ def _feedback(ctx, key, data):
 
 def execute(action, ctx):
     """Act on one planned action -> one outcome line. An action that fails is
-    logged as engine-error and returned, never raised, so the next one still
+    recorded on its item and returned, never raised, so the next one still
     runs. Under dry_run it changes nothing."""
     if ctx.dry_run:
         return f"{action.key}: would {action.kind}"
@@ -446,9 +523,8 @@ def execute(action, ctx):
             return _feedback(ctx, action.key, action.data)
         raise ValueError(f"no executor for {action.kind}")
     except (Exception, SystemExit) as exc:
-        ctx.log("engine-error", action.key, action=action.kind,
-                error=f"{type(exc).__name__}: {exc}")
-        return f"{action.key}: {action.kind} failed: {exc}"
+        return _fail(ctx, action.key, action.kind,
+                     f"{type(exc).__name__}: {exc}")
 
 
 def _deliver_code():
@@ -464,10 +540,12 @@ def _deliver_code():
             + (f", still pending ({err})" if err else "")]
 
 
-def run_rows(rows, mode):
+def run_rows(rows, mode, started, clock=time.monotonic):
     """Plan the tick's `rows` (scan's (kind, key, extra) tuples) and, in on
-    mode, act on the plan. Plan mode logs what would happen and changes
-    nothing. Caller holds exec.lock, not the state lock. -> the outcome lines."""
+    mode, act on the plan. Plan mode logs what would happen, when the planned
+    set changes, and changes nothing else. Starts no action once ACT_BUDGET_SECS
+    past `started` (a clock() reading); the rest waits for the next tick.
+    Caller holds exec.lock, not the state lock. -> the outcome lines."""
     import scan
     state = scan.load()
     dict_rows = [{"kind": kind, "key": key,
@@ -475,12 +553,24 @@ def run_rows(rows, mode):
                  for kind, key, extra in sorted(rows, key=scan.row_order)]
     dry = mode == "plan"
     ctx = Ctx(dry_run=dry, sent_keys=set(), log=scan.log_event, rows=dict_rows)
+    plan = plan_rows(dict_rows, state)
+    if dry:
+        planned = [f"{a.key} {a.kind}" for a in plan]
+        if planned != (state.get("engine_plan") or []):
+            with scan.locked():
+                state = scan.load()
+                state["engine_plan"] = planned
+                scan.save(state)
+            for a in plan:
+                scan.log_event("engine-plan", a.key, action=a.kind)
+        return [f"{a.key}: would {a.kind}" for a in plan]
+    deadline = started + ACT_BUDGET_SECS
     lines = []
-    for action in plan_rows(dict_rows, state):
-        if dry:
-            scan.log_event("engine-plan", action.key, action=action.kind)
+    for i, action in enumerate(plan):
+        if clock() >= deadline:
+            lines.append(f"budget spent: {len(plan) - i} action(s) left for the next tick")
+            break
         lines.append(execute(action, ctx))
     lines += deliver_pending(ctx)
-    if not dry:
-        lines += _deliver_code()
+    lines += _deliver_code()
     return lines

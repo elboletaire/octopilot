@@ -126,6 +126,8 @@ the dashboard's `g`/`n` keys send) still work. Report `UNCLONED` and
 
 ## What each row means
 
+With `OCTOPILOT_ENGINE=on` the engine acts on `MERGED`, `RESTACK`, `REVIEW`, `BOOTING` and `FEEDBACK` itself, and the scan does not list them: take no action on those kinds.
+
 | Row | Do this |
 |---|---|
 | `MERGED` | `$A cleanup <key>` -- removes the session and its worktree, marks it handled, and then prints the fan-out set as `SIBLINGS:` lines of `<session> <branch> <pr> <base> <key>`. For each of those lines, `$A send <key> "$($A render rebase REPO=<slug> PR=<pr> BRANCH=<branch> BASE=<base>)"`. A line ending in ` stack` is a stack item instead: send `$A send <key> "$($A render rebase-stack REPO=<slug> BASE=<base> KEY=<key>)"` (`STACK=` is filled in from the item). The set is already filtered to `mode=fix` and excludes the merged item; never widen it by hand. |

@@ -52,7 +52,7 @@ class TickEngineTest(unittest.TestCase):
                    "handled_merges": [], "pending_sends": [],
                    "registry": {REPO: {"path": "/repo", "base": "main"}}})
 
-    def scan(self, state, info=None):
+    def scan(self, state, info=None, refresh=False):
         info.update(revived=[], details={}, meta={})
         return ROWS, 2, 1, 0
 
@@ -114,6 +114,37 @@ class TickEngineTest(unittest.TestCase):
             self.tick(engine="on")
         self.assertEqual(self.items(), before)
         self.assertEqual(self.sent(), [])
+
+    def worktree(self):
+        stack = contextlib.ExitStack()
+        stack.enter_context(mock.patch.object(scan, "installed_dir",
+                                              return_value="/live/octopilot"))
+        stack.enter_context(mock.patch.object(scan, "OCTOPILOT_DIR", "/wt/octopilot"))
+        stack.enter_context(mock.patch.dict(os.environ))
+        os.environ.pop("OCTOPILOT_STATE_DIR", None)
+        self.addCleanup(stack.close)
+
+    def test_tick_plan_in_a_worktree_says_the_engine_is_off(self):
+        self.worktree()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            scan.tick(["--plan"])
+        self.assertIn("engine off here: /wt/octopilot is not the live checkout", out.getvalue())
+        self.assertEqual(self.sent(), [])
+
+    def test_scan_hides_engine_kinds_only_when_the_engine_is_on(self):
+        with mock.patch.object(scan, "current_orch", return_value=None):
+            shown = {}
+            for mode in ("on", "off"):
+                os.environ["OCTOPILOT_ENGINE"] = mode
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    scan.dispatch("scan", ["scan"], scan.load())
+                shown[mode] = out.getvalue()
+        self.assertIn("ENGINE  acts on MERGED", shown["on"])
+        self.assertNotIn(MERGED, shown["on"])
+        self.assertNotIn("ENGINE", shown["off"])
+        self.assertIn(MERGED, shown["off"])
 
     def test_engine_mode_reads_the_env_and_guard(self):
         with mock.patch.object(scan, "OCTOPILOT_DIR", "/wt/octopilot"):

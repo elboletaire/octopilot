@@ -1064,13 +1064,9 @@ def stack_rest(it, detail_of):
 
 
 def boot_template(it, d, me):
-    """The review prompt a booting item gets, from its mode and history:
-    -> (template, prev). prev is the sha a re-review covers from, else None.
-
-    A comment item already reviewed gets a follow-up scoped to the author's
-    new commits, not a second full review. Items tracked before reviewed_sha
-    was seeded fall back to GitHub's own review of the PR.
-    """
+    """The review prompt a booting item gets: -> (template, prev), prev the sha
+    a re-review covers from. A reviewed comment item gets a follow-up on the
+    author's new commits, not a second full review."""
     prev = it.get("reviewed_sha")
     if it["mode"] == "comment" and not prev:
         prev = last_own_review(d, me)
@@ -3036,8 +3032,9 @@ def engine_mode(args=()):
 
 
 def tick(args):
-    """tick [--quiet]: one scan that saves the transitions it finds, and writes
-    the dashboard's snapshot from the same rows."""
+    """tick [--quiet] [--plan]: one scan that saves the transitions it finds,
+    writes the dashboard's snapshot from the same rows, then runs the engine."""
+    started = time.monotonic()
     os.makedirs(os.path.dirname(TICK_LOCK), exist_ok=True)
     with open(TICK_LOCK, "w") as lk:
         try:
@@ -3070,11 +3067,14 @@ def tick(args):
             if "--quiet" not in args:
                 render(rows, active, n, state, untracked)
         mode = engine_mode(args)
+        if mode == "off" and "--plan" in args:
+            print(f"engine off here: {OCTOPILOT_DIR} is not the live checkout "
+                  "and OCTOPILOT_STATE_DIR is unset")
         if mode != "off":
             import engine
             with open(EXEC_LOCK, "w") as ex:
                 fcntl.flock(ex.fileno(), fcntl.LOCK_EX)
-                lines = engine.run_rows(rows, mode)
+                lines = engine.run_rows(rows, mode, started)
             if "--quiet" not in args and lines:
                 print("\n".join(lines))
     return 0
@@ -3111,7 +3111,14 @@ def dispatch(cmd, args, state):
         if orch:
             state["orch"] = orch
         save(state)
-        render(rows, active, n, state, untracked)
+        shown = rows
+        if engine_mode() == "on":
+            # The engine acts on these kinds itself; the orchestrator must not.
+            import engine
+            print("ENGINE  acts on MERGED, RESTACK, REVIEW, BOOTING and FEEDBACK; "
+                  "not listed here")
+            shown = [r for r in rows if r[0] not in engine.PLANNED]
+        render(shown, active, n, state, untracked)
         if state.get("code_pending"):
             sent, err = send_code(state)
             left = len(state.get("code_pending") or [])

@@ -133,6 +133,8 @@ export function react(ev: OctopilotEvent): Reaction {
   const line = (text: string, tone: LogLine['tone'] = 'info'): LogLine => ({ at, text, tone })
 
   switch (ev.kind) {
+    case 'engine-error':
+      return { mood: 'worried', ms: 3000, burst: 'smoke', key, line: line(str(ev.msg) || `engine-error ${k}`, 'bad') }
     case 'tick': {
       const active = typeof ev.active === 'number' ? ev.active : 0
       return { mood: 'flip', ms: 2500, burst: 'steam', line: line(`tick · ${active} cooking`) }
