@@ -327,6 +327,8 @@ user is half-way through writing there and sends it.
 Two kinds of message queue in the inbox: agent reports, as a line starting
 `OCTOPILOT <key> <state>`, and dashboard requests, as `REQUEST <command>`
 (the dashboard's `g`/`n` keys send `REQUEST go <key>` / `REQUEST no <key>`).
+With the engine on (`OCTOPILOT_ENGINE=on`), `$A inbox` prints only the reports:
+the `REQUEST` lines are the engine's (`$A drain`), and stay queued for it.
 
 - **Keep the doorbell armed.** On the first tick of a session, and again
   whenever its Monitor expires or you find none running, start

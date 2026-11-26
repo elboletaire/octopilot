@@ -2605,17 +2605,20 @@ def inbox(state):
 
     Agent reports print as the `OCTOPILOT <key> <state> <sha> <message>` line
     they always were; dashboard requests as `REQUEST <command>`. Continuation
-    lines are indented, so every message starts at column 0."""
+    lines are indented, so every message starts at column 0. With the engine
+    on, the requests are the engine's (drain): they stay queued for it."""
     box = state.get("inbox") or []
-    if not box:
+    engine_on = engine_mode() == "on"
+    shown = [m for m in box if not (engine_on and m["text"].startswith("REQUEST "))]
+    if not shown:
         print("(inbox empty)")
         return 0
-    for m in box:
+    for m in shown:
         first, *rest = m["text"].splitlines() or [""]
         print(f"{time.strftime('%H:%M', time.localtime(m['at']))} {first}")
         for line in rest:
             print(f"    {line}")
-    state["inbox"] = []
+    state["inbox"] = [m for m in box if m not in shown]
     save(state)
     return 0
 
@@ -3153,8 +3156,8 @@ def dispatch(cmd, args, state):
         if engine_mode() == "on":
             # The engine acts on these kinds itself; the orchestrator must not.
             import engine
-            print("ENGINE  acts on MERGED, RESTACK, REVIEW, BOOTING and FEEDBACK; "
-                  "not listed here")
+            print("ENGINE  acts on MERGED, RESTACK, REVIEW, BOOTING and FEEDBACK, and "
+                  "takes the REQUEST lines of the inbox; not listed here")
             shown = [r for r in rows if r[0] not in engine.PLANNED]
         render(shown, active, n, state, untracked)
         if state.get("code_pending"):
