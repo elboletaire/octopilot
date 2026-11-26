@@ -144,15 +144,19 @@ def _same_item(state, a, b):
     return item is not None and item is find_item(state, b)
 
 
-def queue_send(state, key, template, subs, reason):
+def queue_send(state, key, template, subs, reason, mark=None):
     """Queue a prompt for `key` to be rendered and sent at delivery. A newer
     one for the same item replaces the older one, whatever key it was queued
-    under."""
+    under. `mark` is the state change the send stands for (see _apply_mark),
+    made only once the prompt has gone out."""
     sends = [p for p in state.get("pending_sends", [])
              if not _same_item(state, p["key"], key)]
-    sends.append({"key": key, "template": template, "subs": subs,
-                  "at": int(time.time()), "tries": 0, "error": None,
-                  "reason": reason})
+    entry = {"key": key, "template": template, "subs": subs,
+             "at": int(time.time()), "tries": 0, "error": None,
+             "reason": reason}
+    if mark:
+        entry["mark"] = mark
+    sends.append(entry)
     state["pending_sends"] = sends
 
 
@@ -205,6 +209,8 @@ def deliver_pending(ctx):
                 scan.save(state)
                 continue
             if code == 0:
+                if entry.get("mark"):
+                    _apply_mark(state, resolved, entry["mark"])
                 state["pending_sends"] = [p for p in state["pending_sends"]
                                           if p["key"] != key]
                 out.append(f"{key}: sent")
@@ -219,3 +225,227 @@ def deliver_pending(ctx):
                 out.append(f"{key}: failed, try {entry['tries']}")
             scan.save(state)
     return out
+
+
+# ------------------------------------------------------------------ executor
+#
+# Each step takes the state lock on its own and re-reads the state: a reboot,
+# a checkout or a send in between is slow, and another writer may move the
+# item meanwhile. Nothing here merges or pushes.
+
+def _apply_mark(state, key, mark):
+    """The state change a prompt stood for, made once the prompt has gone out:
+    a review counted (mark_reviewed) or a feedback watermark moved."""
+    import scan
+    if mark["op"] == "reviewed":
+        return scan.mark_reviewed(state, key, mark["sha"])
+    return scan.mark_feedback(state, key, mark["since"], mark["pr"])
+
+
+def _send_in(state, ctx, key, template, subs, reason, mark=None):
+    """Send `template` to the item under `key`, or queue it when its agent
+    cannot take it now (exit 4, or a failed send). Caller holds the lock and
+    passes the state it loaded."""
+    import scan
+    k = scan.resolve_key(state, key)
+    if k not in state.get("items", {}):
+        return f"{key}: not tracked, nothing sent"
+    if k in ctx.sent_keys:
+        return f"{k}: already sent this run"
+    ctx.sent_keys.add(k)
+    text = scan.render_for(state, template, dict(subs))
+    if scan.send_item(state, k, text) != 0:
+        queue_send(state, key, template, subs, reason, mark)
+        scan.save(state)
+        ctx.log("send-queued", k, template=template, reason=reason)
+        return f"{k}: queued {template}, kept for retry"
+    # A fresh prompt supersedes any queued one for the item, so that one must
+    # not go out later as a stale duplicate.
+    state["pending_sends"] = [p for p in state.get("pending_sends", [])
+                              if not _same_item(state, p["key"], k)]
+    if mark:
+        _apply_mark(state, k, mark)
+    scan.save(state)
+    return f"{k}: sent {template}"
+
+
+def _send(ctx, key, template, subs, reason, mark=None):
+    import scan
+    with scan.locked():
+        return _send_in(scan.load(), ctx, key, template, subs, reason, mark)
+
+
+def _rebase_prompt(slug, base, key, it):
+    """The prompt that rebases a fan-out item onto its base after a merge."""
+    if it.get("stack"):
+        return "rebase-stack", {"REPO": slug, "BASE": base, "KEY": key}
+    return "rebase", {"REPO": slug, "PR": it["pr"], "BRANCH": it["branch"],
+                      "BASE": base}
+
+
+def _fan_out(ctx, slug, base, siblings):
+    return [_send(ctx, k, *_rebase_prompt(slug, base, k, it), "rebase")
+            for k, it in siblings]
+
+
+def checkout_pr_head(wt, pr, branch):
+    """Detach the worktree `wt` on the head of PR `pr`. -> (sha, note): sha is
+    the head it now sits on, or None with the reason in note. The worktree is
+    never moved over uncommitted changes."""
+    import scan
+    if not wt:
+        return None, "no worktree recorded"
+    code, _, err = scan.sh(["git", "-C", wt, "fetch", "origin", f"pull/{pr}/head"],
+                           timeout=180)
+    if code != 0:
+        # The PR's own ref can be missing (a fork); its branch may still be there.
+        code, _, err = scan.sh(["git", "-C", wt, "fetch", "origin", branch],
+                               timeout=180)
+    if code != 0:
+        return None, f"fetch failed: {err}"
+    _, sha, _ = scan.sh(["git", "-C", wt, "rev-parse", "FETCH_HEAD"])
+    if not sha:
+        return None, "no FETCH_HEAD"
+    code, dirty, err = scan.sh(["git", "-C", wt, "status", "--porcelain"])
+    if code != 0:
+        return None, f"git status failed: {err}"
+    if dirty:
+        return None, "worktree has uncommitted changes"
+    code, _, err = scan.sh(["git", "-C", wt, "checkout", "--detach", "FETCH_HEAD"])
+    if code != 0:
+        return None, f"checkout failed: {err}"
+    return sha, ""
+
+
+def _cleanup(ctx, key):
+    import scan
+    with scan.locked():
+        state = scan.load()
+        r = scan.cleanup_item(state, scan.resolve_key(state, key))
+    if not r["ok"]:
+        ctx.log("engine-error", key, action="cleanup", error=r["error"])
+        return f"{key}: cleanup refused: {r['error']}"
+    if r["discard_error"]:
+        ctx.log("engine-error", key, action="cleanup", error=r["discard_error"])
+    slug = scan.split_key(key)[0]
+    sent = _fan_out(ctx, slug, r["base"], r["siblings"])
+    return "; ".join([f"{key}: cleaned up"] + sent)
+
+
+def _restack(ctx, key):
+    import scan
+    with scan.locked():
+        r = scan.restack_item(scan.load(), key)
+    if not r["ok"]:
+        ctx.log("engine-error", key, action="restack", error=r["error"])
+        return f"{key}: restack refused: {r['error']}"
+    slug = scan.split_key(key)[0]
+    sent = [_send(ctx, r["new_key"], r["template"], r["subs"], "restack")]
+    sent += _fan_out(ctx, slug, r["base"], r["siblings"])
+    return "; ".join(sent)
+
+
+def _review(ctx, key):
+    import scan
+    with scan.locked():
+        state = scan.load()
+        k = scan.resolve_key(state, key)
+        it = state.get("items", {}).get(k)
+        if it is None:
+            return f"{key}: not tracked, nothing to review"
+        rounds = int(it.get("review_rounds", 0))
+        if rounds >= scan.MAX_REVIEW_ROUNDS:
+            ctx.log("engine-skip", k, reason="review cap reached", rounds=rounds)
+            return f"{k}: capped at {rounds}, skipped"
+        code = scan.reboot(state, k)
+    if code == 0:
+        return _boot(ctx, k)
+    if code == 3:
+        return f"{k}: rebooting, not idle yet; booting next tick"
+    ctx.log("engine-error", k, action="review", error=f"reboot exit {code}")
+    return f"{k}: reboot failed (exit {code})"
+
+
+def _boot(ctx, key):
+    import scan
+    with scan.locked():
+        state = scan.load()
+        k = scan.resolve_key(state, key)
+        it = state.get("items", {}).get(k)
+        if it is None or it.get("phase") != "booting":
+            return f"{key}: not booting, nothing sent"
+        me = scan.whoami(state)
+    slug = scan.split_key(k)[0]
+    pr, branch = it.get("pr"), it.get("branch")
+    # gh and git are slow: neither runs under the lock.
+    d = scan.pr_detail(slug, pr) if pr else None
+    if d is None:
+        ctx.log("engine-error", k, action="boot", error="PR detail unavailable")
+        return f"{k}: boot not sent: PR detail unavailable"
+    template, prev = scan.boot_template(it, d, me)
+    head, note = checkout_pr_head(it.get("worktree"), pr, branch)
+    if head is None:
+        # Not sent: a review of a worktree that is not on the PR's head would
+        # be a review of the wrong code. The row is still BOOTING next tick.
+        ctx.log("engine-error", k, action="boot", error=note)
+        return f"{k}: boot not sent: {note}"
+    with scan.locked():
+        state = scan.load()
+        k = scan.resolve_key(state, k)
+        if state.get("items", {}).get(k, {}).get("phase") != "booting":
+            return f"{k}: no longer booting, nothing sent"
+        base = state.get("registry", {}).get(slug, {}).get("base", "main")
+        subs = {"REPO": slug, "PR": pr, "BRANCH": branch, "BASE": base}
+        if template == "re-review":
+            subs["PREV"] = prev
+        return _send_in(state, ctx, k, template, subs, "boot",
+                        mark={"op": "reviewed", "sha": head})
+
+
+def _feedback(ctx, key, data):
+    import scan
+    with scan.locked():
+        state = scan.load()
+        k = scan.resolve_key(state, key)
+        it = state.get("items", {}).get(k)
+        if it is None:
+            return f"{key}: not tracked, nothing sent"
+        slug = scan.split_key(k)[0]
+        base = state.get("registry", {}).get(slug, {}).get("base", "main")
+        pr = data.get("pr")
+        if pr:
+            # A stack: the layer's PR and branch, with the stack's key.
+            pr = int(pr)
+            subs = {"REPO": slug, "PR": pr, "BRANCH": data["branch"],
+                    "BASE": base, "KEY": k}
+        else:
+            pr = None
+            subs = {"REPO": slug, "PR": it["pr"], "BRANCH": it["branch"],
+                    "BASE": base}
+        mark = {"op": "feedback", "since": data["since"], "pr": pr}
+        return _send_in(state, ctx, k, "address-feedback", subs, "feedback",
+                        mark=mark)
+
+
+def execute(action, ctx):
+    """Act on one planned action -> one outcome line. An action that fails is
+    logged as engine-error and returned, never raised, so the next one still
+    runs. Under dry_run it changes nothing."""
+    if ctx.dry_run:
+        return f"{action.key}: would {action.kind}"
+    try:
+        if action.kind == "cleanup":
+            return _cleanup(ctx, action.key)
+        if action.kind == "restack":
+            return _restack(ctx, action.key)
+        if action.kind == "review":
+            return _review(ctx, action.key)
+        if action.kind == "boot":
+            return _boot(ctx, action.key)
+        if action.kind == "feedback":
+            return _feedback(ctx, action.key, action.data)
+        raise ValueError(f"no executor for {action.kind}")
+    except (Exception, SystemExit) as exc:
+        ctx.log("engine-error", action.key, action=action.kind,
+                error=f"{type(exc).__name__}: {exc}")
+        return f"{action.key}: {action.kind} failed: {exc}"

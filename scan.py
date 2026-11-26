@@ -1060,6 +1060,26 @@ def stack_rest(it, detail_of):
     return merged, left
 
 
+def boot_template(it, d, me):
+    """The review prompt a booting item gets, from its mode and history:
+    -> (template, prev). prev is the sha a re-review covers from, else None.
+
+    A comment item already reviewed gets a follow-up scoped to the author's
+    new commits, not a second full review. Items tracked before reviewed_sha
+    was seeded fall back to GitHub's own review of the PR.
+    """
+    prev = it.get("reviewed_sha")
+    if it["mode"] == "comment" and not prev:
+        prev = last_own_review(d, me)
+    if it.get("stack") and it["mode"] == "comment":
+        return "review-stack", None
+    if it["mode"] == "comment" and prev:
+        return "re-review", prev
+    if it["mode"] == "comment":
+        return "review-comment", None
+    return "review-fix", None
+
+
 def scan(state, refresh=False, info=None):
     """Reconcile and return the table rows.
 
@@ -1199,20 +1219,8 @@ def scan(state, refresh=False, info=None):
                 rows.append(("WORKING", k, f"mode={it['mode']} {smeta} "
                                            "booting, agent not idle yet"))
                 continue
-            # A comment item that was already reviewed gets a follow-up review
-            # scoped to the author's new commits, not a second full review.
-            # Items tracked before reviewed_sha was seeded fall back to GitHub.
-            prev = it.get("reviewed_sha")
-            if it["mode"] == "comment" and not prev:
-                prev = last_own_review(d, me)
-            if it.get("stack") and it["mode"] == "comment":
-                tmpl = "template=review-stack"
-            elif it["mode"] == "comment" and prev:
-                tmpl = f"template=re-review PREV={prev}"
-            elif it["mode"] == "comment":
-                tmpl = "template=review-comment"
-            else:
-                tmpl = "template=review-fix"
+            tmpl, prev = boot_template(it, d, me)
+            tmpl = f"template={tmpl}" + (f" PREV={prev}" if tmpl == "re-review" else "")
             rows.append(("BOOTING", k, f"mode={it['mode']} {smeta} {tmpl}"))
             continue
 
