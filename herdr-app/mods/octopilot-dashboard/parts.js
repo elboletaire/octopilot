@@ -187,7 +187,7 @@ function pickRow(v, t, line) {
 }
 
 export function pickPanel(v, t, arr, total) {
-  return v_flex().flex_1().min_w_0().min_h(0).overflow_hidden().rounded(14).border_1().border_color(t.border)
+  return v_flex().flex_basis(0).flex_grow(4).min_w_0().min_h(0).overflow_hidden().rounded(14).border_1().border_color(t.border)
     .bg(t.surface).p(8).gap(6)
     .child(h_flex().items_center().gap(7).px(4).pt(2)
       .child(div().text_size(12.5).font_semibold().child("⚪ Pick next"))
@@ -204,7 +204,7 @@ export function pickPanel(v, t, arr, total) {
 
 export function activityPanel(t, view, now) {
   const rows = view.activity ?? [];
-  return v_flex().w(372).flex_none().min_h(0).overflow_hidden().rounded(14).border_1().border_color(t.border)
+  return v_flex().flex_basis(0).flex_grow(1).min_w_0().min_h(0).overflow_hidden().rounded(14).border_1().border_color(t.border)
     .bg(t.surface).p(10).gap(4)
     .child(div().px(4).pt(2).pb(4).text_size(12.5).font_semibold().child("Activity"))
     .children(rows.length
