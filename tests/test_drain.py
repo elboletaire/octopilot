@@ -1,6 +1,7 @@
 """The drain: the inbox's requests handled in order, held ones kept, the queued
 sends delivered once per item. GitHub, herdr and git are faked (tests/stand.py)."""
 import contextlib
+import fcntl
 import io
 import os
 import time
@@ -165,6 +166,17 @@ class DrainTest(RequestCase):
         self.assertEqual(out.getvalue().strip(), f"would handle: no {PR}")
         self.assertEqual(self.inbox_texts(), [f"REQUEST no {PR}"])
         self.assertEqual(scan.load()["declined"], [])
+
+    def test_a_drain_that_finds_exec_lock_held_leaves_the_inbox_alone(self):
+        self.save({}, inbox=inbox(f"REQUEST no {PR}"))
+        out = io.StringIO()
+        with open(scan.EXEC_LOCK, "w") as held, \
+                mock.patch.dict(os.environ, {"OCTOPILOT_ENGINE": "on"}), \
+                contextlib.redirect_stdout(out):
+            fcntl.flock(held.fileno(), fcntl.LOCK_EX)
+            self.assertEqual(scan.drain(["drain"]), 0)
+        self.assertIn("engine busy", out.getvalue())
+        self.assertEqual(self.inbox_texts(), [f"REQUEST no {PR}"])
 
     def test_drain_is_self_locking(self):
         self.assertIn("drain", scan.SELF_LOCKING)

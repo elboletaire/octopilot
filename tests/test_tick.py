@@ -81,6 +81,14 @@ class TickTest(unittest.TestCase):
         self.assertEqual((code, out), (0, "tick already running\n"))
         self.assertFalse(os.path.exists(scan.STATE_FILE))
 
+    def test_a_tick_that_finds_exec_lock_held_scans_but_does_not_wait_to_act(self):
+        with fake.fake_world(), mock.patch.dict(os.environ, {"OCTOPILOT_ENGINE": "on"}), \
+                open(scan.EXEC_LOCK, "w") as held:
+            fcntl.flock(held.fileno(), fcntl.LOCK_EX)
+            code, out = run_tick()
+        self.assertEqual(code, 0)
+        self.assertIn("engine busy", out)
+
     def test_main_does_not_wrap_tick_in_the_state_lock(self):
         # tick takes the lock itself: main() wrapping it too would deadlock,
         # so count the entries instead of really locking.

@@ -3032,6 +3032,20 @@ def engine_mode(args=(), checkout=None):
     return mode
 
 
+@contextmanager
+def exec_lock():
+    """Yields True while holding exec.lock, False at once when another run holds
+    it. Waiting would spend the dashboard's timeout on someone else's actions."""
+    os.makedirs(os.path.dirname(EXEC_LOCK), exist_ok=True)
+    with open(EXEC_LOCK, "w") as ex:
+        try:
+            fcntl.flock(ex.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            yield False
+            return
+        yield True
+
+
 def tick(args):
     """tick [--quiet] [--plan]: one scan that saves the transitions it finds,
     writes the dashboard's snapshot from the same rows, then runs the engine."""
@@ -3072,11 +3086,10 @@ def tick(args):
                   "and OCTOPILOT_STATE_DIR is unset")
         if mode != "off":
             import engine
-            with open(EXEC_LOCK, "w") as ex:
-                fcntl.flock(ex.fileno(), fcntl.LOCK_EX)
-                # The budget counts from here: the scan and lock waits are not
-                # the engine's to pay for.
-                lines = engine.run_rows(rows, mode, time.monotonic())
+            with exec_lock() as held:
+                # The budget counts from here: the scan is not the engine's to pay for.
+                lines = (engine.run_rows(rows, mode, time.monotonic()) if held
+                         else ["engine busy: another run acts, the next tick does"])
             if "--quiet" not in args and lines:
                 print("\n".join(lines))
     return 0
@@ -3091,9 +3104,12 @@ def drain(args):
             print("engine off here: nothing drained")
         return 0
     import engine
-    os.makedirs(os.path.dirname(EXEC_LOCK), exist_ok=True)
-    with open(EXEC_LOCK, "w") as ex:
-        fcntl.flock(ex.fileno(), fcntl.LOCK_EX)
+    with exec_lock() as held:
+        if not held:
+            # The dashboard's next wake (a minute at most) drains again.
+            if "--quiet" not in args:
+                print("engine busy: another run acts, the drain retries later")
+            return 0
         lines = engine.drain(mode, time.monotonic())
     if "--quiet" not in args and lines:
         print("\n".join(lines))

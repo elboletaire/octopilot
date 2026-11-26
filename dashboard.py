@@ -147,9 +147,11 @@ KICK_EVENTS = {"report", "spawn", "sent", "cleanup", "track", "detach",
 DRAIN_EVENTS = {"request", "report"}
 # The drain runs at once on those, and at least this often otherwise.
 DRAIN_EVERY = 60
-# engine.ACT_BUDGET_SECS, plus a spawn's worst case past it: fetch, pull and
-# worktree add (180 each), a checkout (360), and the first prompt's send (120).
-DRAIN_TIMEOUT_SECS = 1500
+# engine.ACT_BUDGET_SECS (240) plus one go's worst case, started just inside the
+# budget: spawn's fetch, pull and worktree add (3 x 180), herdr calls (120), pr
+# detail, stack listing and behind check (3 x 60), checkout (360), issue context
+# and the send (60 + 120). 240 + 1380 = 1620.
+DRAIN_TIMEOUT_SECS = 1620
 
 AGENT_GLYPH = {"running": ("◐", "yellow"), "waiting": ("⏸", "bold red"),
                "idle": ("○", "dim"), "stopped": ("■", "dim"),
