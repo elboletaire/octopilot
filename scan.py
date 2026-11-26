@@ -514,11 +514,22 @@ class HcBackend:
 
     def find(self, name):
         """-> "hc:<terminal>" of the live terminal labelled octopilot.agent=<name>,
-        or None."""
+        or None. This checkout's terminal first, else one with no octopilot.dir
+        label (a worker's); another checkout's is never picked."""
         code, data, _ = hc(["ls", "--json", "--label", f"octopilot.agent={name}"],
                            timeout=10)
         terms = (data or {}).get("terminals", []) if code == 0 else []
-        return f"hc:{terms[0]['address']}" if terms else None
+        unlabelled = None
+        for t in terms:
+            _, info, _ = hc(["get", t["address"], "--json"], timeout=10)
+            if not isinstance(info, dict):
+                continue  # labels unknown: not ours, and not a worker's either
+            d = (info.get("labels") or {}).get("octopilot.dir")
+            if not d:
+                unlabelled = unlabelled or t["address"]
+            elif os.path.realpath(d) == os.path.realpath(OCTOPILOT_DIR):
+                return f"hc:{t['address']}"
+        return f"hc:{unlabelled}" if unlabelled else None
 
     def status(self, target):
         _, info, _ = hc(["get", target, "--json"])
