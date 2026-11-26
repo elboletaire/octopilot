@@ -9,6 +9,10 @@ Every work session is a herdr workspace on its worktree, grouped under its
 repo's workspace, with a claude agent named `ap-<repo>-<number>`. The engine is
 not an agent: the dashboard runs it as `scan.py tick` and `scan.py drain`.
 
+The prompter and the code agent start on `MODEL_PROMPTER` and `MODEL_CODE` (config.sh, passed
+to claude as `--model`), in both the TUI and the GUI launcher, not on the global default; a running
+one keeps its model.
+
 ## Setup
 
 `./install.sh` (this repo) links the plugin when herdr is installed. By hand:
@@ -45,9 +49,6 @@ ever typed into a pane you are writing in. On an existing workspace, `open` adds
 whichever of the prompter and the code-changes tab is missing, and names the first
 tab OCTOPILOT. A retired `octopilot` agent still running there is left alone, and
 `open` says so: close its pane.
-
-The prompter and the code agent start on `MODEL_PROMPTER` and `MODEL_CODE` (config.sh, passed
-to claude as `--model`), not on the global default; a running one keeps its model.
 
 Show octopilot's state on each worker's row in the herdr sidebar (the
 dashboard publishes these tokens; they expire ten minutes after it stops):
@@ -95,6 +96,10 @@ terminals run in herdr-core) as one space with three tabs, in this order:
 | **Octopilot (code changes)** | the code agent's own claude (`octopilot-code`, a claude started in this checkout, an hc terminal that is never parked) |
 | **engine** | the prompter (`octopilot-prompter`, `/octopilot:prompter`) and `dashboard.sh --headless` (`octopilot-headless`, the engine's host: it runs `scan.py tick` and `drain`), each an hc terminal. Shown by default; `--hide-engine` parks them (see below) |
 
+Every GUI run keeps OCTOPILOT, code and engine at tabs 1-3 in that order (`place_tabs`), so
+worker tabs opened later land after them. The `--terminals` layout keeps OCTOPILOT and the code tab
+in the same order.
+
 The space is named `Octopilot` (`LABEL`): `space.new` does not keep the name it
 is given here, so the run calls `space.rename` when the space is not named so (best
 effort: a refusal is warned about). A remote herdr-app lists a new terminal a moment
@@ -109,7 +114,7 @@ removes `herdr.space`). A parked terminal is shown with `terminal.peek` (the
 chef in the kitchen, the chat's Terminal button, the dashboard's `v` and `a`),
 which works on it. A rerun without `--hide-engine` shows parked engine terminals
 again (`terminal.keep`: the first takes a tab named `engine`, the others go
-beside it) and puts the engine tab third. `--show-engine` is accepted and does
+beside it) and, as every GUI run does, keeps the engine tab third. `--show-engine` is accepted and does
 nothing, since the engine is shown by default. `--terminals` refuses on a parked
 engine and lists the parked terminals, each to show with `herdr-app do terminal.keep`.
 

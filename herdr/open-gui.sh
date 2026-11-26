@@ -914,6 +914,7 @@ if [ -n "$host" ]; then
     app do tab.rename --id "$tab" --name "$MAIN_TAB" >/dev/null
     if [ -z "$(find_agent "$PROMPTER_AGENT")" ]; then add_prompter_left "$space" "$pane"; fi
     add_code_terminal_tab "$space"
+    place_tabs "$space"
     # Best effort: a terminal created a moment ago may not be focusable yet.
     "$APP" do agent.focus --terminal "$host" >/dev/null 2>&1 || true
   else
@@ -979,6 +980,7 @@ if [ "$TERMINALS" = 1 ]; then
   app do pane.rename --pane "$root" --name dashboard >/dev/null
   if [ -z "$(find_agent "$PROMPTER_AGENT")" ]; then add_prompter_left "$space" "$root"; fi
   add_code_terminal_tab "$space"
+  place_tabs "$space"
   # Best effort: a terminal created a moment ago may not be focusable yet.
   "$APP" do agent.focus --terminal "$host" >/dev/null 2>&1 || true
 else
