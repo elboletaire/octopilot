@@ -9,8 +9,10 @@ A read-only view over three sources, each refreshed at its own pace:
 
 - agent state from herdr (`herdr agent list`), every few seconds;
 - octopilot's own state.json and events.jsonl, the moment they change;
-- GitHub, through `scan.py snapshot` (a scan that saves nothing), every
-  DASHBOARD_REFRESH_SECS and right after any event that changes the table.
+- GitHub, through `scan.py tick` (the scan that saves its transitions) when
+  this checkout may run it, else `scan.py snapshot` (a scan that saves
+  nothing), every DASHBOARD_REFRESH_SECS and right after any event that
+  changes the table.
 
 It never acts on the table: the orchestrator does. The things it sends are the
 ones you ask for (go/no to the orchestrator, pause/resume), and a `request
@@ -139,7 +141,7 @@ PICK_ROWS = {"PROPOSE"}
 NOTE_ROWS = {"UNCLONED", "STALE", "UNKNOWN"}
 REPORT_NEEDS = {"blocked", "failed", "stalled", "capped"}
 # Events after which the GitHub view is worth refreshing early.
-KICK_EVENTS = {"report", "spawn", "sent", "cleanup", "tick", "track", "detach",
+KICK_EVENTS = {"report", "spawn", "sent", "cleanup", "track", "detach",
                "park", "unpark", "untrack", "decline", "merged"}
 
 AGENT_GLYPH = {"running": ("◐", "yellow"), "waiting": ("⏸", "bold red"),
@@ -180,6 +182,17 @@ def snapshot_rows():
         return []
     return [r for r in rows
             if isinstance(r, dict) and isinstance(r.get("key"), str)]
+
+
+def engine_allowed():
+    """Whether this checkout's dashboard may run `tick`, which saves state.
+    Only the live checkout (the one settings.json loads) or a scratch state dir
+    (OCTOPILOT_STATE_DIR set) may: a worktree's dashboard must not consume the
+    live state's transitions."""
+    if os.environ.get("OCTOPILOT_STATE_DIR"):
+        return True
+    return (os.path.realpath(scan.OCTOPILOT_DIR)
+            == os.path.realpath(scan.installed_dir()))
 
 
 def ago(secs):
@@ -413,8 +426,9 @@ class Model:
                 return
             self.snap_running, self.snap_started = True, time.time()
             self.changed.set()
+            verb = "tick" if engine_allowed() else "snapshot"
             code, _, err = sh([sys.executable, os.path.join(DIR, "scan.py"),
-                               "snapshot", "--quiet"], timeout=600)
+                               verb, "--quiet"], timeout=600)
             with self.lock:
                 self.snap_err = None if code == 0 else \
                     (err or "snapshot failed").splitlines()[-1][:120]
