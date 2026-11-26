@@ -174,19 +174,23 @@ of the `detach` event in events.jsonl. The mode is `fix` for the user's own work
 - Bring the worktree back as a session. Its path is the one `git -C <repo>
   worktree list` shows for the branch. TUI: `herdr worktree open --cwd <repo>
   --path <worktree>`, start claude in it, and pass the workspace id (`w…`).
+  Start `claude --resume` there instead of a fresh claude to keep the old
+  conversation; a resumed session needs no send below.
   GUI: `herdr-app do space.new --folder <worktree>` with the claude command
-  (see `herdr/open-gui.sh`), then label its terminal `hc label <t>
+  (see `herdr/open-gui.sh`; `claude --resume` for the old conversation), then
+  label its terminal `hc label <t>
   octopilot.agent=<agent name>` (the `ap-<repo>-<n>` name) and pass the space
   id (`sp…`) that `space.new` prints. The label comes first, so `track` finds
   the agent.
 - Then `$A track <key> <mode> <branch> <session> [pr]`, with the session id
   from the step above and the optional `pr` number for a PR item.
-- Then send the session its first prompt, once. A tracked fix item is
-  driver=agent, so the engine never sends it REVIEW or BOOTING. For a PR:
-  `$A send <key> "$($A render review-fix KEY=<key> REPO=<slug> PR=<n>
-  BRANCH=<branch> BASE=<base>)"`. For an issue: `$A send <key> "$($A render
-  work KEY=<key> REPO=<slug> ISSUE=<n> BRANCH=<branch> BASE=<base>)"`.
-  `<base>` is `registry.<slug>.base` in `$A status` (what `spawn` prints as
-  `BASE=`), or for a PR into another branch, `gh pr view <n> -R <slug> --json
-  baseRefName`. Or, instead of a fresh claude, start `claude --resume` in the
-  worktree: that needs no send.
+- For a `fix` item with a fresh claude (not resumed), send its first prompt
+  once. A tracked fix item is driver=agent and the engine never prompts it (no
+  REVIEW or BOOTING row). For a PR: `$A send <key> "$($A render review-fix
+  KEY=<key> REPO=<slug> PR=<n> BRANCH=<branch> BASE=<base>)"`. For an issue:
+  `$A send <key> "$($A render work KEY=<key> REPO=<slug> ISSUE=<n>
+  BRANCH=<branch> BASE=<base>)"`. For a PR, `<base>` is `gh pr view <n> -R
+  <slug> --json baseRefName -q .baseRefName`; for an issue, it is
+  `registry.<slug>.base` in `$A status` (what `spawn` prints as `BASE=`).
+  A `comment` item needs nothing: track sets driver=orchestrator, and the
+  engine's REVIEW row reviews it.
