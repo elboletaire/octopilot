@@ -149,7 +149,7 @@ class TickEngineTest(unittest.TestCase):
             self.assertIsInstance(scan.load()["last_tick"], int)
 
     def test_scan_with_the_engine_on_says_stop_and_leaves_the_engine_rows_out(self):
-        # An orchestrator still running `scan` must not act on the rows the engine acts on.
+        # An orchestrator still running `scan` must not act: the dashboard runs the engine.
         out = io.StringIO()
         with mock.patch.dict(os.environ, {"OCTOPILOT_ENGINE": "on"}), \
                 mock.patch.object(sys, "argv", ["scan.py", "scan"]), \
@@ -160,10 +160,10 @@ class TickEngineTest(unittest.TestCase):
             "octopilot has no orchestrator any more: stop ticking, "
             "the engine acts on every row\n"), text)
         self.assertNotIn(f"MERGED   {MERGED}", text)
-        # The engine still acted on the hidden row, as in a direct tick.
-        self.assertNotIn(MERGED, self.items())
-        self.assertIn(MERGED, scan.load()["handled_merges"])
-        self.assertEqual([args[0] for args, _ in self.sent()], ["herdr:w2"])
+        # The legacy tick sent nothing and left the engine rows alone.
+        self.assertEqual(self.sent(), [])
+        self.assertIn(MERGED, self.items())
+        self.assertNotIn(MERGED, scan.load()["handled_merges"])
         # The snapshot keeps every row.
         with open(scan.SNAPSHOT_FILE) as fh:
             snap = fh.read()

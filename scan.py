@@ -3055,7 +3055,9 @@ def tick(args):
         if mode == "off" and "--plan" in args and "--quiet" not in args:
             print(f"engine off here: {OCTOPILOT_DIR} is not the live checkout "
                   "and OCTOPILOT_STATE_DIR is unset")
-        if mode != "off":
+        # A legacy tick never acts: the dashboard runs the engine, and a
+        # leftover orchestrator's Bash call would time out mid-action.
+        if mode != "off" and "--legacy" not in args:
             import engine
             with exec_lock() as held:
                 # The budget counts from here: the scan is not the engine's to pay for.
