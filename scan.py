@@ -62,6 +62,8 @@ STATE_FILE = os.environ.get(
 # scan rendered as JSON.
 EVENTS_FILE = os.path.join(os.path.dirname(STATE_FILE), "events.jsonl")
 SNAPSHOT_FILE = os.path.join(os.path.dirname(STATE_FILE), "snapshot.json")
+# One tick at a time: a tick that finds it held returns at once.
+TICK_LOCK = os.path.join(os.path.dirname(STATE_FILE), "tick.lock")
 EVENTS_MAX_BYTES = 512 * 1024
 EVENTS_KEEP = 1000
 # Address of the orchestrator ("herdr:<agent>"). Empty means "whichever agent
@@ -2775,6 +2777,7 @@ def chat_keys(args):
     return result_code
 
 
+SELF_LOCKING = {"tick"}
 READ_ONLY = {"render", "status", "siblings", "snapshot", "wind-down", "plugin-settings",
              "installed-dir", "speech", "chat", "chat-send", "chat-keys"}
 
@@ -2832,11 +2835,56 @@ def plugin_settings():
     return json.dumps({"env": {"CLAUDE_CODE_PLUGIN_DIRS": ":".join(dirs)}})
 
 
+def tick(args):
+    """tick [--quiet]: one scan that records what it finds, then the snapshot.
+
+    The transitions (unparking, untracking, re-requests) are saved here, so
+    this is the only scan that may run without the dashboard watching: the
+    dashboard's snapshot is the same scan's rows, not a second one.
+    """
+    os.makedirs(os.path.dirname(TICK_LOCK), exist_ok=True)
+    with open(TICK_LOCK, "w") as lk:
+        try:
+            fcntl.flock(lk.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            print("tick already running")
+            return 0
+        with locked():
+            state = load()
+            info = {}
+            rows, active, n, untracked = scan(state, info=info)
+            for k, reason in info["revived"]:
+                log_event("unpark", k, reason=reason)
+            for kind, k, _ in rows:
+                if kind == "GONE":
+                    log_event("gone", k)
+            counts = {}
+            for kind, _, _ in rows:
+                counts[kind] = counts.get(kind, 0) + 1
+            # The event log is shown on every dashboard; log a tick only when
+            # the table changed, not once per two minutes.
+            changed = counts != state.get("tick_counts")
+            state["tick_counts"] = counts
+            state["last_tick"] = int(time.time())
+            save(state)
+            write_snapshot(snapshot_doc(state, state, rows, active, n,
+                                        untracked, info))
+            if changed:
+                log_event("tick", active=active, counts=counts)
+            if "--quiet" not in args:
+                render(rows, active, n, state, untracked)
+    return 0
+
+
 def main():
     args = sys.argv[1:]
     cmd = args[0] if args else "scan"
     if cmd in READ_ONLY:
         return dispatch(cmd, args, load())
+    # These take the state lock themselves, step by step, rather than for the
+    # whole command.
+    if cmd in SELF_LOCKING:
+        return dispatch(cmd, args, None)
     # scan mutates (registry memo, feedback_seen stamps) and every other
     # command is a read-modify-write, so both run under the lock.
     with locked():
@@ -2844,6 +2892,8 @@ def main():
 
 
 def dispatch(cmd, args, state):
+    if cmd == "tick":
+        return tick(args)
     if cmd in ("scan", "refresh"):
         info = {}
         rows, active, n, untracked = scan(state, refresh=(cmd == "refresh"),
