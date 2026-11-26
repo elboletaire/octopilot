@@ -1425,7 +1425,9 @@ def scan(state, refresh=False, info=None):
             active -= 1
             # `mine` non-empty: our review is posted, so a pending request for
             # us is a re-request, not the original one. Once per head, so a
-            # request left pending (e.g. we posted nothing) cannot loop.
+            # request left pending (e.g. we posted nothing) cannot loop. The
+            # head is only marked done by reboot(), so a scan that is run
+            # again before the row is acted on still returns it.
             if requested and mine and it.get("rerequest_head") != head:
                 if rounds >= MAX_REVIEW_ROUNDS:
                     rows.append(("CAPPED", k,
@@ -1433,7 +1435,7 @@ def scan(state, refresh=False, info=None):
                                  f"rounds={rounds}/{MAX_REVIEW_ROUNDS} "
                                  "re-requested -> octopilot stopped; you decide"))
                     continue
-                it["rerequest_head"] = head
+                it["pending_rerequest"] = head
                 active += 1
                 rows.append(("REVIEW", k, f"mode=comment {smeta} "
                                           f"head={head[:7]} reviewed={rv[:7]} "
@@ -2277,6 +2279,8 @@ def reboot(state, k):
         return 4 if err == "agent_blocked" else 1
     code, raw = backend.wait_idle(target)
     it["phase"] = "booting"
+    if it.get("pending_rerequest"):
+        it["rerequest_head"] = it.pop("pending_rerequest")
     save(state)
     log_event("reboot", k)
     # Still booting either way; a non-zero exit tells the orchestrator not to
