@@ -1,6 +1,6 @@
 import unittest
 
-from engine import resolve_target
+from engine import _repo_for, resolve_target
 
 REGISTRY = {"vocdoni/app": {"path": "/c/app", "base": "main"},
             "vocdoni/sdk": {"path": "/c/sdk", "base": "main"},
@@ -86,6 +86,14 @@ class ResolveTargetTest(unittest.TestCase):
 
     def test_unknown_token(self):
         self.assertEqual(self.resolve("banana"), (None, "unknown target 'banana'"))
+
+    def test_repo_matching_is_shared_with_the_investigate_path(self):
+        state = {"registry": REGISTRY}
+        self.assertEqual(_repo_for(state, "sdk"), ("vocdoni/sdk", None))
+        self.assertEqual(_repo_for(state, "app"),
+                         (None, "app is ambiguous: other/app vocdoni/app"))
+        self.assertEqual(_repo_for(state, "nope", hint=": clone it"),
+                         (None, "nope is not in the registry: clone it"))
 
     def test_unregistered_full_slug_is_refused(self):
         self.assertEqual(resolve_target("x/y#1", {"items": {"a/b#1": {}}}, []),

@@ -830,16 +830,9 @@ def resolve_target(token, state, snap_rows):
     m = re.fullmatch(r"(.+?)([#!])(\d+)", token)
     if m:
         repo, sep, num = m.groups()
-        slugs = list(state.get("registry", {}))
-        if repo in slugs:
-            slug = repo
-        else:
-            found = sorted(s for s in slugs if s.endswith("/" + repo))
-            if not found:
-                return None, f"{repo} is not in the registry"
-            if len(found) > 1:
-                return None, f"{repo} is ambiguous: {' '.join(found)}"
-            slug = found[0]
+        slug, err = _repo_for(state, repo)
+        if err:
+            return None, err
         # The messenger accepted either separator for an item: prefer the one
         # that is tracked or proposed, else keep the one typed.
         built = f"{slug}{sep}{int(num)}"
@@ -988,15 +981,15 @@ def _base(state, slug):
     return state.get("registry", {}).get(slug, {}).get("base", "main")
 
 
-def _repo_for(state, token):
+def _repo_for(state, token, hint=""):
     """The registry slug a request names: exact, or the one slug ending in
-    /token -> (slug, error)."""
+    /token -> (slug, error). `hint` follows the error when the repo is unknown."""
     slugs = list(state.get("registry", {}))
     if token in slugs:
         return token, None
     found = sorted(s for s in slugs if s.endswith("/" + token))
     if not found:
-        return None, f"{token} is not in the registry: clone it under CLONE_ROOTS first"
+        return None, f"{token} is not in the registry{hint}"
     if len(found) > 1:
         return None, f"{token} is ambiguous: {' '.join(found)}"
     return found[0], None
@@ -1148,7 +1141,7 @@ def do_investigate(req, ctx):
     import scan
     repo, question = req.args
     state = scan.load()
-    slug, err = _repo_for(state, repo)
+    slug, err = _repo_for(state, repo, hint=": clone it under CLONE_ROOTS first")
     if err:
         return _refuse(ctx, req.verb, None, err)
     title = question.split("\n", 1)[0][:60]
