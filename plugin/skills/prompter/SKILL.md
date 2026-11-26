@@ -181,3 +181,12 @@ of the `detach` event in events.jsonl. The mode is `fix` for the user's own work
   the agent.
 - Then `$A track <key> <mode> <branch> <session> [pr]`, with the session id
   from the step above and the optional `pr` number for a PR item.
+- Then send the session its first prompt, once. A tracked fix item is
+  driver=agent, so the engine never sends it REVIEW or BOOTING. For a PR:
+  `$A send <key> "$($A render review-fix KEY=<key> REPO=<slug> PR=<n>
+  BRANCH=<branch> BASE=<base>)"`. For an issue: `$A send <key> "$($A render
+  work KEY=<key> REPO=<slug> ISSUE=<n> BRANCH=<branch> BASE=<base>)"`.
+  `<base>` is `registry.<slug>.base` in `$A status` (what `spawn` prints as
+  `BASE=`), or for a PR into another branch, `gh pr view <n> -R <slug> --json
+  baseRefName`. Or, instead of a fresh claude, start `claude --resume` in the
+  worktree: that needs no send.
