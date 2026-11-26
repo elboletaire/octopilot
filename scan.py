@@ -340,14 +340,16 @@ class HerdrBackend:
         return out
 
     def agents(self):
-        """[{session, agent, pane, status}] for every herdr agent."""
+        """[{session, agent, pane, status, ids}] for every herdr agent; ids are
+        its workspace and tab."""
         if not shutil.which("herdr"):
             return []
         code, data, _ = herdr(["agent", "list"])
         if code != 0 or not data:
             return []
         return [{"session": a.get("workspace_id"), "agent": a.get("name"),
-                 "pane": a.get("pane_id"), "status": a.get("agent_status")}
+                 "pane": a.get("pane_id"), "status": a.get("agent_status"),
+                 "ids": [a.get("workspace_id"), a.get("tab_id")]}
                 for a in (data.get("result") or {}).get("agents", [])]
 
     def listing(self):
@@ -367,7 +369,7 @@ class HerdrBackend:
         if name and herdr(["agent", "get", name])[0] == 0:
             return name
         for a in self.agents():
-            if a["session"] == it.get("session"):
+            if session_matches(a, it.get("session")):
                 return a["agent"] or a["pane"]
         return None
 
