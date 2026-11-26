@@ -97,10 +97,10 @@ if [ "$DIR" != "$LIVE_DIR" ] && [ -z "${OCTOPILOT_STATE_DIR:-}" ]; then
   exit 1
 fi
 
-# The scope knobs the caller set, read before config.sh supplies its defaults:
-# only these are forwarded, so the defaults keep applying to the sessions.
+# The scope knobs and the engine mode the caller set, read before config.sh
+# supplies its defaults: only these are forwarded, so the defaults keep applying.
 declare -a scope=()
-for v in HOME_REPOS ISSUE_ORGS CLONE_ROOTS; do
+for v in HOME_REPOS ISSUE_ORGS CLONE_ROOTS OCTOPILOT_ENGINE; do
   if [ -n "${!v:-}" ]; then scope+=("$v=${!v}"); fi
 done
 
@@ -877,7 +877,7 @@ if [ -n "$host" ]; then
     if [ -z "$(find_agent "$PROMPTER_AGENT")" ]; then add_prompter_left "$space" "$pane"; fi
     add_code_terminal_tab "$space"
     # Best effort: a terminal created a moment ago may not be focusable yet.
-  "$APP" do agent.focus --terminal "$host" >/dev/null 2>&1 || true
+    "$APP" do agent.focus --terminal "$host" >/dev/null 2>&1 || true
   else
     old=$(legacy_dashboard "$space")
     if [ -n "$old" ]; then
