@@ -1628,16 +1628,6 @@ def split_key(k):
                      f"or owner/repo?investigation)")
 
 
-def orchestrator_session(state=None):
-    """Address of the orchestrator, for the agent to report back to.
-
-    The session rendering the prompt is the orchestrator, so its own address
-    wins; the recorded one is the fallback. A stale address would silently
-    swallow every agent report.
-    """
-    return current_orch() or orchestrator_target(state or load())
-
-
 def issue_context(slug, number, body_max=8000, comment_max=1500, keep=8):
     """The issue, verbatim, for splicing into the prompt.
 
@@ -1707,8 +1697,6 @@ def render_prompt(name, subs):
     if "{{STACK_LOOP}}" in body:
         with open(os.path.join(pdir, "shared", "stack-loop.md")) as fh:
             subs.setdefault("STACK_LOOP", fh.read().strip())
-    if "{{ORCH}}" in body or "{{LOOP}}" in body or "{{STACK_LOOP}}" in body:
-        subs.setdefault("ORCH", orchestrator_session())
     # Set unconditionally: FIND_MODEL and VERIFY_MODEL also live inside the
     # LOOP fragment, not only in the template body, so an `in body` test would
     # never fire.
@@ -1764,6 +1752,27 @@ def render_prompt(name, subs):
             continue
         body = body.replace("{{" + k + "}}", str(v))
     return re.sub(r"\{\{[A-Z_]+\}\}", "", body).strip()
+
+
+def render_for(state, template, subs):
+    """The prompt `template` renders to for `subs`, with the facts of the item
+    it is for (KEY, question, branch, stack, read-only) filled in from state.
+    Mutates `subs`; the caller's own KEY=VAL values win over the item's."""
+    if "KEY" not in subs and subs.get("REPO") and subs.get("PR"):
+        # BOOTING rows send no KEY: a layer's PR resolves to its stack.
+        found = item_key_for(state, subs["REPO"], subs["PR"])
+        if found:
+            subs["KEY"] = found
+    it_ = state.get("items", {}).get(subs.get("KEY", ""), {})
+    if it_.get("question"):
+        subs.setdefault("QUESTION", it_["question"])
+        subs.setdefault("BRANCH", it_.get("branch", ""))
+    if it_.get("stack"):
+        subs.setdefault("STACK", stack_text(it_["stack"]))
+    # A read-only item never gets a prompt that tells it to commit and
+    # open a PR, whatever template the caller asked for.
+    tmpl = "investigate-readonly" if it_.get("read_only") else template
+    return render_prompt(tmpl, subs)
 
 
 def resolve_mode(slug, num, kind, me):
@@ -2986,21 +2995,7 @@ def dispatch(cmd, args, state):
     if cmd == "render":
         # render <template> KEY=VAL ...
         subs = dict(kv.split("=", 1) for kv in args[2:] if "=" in kv)
-        if "KEY" not in subs and subs.get("REPO") and subs.get("PR"):
-            # BOOTING rows send no KEY: a layer's PR resolves to its stack.
-            found = item_key_for(state, subs["REPO"], subs["PR"])
-            if found:
-                subs["KEY"] = found
-        it_ = state.get("items", {}).get(subs.get("KEY", ""), {})
-        if it_.get("question"):
-            subs.setdefault("QUESTION", it_["question"])
-            subs.setdefault("BRANCH", it_.get("branch", ""))
-        if it_.get("stack"):
-            subs.setdefault("STACK", stack_text(it_["stack"]))
-        # A read-only item never gets a prompt that tells it to commit and
-        # open a PR, whatever template the caller asked for.
-        tmpl = "investigate-readonly" if it_.get("read_only") else args[1]
-        print(render_prompt(tmpl, subs))
+        print(render_for(state, args[1], subs))
         return 0
     if cmd == "spawn":
         # spawn <key> <branch> <title> [--new] [--stack "PR:branch ..."]
