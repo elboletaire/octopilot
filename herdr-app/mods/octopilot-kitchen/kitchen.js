@@ -176,7 +176,7 @@ export function derive(view, nowMs, walk = 0, logMax = LOG_LINES) {
     blinks: BLINKS.includes(mood) && !offline,
     arm: armPiece(mood, focus, holes),
     armShift: armPiece(mood, focus, holes).match(/point|pour/) ? armReach(focus, holes).shift : 0,
-    // Never out while the kitchen is open: a pilot simmer, roaring while the orchestrator works.
+    // Never out while the kitchen is open: a pilot simmer, roaring while the engine acts.
     flames: offline ? "none" : busy ? "big" : "pilot",
     balls: balls.map((b, i) => ({ sprite: ballSprite(b), state: b.state, label: b.label ?? b.key ?? "", focus: i === focus })),
     focus,

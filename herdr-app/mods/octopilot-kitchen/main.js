@@ -1,6 +1,6 @@
 // The takoyaki kitchen, as a pane or a floating block: the octopus chef behind the pan, one
 // ball per tracked item, flames, the shelf of served boats, and a speech bubble with the
-// orchestrator's last message and the kitchen log. Props: see README.md.
+// engine's last actions and the kitchen log. Props: see README.md.
 
 import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex, TextView } from "gpui-base";
@@ -166,7 +166,7 @@ export default class Kitchen extends View {
     });
   }
 
-  // While the orchestrator works, the chef's pick walks along the pan.
+  // While the engine acts, the chef's pick walks along the pan.
   walks(cx) {
     cx.spawn(async (cx) => {
       for (;;) {
@@ -391,7 +391,7 @@ export default class Kitchen extends View {
         ? div().absolute().left(0).w(W).top(H / 2 - 12).flex().justify_center()
           .child(this.chip(`kitchen offline: ${offlineReason(this.view, this.now(), this.viewError)}`))
         : null,
-      // Click the chef to look into the orchestrator's terminal.
+      // Click the chef to look into the headless dashboard's terminal (the engine's log).
       layer([BOX.chef[0] + 14, BOX.chef[1] + 8, 112, 124]).id("chef").cursor_pointer()
         .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click(() => this.peek()),
       !fold ? null : div().id("fold").absolute().left(W - 26).top(H - 22).w(20).h(16).rounded(8).bg(INK.chip)
@@ -412,9 +412,9 @@ export default class Kitchen extends View {
   speechBody(t, lines, chars) {
     const s = this.speech;
     const muted = (text) => div().text_size(12).text_color(t.muted).child(text);
-    if (this.error) return muted(`Can't reach the orchestrator: ${this.error}`);
-    if (!s) return muted("Waiting for the orchestrator…");
-    if (!s.text) return muted(s.status === "offline" ? "The orchestrator is offline." : "The orchestrator hasn't said anything yet.");
+    if (this.error) return muted(`Can't reach the engine: ${this.error}`);
+    if (!s) return muted("Waiting for the engine…");
+    if (!s.text) return muted(s.status === "offline" ? "The engine is offline." : "Nothing done yet.");
     return div().id("speech").text_size(13).text_color(t.foreground).cursor_pointer()
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click(() => this.openFull())
       .child(TextView.markdown("octopilot-speech", clip(s.text, lines, chars)).raw_html(false));
