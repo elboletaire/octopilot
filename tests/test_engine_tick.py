@@ -4,6 +4,7 @@ GitHub, git and the agents are faked (fake_world)."""
 import contextlib
 import io
 import os
+import sys
 import unittest
 from unittest import mock
 
@@ -78,7 +79,7 @@ class TickEngineTest(unittest.TestCase):
 
     def test_engine_off_changes_nothing(self):
         before = self.items()
-        self.tick()
+        self.tick(engine="off")
         self.assertEqual(self.items(), before)
         self.assertEqual(self.sent(), [])
         self.assertNotIn("engine-", self.events())
@@ -132,19 +133,28 @@ class TickEngineTest(unittest.TestCase):
         self.assertIn("engine off here: /wt/octopilot is not the live checkout", out.getvalue())
         self.assertEqual(self.sent(), [])
 
-    def test_scan_hides_engine_kinds_only_when_the_engine_is_on(self):
-        with mock.patch.object(scan, "current_orch", return_value=None):
-            shown = {}
-            for mode in ("on", "off"):
-                os.environ["OCTOPILOT_ENGINE"] = mode
-                out = io.StringIO()
-                with contextlib.redirect_stdout(out):
-                    scan.dispatch("scan", ["scan"], scan.load())
-                shown[mode] = out.getvalue()
-        self.assertIn("ENGINE  acts on MERGED", shown["on"])
-        self.assertNotIn(MERGED, shown["on"])
-        self.assertNotIn("ENGINE", shown["off"])
-        self.assertIn(MERGED, shown["off"])
+    def test_scan_and_refresh_run_tick_without_deadlocking(self):
+        # main() maps scan and refresh to tick before the lock checks: tick takes
+        # the state lock itself, so a second lock in this process would hang.
+        for argv, refresh in ((["scan.py", "scan"], False),
+                              (["scan.py", "refresh"], True)):
+            with self.subTest(argv=argv), \
+                    mock.patch.object(scan, "scan", side_effect=self.scan) as scanned, \
+                    mock.patch.object(sys, "argv", argv), \
+                    mock.patch.dict(os.environ, {"OCTOPILOT_ENGINE": "off"}), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(scan.main(), 0)
+                self.assertIs(scanned.call_args.kwargs["refresh"], refresh)
+            self.assertIsInstance(scan.load()["last_tick"], int)
+
+    def test_quiet_tick_with_the_engine_on_prints_only_the_engine_lines(self):
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {"OCTOPILOT_ENGINE": "on"}), \
+                contextlib.redirect_stdout(out):
+            self.assertEqual(scan.tick(["tick", "--quiet"]), 0)
+        self.assertIn(MERGED, out.getvalue())
+        self.assertNotIn("PAUSED", out.getvalue())
+        self.assertNotIn("ACTIVE", out.getvalue())
 
     def test_engine_mode_judges_the_callers_checkout(self):
         # An inherited OCTOPILOT_DIR must not decide for the dashboard's own.
