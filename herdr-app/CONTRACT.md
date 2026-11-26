@@ -34,8 +34,9 @@ reads nothing and refuses its sends with a notice. `watchFolder` is local only:
 a remote copy polls `view.json` every 2 s. A bare terminal from `scan.sh` (`t7`)
 is `<machine>/t7` for herdr. The dashboard's focus, peek,
 shell and prompter rows run in this viewer's herdr-app with the machine's ids
-(`<machine>/<session>` for the space, `<machine>/<pane>` for the terminal,
-`space.select`, `agent.focus`, `terminal.peek`, `tab.new`), not through
+(`<machine>/<space>` for the space, `<machine>/<session>` for a tab session,
+`<machine>/<pane>` for the terminal: `space.select`, `tab.select`, `agent.focus`,
+`terminal.peek`, `tab.new`; see `remoteSteps` in the dashboard's `model.js`), not through
 `dashboard.sh --action`, which would drive that machine's window. Rows whose
 backend is the herdr TUI say so. The `o` key opens a row's https link on this
 computer.
@@ -117,11 +118,14 @@ Entry:
   "rounds": 1, "max_rounds": 3, "quiet_s": 600, "stalled": false, "needs": false, "why": "ready to merge",
   "driver": "agent|orchestrator|null",              // who drives the item; rounds is 0 (not null) for agent
   "note": "…", "pick_kind": "issue|review only|adopt PR|your PR",
-  "session": "sp…|w…|null", "backend": "hc|herdr|null", "pane": "t7|null", "path": "/…|null",
+  "session": "tb…|w…:t…|sp…|w…|null", "space": "sp…|null", "backend": "hc|herdr|null", "pane": "t7|null", "path": "/…|null",
   "branch": "…", "pr": 12, "stack": 1, "open": true, "parked": false, "tracked": true,
   "actions": [Action]                               // exactly the TUI's allowed actions for this row
 }
 ```
+`space` is the herdr-app space holding an hc row's session: the Octopilot space for a worker tab (session `tb…` or `w…:t…`),
+or the session itself for an old-style session in its own space. Null for a herdr TUI row. A remote focus selects the
+space, then the tab.
 
 Action:
 ```jsonc

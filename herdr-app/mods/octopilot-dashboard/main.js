@@ -11,7 +11,7 @@ import {
 import {
   CONFIRM_MS, FLASH_MS, KITCHEN_S, GLOBAL_KEYS, ROW_KEYS, arrange, resolveSel,
   entryOf, stepSel, jumpSel, keyName, actionKey, parseAnswer, confirmArgs, slugOf, isRepoKey, viewError, isStale,
-  ownPane, shownTab, keyboardFree,
+  ownPane, shownTab, keyboardFree, remoteSteps,
 } from "./model.js";
 import {
   header, paused, column, pickPanel, activityPanel, notesRow, statusLine, actionBar,
@@ -525,20 +525,17 @@ export default class OctopilotDashboard extends View {
     }
     if (entry?.backend !== "hc") return this.say(`this row lives in the herdr TUI on ${on}`, false, cx);
     if (!entry.session) return this.say("no session for this row", false, cx);
-    if (id === "focus") {
-      run("space.select", { id: `${on}/${entry.session}` });
-      if (entry.pane) run("agent.focus", { terminal: addressOn(on, entry.pane) });
-      return this.say("focused", true, cx);
-    }
     if (id === "peek") {
       if (!entry.pane) return this.say("no live agent for this row", false, cx);
       this.watchPeek();
       run("terminal.peek", { terminal: addressOn(on, entry.pane) });
       return this.say("peeked", true, cx);
     }
-    if (!entry.path) return this.say("no worktree for this row", false, cx);
-    run("tab.new", { space: `${on}/${entry.session}`, folder: entry.path });
-    return this.say("new tab opened", true, cx);
+    if (id === "shell" && !entry.path) return this.say("no worktree for this row", false, cx);
+    const steps = remoteSteps(id, entry, on);
+    if (steps.length === 0) return this.say("no space for this row", false, cx);
+    for (const step of steps) run(step.cmd, step.args);
+    return this.say(id === "focus" ? "focused" : "new tab opened", true, cx);
   }
 
   openUrl(url, cx) {

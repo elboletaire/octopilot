@@ -2,6 +2,8 @@
 // Pick next tree show it. No Herdr calls here, so the keys and cards read the
 // same numbers the TUI does.
 
+import { addressOn } from "./machine.js";
+
 export const REPO_PREFIX = "repo:";
 // A second press of the same action within this window confirms it (CONFIRM_SECS).
 export const CONFIRM_MS = 4000;
@@ -198,4 +200,21 @@ export function parseAnswer(stdout) {
 // alert showed; without them (an older dashboard) only confirmed=1 is sent.
 export function confirmArgs(args, holds) {
   return { ...(args ?? {}), confirmed: 1, ...(holds ? { holds: holds.join(",") } : {}) };
+}
+
+// A herdr-app tab id: `tb…`, or `w…:t…` in the TUI's form. Anything else is a space or workspace.
+export const isTabId = (id) => /^tb/.test(id ?? "") || /^w[^:]+:t/.test(id ?? "");
+
+// The herdr-app commands a remote row's focus or shell runs on machine `on` (see CONTRACT.md, Remote
+// spaces). The space is entry.space, else the session when it is a space (an old-style session in
+// its own space). A tab session is selected in its space, then as a tab. [] when no space is known.
+export function remoteSteps(id, entry, on) {
+  const session = entry.session ?? null;
+  const space = entry.space ?? (isTabId(session) ? null : session);
+  if (!space) return [];
+  if (id === "shell") return [{ cmd: "tab.new", args: { space: `${on}/${space}`, folder: entry.path } }];
+  const steps = [{ cmd: "space.select", args: { id: `${on}/${space}` } }];
+  if (isTabId(session)) steps.push({ cmd: "tab.select", args: { id: `${on}/${session}` } });
+  if (entry.pane) steps.push({ cmd: "agent.focus", args: { terminal: addressOn(on, entry.pane) } });
+  return steps;
 }
