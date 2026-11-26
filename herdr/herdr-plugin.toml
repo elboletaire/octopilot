@@ -1,12 +1,12 @@
-# Octopilot inside herdr: an "Octopilot" workspace with the orchestrator on
-# the left and the live dashboard on the right, plus the popups the dashboard
+# Octopilot inside herdr: an "Octopilot" workspace with the prompter on the
+# left and the live dashboard on the right, plus the popups the dashboard
 # opens. Link it with `herdr plugin link ~/src/octopilot/herdr` (this repo's install.sh does).
 id = "elboletaire.octopilot"
 name = "Octopilot"
 version = "0.1.0"
 min_herdr_version = "0.9.3"
 platforms = ["linux", "macos"]
-description = "Live Octopilot dashboard next to its orchestrator"
+description = "Live Octopilot dashboard next to its prompter"
 
 # Build (or focus) the Octopilot workspace.
 [[actions]]
