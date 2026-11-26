@@ -254,21 +254,28 @@ def owned_worktree(wt, repo):
 
 
 def live_map(agents, states, backend):
-    """Agents -> {session: {session, agent, pane, backend, state}}. Octopilot
+    """Agents -> {session: {session, agent, pane, backend, state}}, each agent
+    under every id it carries (its space or workspace, and its tab). Octopilot
     runs one agent per session; when the user opened more, the one octopilot
     named (ap-*) wins."""
     out = {}
     for a in agents:
-        ws = a.get("session")
-        if not ws:
-            continue
         mine = (a.get("agent") or "").startswith("ap-")
-        if ws in out and not mine:
-            continue
-        out[ws] = {"session": ws, "agent": a.get("agent"), "pane": a.get("pane"),
-                   "backend": backend,
-                   "state": states.get(a.get("status"), "unknown")}
+        for ws in a.get("ids") or [a.get("session")]:
+            if not ws or (ws in out and not mine):
+                continue
+            out[ws] = {"session": ws, "agent": a.get("agent"), "pane": a.get("pane"),
+                       "backend": backend,
+                       "state": states.get(a.get("status"), "unknown")}
     return out
+
+
+def session_matches(agent, session):
+    """Whether a backend's agent is in session: by its ids when it has them."""
+    ids = agent.get("ids")
+    if ids:
+        return session in ids
+    return agent.get("session") == session
 
 
 def worktree_of(folder):
