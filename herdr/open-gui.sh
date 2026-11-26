@@ -876,7 +876,8 @@ if [ -n "$host" ]; then
     app do tab.rename --id "$tab" --name "$MAIN_TAB" >/dev/null
     if [ -z "$(find_agent "$PROMPTER_AGENT")" ]; then add_prompter_left "$space" "$pane"; fi
     add_code_terminal_tab "$space"
-    app do agent.focus --terminal "$host" >/dev/null
+    # Best effort: a terminal created a moment ago may not be focusable yet.
+  "$APP" do agent.focus --terminal "$host" >/dev/null 2>&1 || true
   else
     old=$(legacy_dashboard "$space")
     if [ -n "$old" ]; then
@@ -940,8 +941,10 @@ if [ "$TERMINALS" = 1 ]; then
   app do pane.rename --pane "$root" --name dashboard >/dev/null
   if [ -z "$(find_agent "$PROMPTER_AGENT")" ]; then add_prompter_left "$space" "$root"; fi
   add_code_terminal_tab "$space"
-  app do agent.focus --terminal "$host" >/dev/null
+  # Best effort: a terminal created a moment ago may not be focusable yet.
+  "$APP" do agent.focus --terminal "$host" >/dev/null 2>&1 || true
 else
+  "$APP" do pane.rename --pane "$root" --name headless >/dev/null 2>&1 || true
   if [ "$HIDE_ENGINE" = 0 ]; then unpark_engine "$space"; fi
   add_engine_agents "$space" "$root"
   add_main_tab "$space"
