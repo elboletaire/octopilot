@@ -479,7 +479,7 @@ class HcBackend:
         return out
 
     def agents(self):
-        """[{session, agent, pane, status}] for every terminal running an agent.
+        """[{session, ids, agent, pane, status}] for every terminal running an agent.
         The agent's name is its octopilot.agent label, else the terminal's name."""
         code, data, _ = hc(["ls", "--json"], timeout=10)
         if code != 0 or not data:
@@ -492,6 +492,8 @@ class HcBackend:
             info = info or {}
             labels = info.get("labels") or {}
             out.append({"session": labels.get("herdr.space"),
+                        "ids": [labels[k] for k in ("herdr.space", "herdr.tab")
+                                if labels.get(k)],
                         "agent": labels.get("octopilot.agent") or info.get("name"),
                         "pane": t["address"], "status": t.get("status")})
         return out
@@ -509,7 +511,7 @@ class HcBackend:
     def target(self, it):
         """The terminal of an item's agent: the one labelled with its name, else
         any agent in its space."""
-        found = [a for a in self.agents() if a["session"] == it.get("session")]
+        found = [a for a in self.agents() if session_matches(a, it.get("session"))]
         for a in found:
             if it.get("agent") and a["agent"] == it["agent"]:
                 return a["pane"]
