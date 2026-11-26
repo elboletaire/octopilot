@@ -812,8 +812,8 @@ def sidebar_tokens(e, section):
 # both come here. A row action is checked with row_refusal() and, when it
 # asks, confirmed with row_confirm(); perform() then runs it.
 
-Result = collections.namedtuple("Result", "ok message kitchen",
-                                defaults=(False,))
+Result = collections.namedtuple("Result", "ok message kitchen holds",
+                                defaults=(False, ()))
 
 
 def truthy(value):
@@ -828,16 +828,25 @@ def kitchen_message():
     return f"🍳 The kitchen is closed (past {scan.WIND_DOWN_AT})"
 
 
+# A start held past wind-down or at the cap: hold name (as engine._held names
+# it) -> the marker the request ends with, and the short reason the row prompt
+# gives.
+HOLDS = {
+    "wind-down": (CONFIRMED, "🍳 kitchen closed"),
+    "cap": (engine.CONFIRMED_OVER, "⚠ at the cap"),
+}
+
+
 def start_holds(model):
     """What a go or an investigation started now must be confirmed past: a list
-    of (the marker the request ends with, the message). Past wind-down and
-    at the cap (the engine's count, as engine._held makes it) are the two."""
+    of (hold name, the message). Past wind-down and at the cap (the engine's
+    count, as engine._held makes it) are the two."""
     holds = []
     if scan.wind_down() == "yes":
-        holds.append((CONFIRMED, kitchen_message()))
+        holds.append(("wind-down", kitchen_message()))
     used = engine.slots_used(model.state, model.snap)
     if used >= scan.MAX_ACTIVE:
-        holds.append((engine.CONFIRMED_OVER,
+        holds.append(("cap",
                       f"⚠ At the cap: {used}/{scan.MAX_ACTIVE} slots in use"))
     return holds
 
@@ -852,26 +861,32 @@ def to_orch(text):
     return Result(False, f"queue failed: {(err or out)[:100]}")
 
 
-def go_orch(model, key, confirmed=False):
-    """`go KEY`. Past wind-down or at the cap it needs confirmed: the second
-    press of the held-start alert."""
+def start_request(model, cmd, confirmed=False):
+    """Queue cmd, a go or an investigation, past its holds. `confirmed` is the
+    hold names the user was shown: a hold not among them asks again, with the
+    message of each hold now. True is an old mod's confirmed=1: every hold now."""
     holds = start_holds(model)
     if not holds:
-        return to_orch(f"go {key}")
-    if not confirmed:
-        return Result(False, "\n".join(msg for _, msg in holds), kitchen=True)
-    return to_orch(f"go {key} " + " ".join(mark for mark, _ in holds))
+        return to_orch(cmd)
+    names = [name for name, _ in holds]
+    if confirmed is True:
+        confirmed = names
+    if not confirmed or any(name not in confirmed for name in names):
+        return Result(False, "\n".join(msg for _, msg in holds), kitchen=True,
+                      holds=tuple(names))
+    return to_orch(cmd + "".join(f" {HOLDS[name][0]}" for name in names))
+
+
+def go_orch(model, key, confirmed=False):
+    """`go KEY`. A start held past wind-down or at the cap needs confirmed: the
+    second press of the held-start alert."""
+    return start_request(model, f"go {key}", confirmed)
 
 
 def investigate_orch(model, repo, question, read_only, confirmed=False):
     """`/investigate`, which a hold needs confirmed like go_orch."""
     cmd = f"/investigate {'--read-only ' if read_only else ''}{repo} {question}"
-    holds = start_holds(model)
-    if holds:
-        if not confirmed:
-            return Result(False, "\n".join(msg for _, msg in holds), kitchen=True)
-        cmd += "".join(f" {mark}" for mark, _ in holds)
-    return to_orch(cmd)
+    return start_request(model, cmd, confirmed)
 
 
 def set_paused(verb):
@@ -1054,9 +1069,10 @@ def row_confirm(model, aid, e):
     key = e["key"]
     it = tracked_item(model, key) or {}
     if aid == "go":
-        if not start_holds(model):
+        holds = start_holds(model)
+        if not holds:
             return f"press g again to send 'go {key}' to the orchestrator"
-        why = "🍳 kitchen closed" if scan.wind_down() == "yes" else "⚠ at the cap"
+        why = " · ".join(HOLDS[name][1] for name, _ in holds)
         return f"{why} -- press g again to start {key} anyway"
     if aid == "no":
         return f"press n again to send 'no {key}' to the orchestrator"
@@ -1428,10 +1444,22 @@ def find_row(model, key):
                  if e["key"] == key), None)
 
 
+def confirmed_holds(args):
+    """The holds a --action confirm answers: the names the alert showed
+    (holds=wind-down,cap), True for an old mod's confirmed=1 alone, False when
+    nothing was confirmed."""
+    if not truthy(args.get("confirmed")):
+        return False
+    if "holds" in args:
+        return [name for name in args["holds"].split(",") if name]
+    return True
+
+
 def run_action(model, aid, key, args):
     """--action: one row or global action by its id, through the TUI key's
     code path. The mod asks the second press (`confirm`), so this runs at
-    once; confirmed=1 is the kitchen alert's second press."""
+    once; confirmed=1 with holds=<the shown names> is the kitchen alert's
+    second press."""
     if aid == "refresh":
         # Only a running headless dashboard rewrites view.json; it watches the
         # kick file's mtime (see headless()).
@@ -1452,7 +1480,7 @@ def run_action(model, aid, key, args):
             return Result(False, "investigate needs a repo and a question")
         return investigate_orch(model, repo, question,
                                 truthy(args.get("read_only")),
-                                truthy(args.get("confirmed")))
+                                confirmed_holds(args))
     if aid == "prompter":
         return open_prompter(model)
     if aid == "toggle_done":
@@ -1467,7 +1495,7 @@ def run_action(model, aid, key, args):
     refused = row_refusal(model, aid, e)
     if refused:
         return Result(False, refused)
-    return perform(model, aid, e, confirmed=truthy(args.get("confirmed")))
+    return perform(model, aid, e, confirmed=confirmed_holds(args))
 
 
 # -------------------------------------------------------------------- view
@@ -1481,7 +1509,7 @@ class Dashboard:
         self.hidden_done = 0
         self.flash = ("", 0)
         self.confirm = None   # (action, key, deadline)
-        self.alert = None     # (key, title, deadline): the kitchen is closed
+        self.alert = None     # (key, title, deadline, message, holds): a start is held
         self.selectable = []
         self.groups = []      # keys per board column, then the pick list
         self.expanded = set() # pick repos showing their rows; the rest collapse
@@ -1552,7 +1580,7 @@ class Dashboard:
 
     def kitchen(self):
         """The kitchen-closed alert, alone and centered on the screen."""
-        key, title, _, message = self.alert
+        key, title, _, message, _ = self.alert
         body = Text(justify="center")
         body.append(f"{message}\n\n", style="bold red")
         body.append(f"{key}\n", style="bold")
@@ -1948,10 +1976,15 @@ class Dashboard:
         res = perform(self.m, aid, e, suspend=lambda cmd: term.suspend(
             live, cmd, cwd=e["path"]))
         if res.kitchen:
-            self.alert = (e["key"], e["title"], time.time() + KITCHEN_SECS,
-                          res.message)
+            self.hold_alert(e["key"], e["title"], res)
         else:
             self.report(res)
+
+    def hold_alert(self, key, title, res):
+        """Open the held-start alert for res, keeping the holds it shows: the
+        second press confirms those and no others."""
+        self.alert = (key, title, time.time() + KITCHEN_SECS, res.message,
+                      res.holds)
 
     def handle(self, key, live, term):
         if self.alert:
@@ -1959,9 +1992,15 @@ class Dashboard:
             if key == "g" and time.time() - opened < KITCHEN_GRACE:
                 return True
             # Only g gets through the alert; anything else (q too) cancels.
-            k, self.alert = self.alert[0], None
+            k, title, _, _, shown = self.alert
+            self.alert = None
             if key == "g":
-                self.report(go_orch(self.m, k, confirmed=True))
+                res = go_orch(self.m, k, confirmed=shown)
+                # A hold that came up since the alert is asked again, not sent.
+                if res.kitchen:
+                    self.hold_alert(k, title, res)
+                else:
+                    self.report(res)
             else:
                 self.say("start cancelled")
             return True
@@ -2042,7 +2081,11 @@ class Dashboard:
                 self.say("investigation not started (held)")
                 return
             res = investigate_orch(self.m, repo, question, read_only,
-                                   confirmed=True)
+                                   confirmed=res.holds)
+            if res.kitchen:
+                held = " · ".join(res.message.splitlines())
+                self.say(f"investigation not started (held again: {held})")
+                return
         self.report(res)
 
 
@@ -2226,6 +2269,7 @@ def main():
             out = {"ok": res.ok, "message": res.message}
             if res.kitchen:
                 out["kitchen"] = True
+                out["holds"] = list(res.holds)
         except Exception as e:
             out = {"ok": False, "message": f"{type(e).__name__}: {e}"}
         print(json.dumps(out))

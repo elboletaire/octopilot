@@ -296,7 +296,6 @@ already running that octopilot did not start -- they are real load. If
 `ACTIVE + UNTRACKED` is at or above the cap, say so and spawn nothing unless the
 command ends with `(confirmed over cap)` -- the prompter or the dashboard already
 asked the user.
-queued rather than spawning past it.
 
 ## Pacing
 

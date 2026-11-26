@@ -174,8 +174,16 @@ export function parseAnswer(stdout) {
   const line = text.split("\n").filter(Boolean).pop() ?? "";
   try {
     const j = JSON.parse(line);
-    return { ok: Boolean(j.ok), kitchen: Boolean(j.kitchen), message: String(j.message ?? "") };
+    const answer = { ok: Boolean(j.ok), kitchen: Boolean(j.kitchen), message: String(j.message ?? "") };
+    if (Array.isArray(j.holds)) answer.holds = j.holds.map(String);
+    return answer;
   } catch {
     return { ok: false, kitchen: false, message: text || "no answer from octopilot" };
   }
+}
+
+// The --action args of a held start's second press. holds are the names the
+// alert showed; without them (an older dashboard) only confirmed=1 is sent.
+export function confirmArgs(args, holds) {
+  return { ...(args ?? {}), confirmed: 1, ...(holds ? { holds: holds.join(",") } : {}) };
 }

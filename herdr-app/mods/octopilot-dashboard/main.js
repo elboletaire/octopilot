@@ -10,7 +10,7 @@ import {
 } from "herdr";
 import {
   CONFIRM_MS, FLASH_MS, KITCHEN_S, GLOBAL_KEYS, ROW_KEYS, arrange, resolveSel,
-  entryOf, stepSel, jumpSel, keyName, actionKey, parseAnswer, slugOf, isRepoKey, viewError, isStale,
+  entryOf, stepSel, jumpSel, keyName, actionKey, parseAnswer, confirmArgs, slugOf, isRepoKey, viewError, isStale,
   ownPane, shownTab, keyboardFree,
 } from "./model.js";
 import {
@@ -271,7 +271,13 @@ export default class OctopilotDashboard extends View {
     }
     this.busy = true;
     cx.spawn(async () => {
-      const res = await runAction(on, p.dir, p.state_dir, p.action, p.key, { ...(p.args ?? {}), confirmed: 1 });
+      const res = await runAction(on, p.dir, p.state_dir, p.action, p.key, confirmArgs(p.args, p.holds));
+      // A hold that came up since the alert opened is shown again, not sent.
+      if (res.kitchen) {
+        this.openDialog("kitchen", { action: p.action, key: p.key, args: p.args, message: res.message, holds: res.holds });
+        closeOverlay(p.overlay);
+        return;
+      }
       notify({
         title: "Octopilot", body: res.message || (res.ok ? "started" : "failed"),
         level: res.ok ? "success" : "error",
@@ -301,7 +307,7 @@ export default class OctopilotDashboard extends View {
     cx.spawn(async (cx) => {
       const res = await runAction(on, p.dir, p.state_dir, p.action, null, args);
       if (res.kitchen) {
-        this.openDialog("kitchen", { action: p.action, args, message: res.message });
+        this.openDialog("kitchen", { action: p.action, args, message: res.message, holds: res.holds });
         closeOverlay(p.overlay);
       } else if (res.ok) {
         notify({ title: "Octopilot", body: res.message, level: "success" });
@@ -561,7 +567,7 @@ export default class OctopilotDashboard extends View {
     if (id === "peek" || id === "prompter") this.watchPeek();
     cx.spawn(async (cx) => {
       const res = await runAction(w.on, w.dir, w.stateExplicit, id, key, args);
-      if (res.kitchen) this.openDialog("kitchen", { action: id, key, args, message: res.message });
+      if (res.kitchen) this.openDialog("kitchen", { action: id, key, args, message: res.message, holds: res.holds });
       else this.say(res.message || (res.ok ? "done" : "failed"), res.ok, cx);
       cx.notify();
     });
