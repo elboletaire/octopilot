@@ -103,7 +103,8 @@ VIEW_STALE_SECS = 3 * VIEW_EVERY
 # How long the chef rests after the last event before dozing (register.tsx).
 DOZE_SECS = 10 * 60
 # Clock-relative fields move every second: left out of the change check.
-VIEW_VOLATILE = ("generated_at", "quiet_s", "age_s", "last_tick_s", "heat")
+VIEW_VOLATILE = ("generated_at", "quiet_s", "age_s", "last_tick_s", "heat",
+                 "since_s")
 INVESTIGATE_ARGS = ["repo", "question", "read_only"]
 # Row actions: id, the TUI key that runs it, and its footer label. The order
 # is the order the mods list them in.
@@ -150,6 +151,8 @@ DRAIN_EVERY = 60
 # (about 1380 of timeouts). Left out: the wait for the state lock behind a tick's
 # GitHub pass, and spawn_item's own gh calls (2 x 60). The margin is for those.
 DRAIN_TIMEOUT_SECS = 2400
+# A tick running longer than this is reported as hung (the header's red flag).
+TICK_STALE_SECS = 900
 
 AGENT_GLYPH = {"running": ("◐", "yellow"), "waiting": ("⏸", "bold red"),
                "idle": ("○", "dim"), "stopped": ("■", "dim"),
@@ -349,6 +352,15 @@ class Model:
         self.sessions = {}
         self.kick = threading.Event()
         self.drain_kick = threading.Event()
+        # Set with drain_kick when a request (not only a report) woke the drain:
+        # only that drain shows as acting.
+        self.drain_request = False
+        self.drain_running = False
+        self.drain_started = None
+        # The last lines a tick or drain printed, for the header and the kitchen.
+        self.engine_last = None
+        # Where the headless dashboard logs those lines; the TUI keeps stderr clean.
+        self.log_engine = None
         self.changed = threading.Event()
         # Set by a headless refresh: the GitHub loop then skips its debounce.
         self.urgent = threading.Event()
@@ -406,6 +418,8 @@ class Model:
             if not first and any(e.get("kind") in KICK_EVENTS for e in fresh):
                 self.kick.set()
             if not first and any(e.get("kind") in DRAIN_EVENTS for e in fresh):
+                if any(e.get("kind") == "request" for e in fresh):
+                    self.drain_request = True
                 self.drain_kick.set()
             self.changed.set()
 
@@ -425,8 +439,10 @@ class Model:
                 return
             self.snap_running, self.snap_started = True, time.time()
             self.changed.set()
-            code, _, err = sh([sys.executable, os.path.join(DIR, "scan.py"),
-                               verb, "--quiet"], timeout=1200)
+            code, out, err = sh([sys.executable, os.path.join(DIR, "scan.py"),
+                                 verb, "--quiet"], timeout=1200)
+            if verb == "tick":
+                self.engine_output("tick", out)
             with self.lock:
                 self.snap_err = None if code == 0 else \
                     (err or "snapshot failed").splitlines()[-1][:120]
@@ -507,21 +523,43 @@ class Model:
                     json.dump(out, fh)
                 os.replace(tmp, WOKEN_FILE)
 
+    def engine_output(self, verb, out):
+        """Keep the lines a tick or drain printed, unless it only said it was
+        busy with another run's act; the headless dashboard logs each one."""
+        lines = [l for l in out.splitlines()
+                 if l.strip() and not l.startswith("engine busy")]
+        if not lines:
+            return
+        self.engine_last = {"at": time.time(), "verb": verb, "lines": lines[-12:]}
+        if self.log_engine:
+            for line in lines:
+                self.log_engine(line)
+
     def engine_loop(self):
         """Drain the engine's inbox (scan.py drain): once at start, then on each
         request or report in the events log, and at least every DRAIN_EVERY
-        seconds. Only where the engine is on."""
+        seconds. Only where the engine is on. Only a request's drain shows as
+        acting."""
+        woke_for_request = False
         while True:
             # Cleared before the drain, so a request that lands during it wakes the next.
             self.drain_kick.clear()
+            self.drain_request = False
             try:
                 if scan.engine_mode(checkout=DIR) == "on":
-                    sh([sys.executable, os.path.join(DIR, "scan.py"), "drain", "--quiet"],
-                       timeout=DRAIN_TIMEOUT_SECS)
+                    if woke_for_request:
+                        self.drain_running, self.drain_started = True, time.time()
+                    try:
+                        _, out, _ = sh([sys.executable, os.path.join(DIR, "scan.py"),
+                                        "drain", "--quiet"], timeout=DRAIN_TIMEOUT_SECS)
+                        self.engine_output("drain", out)
+                    finally:
+                        self.drain_running = False
             except Exception:
                 # Silent like the other loops: the next wake retries.
                 pass
-            self.drain_kick.wait(timeout=DRAIN_EVERY)
+            woke = self.drain_kick.wait(timeout=DRAIN_EVERY)
+            woke_for_request = woke and self.drain_request
 
     def notify_loop(self):
         """Kick the GitHub loop when the user's notifications bring something
@@ -691,9 +729,31 @@ class Model:
                "active": snap.get("active"), "max_active": snap.get("max_active"),
                "untracked": snap.get("untracked") or 0,
                "generated_at": snap.get("generated_at"),
-               "last_tick": state.get("last_tick"),
-               "orch": self.orch_target(state, sessions, live)}
+               "last_tick": state.get("last_tick")}
         return out, hdr
+
+    def engine_status(self, now):
+        """The engine for the header and the pan: its mode, what it is doing
+        (off, idle, scanning a GitHub pass, acting on the table, or a tick
+        hung past TICK_STALE_SECS) and the last lines it printed."""
+        mode = scan.engine_mode(checkout=DIR)
+        with self.lock:
+            running, started = self.snap_running, self.snap_started
+            generated = (self.snap or {}).get("generated_at") or 0
+            drain_running, drain_started = self.drain_running, self.drain_started
+            last = self.engine_last
+        if mode == "off":
+            state, since = "off", None
+        elif running and now - started > TICK_STALE_SECS:
+            state, since = "stale", started
+        elif drain_running or (running and generated >= started):
+            state, since = "acting", drain_started if drain_running else started
+        elif running:
+            state, since = "scanning", started
+        else:
+            state, since = "idle", None
+        return {"mode": mode, "state": state,
+                "since_s": int(now - since) if since else None, "last": last}
 
     def parked_done(self, row, it, snap_at):
         """Whether a parked card (`d`) sits in Done. An older row predates the
@@ -779,17 +839,6 @@ class Model:
                 "stack": len(it.get("stack") or []),
                 "pane": ag.get("pane"), "open": bool(sess and sess in sessions),
                 "why": why}
-
-    def orch_target(self, state, sessions, live):
-        """-> (address, label). Addresses are "herdr:<agent>" or "hc:<terminal>".
-        An hc label is the agent's octopilot.agent name, from the live list."""
-        backend, target = scan.split_address(scan.orchestrator_target(state))
-        if backend is scan.HC:
-            title = next((a.get("agent") for a in live.values()
-                          if a.get("pane") == target), None)
-        else:
-            title = (sessions.get(target) or {}).get("title")
-        return f"{backend.prefix}{target}", title or target
 
 
 def sidebar_tokens(e, section):
@@ -945,8 +994,7 @@ def open_prompter(model):
             return Result(True, "")
     elif scan.herdr(["agent", "focus", scan.PROMPTER_AGENT], timeout=10)[0] == 0:
         return Result(True, "")
-    _, hdr = model.build()
-    backend, target = scan.split_address(hdr["orch"][0])
+    backend, target = scan.split_address(scan.orchestrator_target(model.state))
     if backend is scan.HC:
         ok = peek_hc(target)
     else:
@@ -1143,7 +1191,8 @@ def pick_groups(rows):
 
 def event_detail(e):
     return " ".join(str(e[f]) for f in ("state", "round", "phase", "branch",
-                                        "msg", "note", "reason", "text", "error")
+                                        "msg", "note", "reason", "left", "text",
+                                        "error")
                     if e.get(f) not in (None, ""))
 
 
@@ -1178,6 +1227,19 @@ def kitchen_reaction(ev):
     if kind == "engine-error":
         return rx("worried", 3000, "smoke", True, text("msg") or f"engine-error {k}",
                   bad=True)
+    if kind == "engine-skip":
+        return rx("worried", 3000, "smoke", line=f"skipped: {text('left') or text('reason')}",
+                  bad=True)
+    if kind == "held":
+        return rx("worried", 2500, "smoke", True, f"held {k}: {text('reason')}")
+    if kind in ("go-refused", "request-refused"):
+        verb = text("verb") or ("go" if kind == "go-refused" else "request")
+        return rx("sad", 3500, "smoke", True,
+                  " ".join(p for p in (verb, k, "refused:", text("reason")) if p),
+                  bad=True)
+    if kind == "go":
+        return rx("flip", 2000, None, True, f"started {k} {text('title')}".strip(),
+                  True)
     if kind == "tick":
         active = ev.get("active")
         active = int(active) if isinstance(active, (int, float)) else 0
@@ -1305,17 +1367,6 @@ def kitchen_pan(model, hdr, evs, now, busy):
             "shelf": served[:8], "shelf_total": len(served), "chef": chef}
 
 
-def orchestrator_busy(model, hdr):
-    """Whether the orchestrator's agent is running, by its live row."""
-    _, target = scan.split_address(hdr["orch"][0])
-    label = hdr["orch"][1]
-    with model.lock:
-        live = list(model.live.values())
-    return any(a.get("state") == "running"
-               and (a.get("pane") == target or a.get("agent") == label)
-               for a in live)
-
-
 def row_actions(model, e):
     """The row's actions, the ones the TUI would run on its keys."""
     out = []
@@ -1398,7 +1449,8 @@ def view_for(model):
 
     with model.lock:
         evs = list(model.events)
-    busy = orchestrator_busy(model, hdr)
+    engine = model.engine_status(now)
+    busy = engine["state"] == "acting"
     return {
         "v": 1,
         "generated_at": now,
@@ -1412,7 +1464,7 @@ def view_for(model):
                        "age_s": None if not gen else int(now - gen),
                        "error": model.snap_err},
             "last_tick_s": int(now - last_tick) if last_tick else None,
-            "orch_label": hdr["orch"][1],
+            "engine": engine,
             "paused": hdr["paused"],
             "wind_down": {"state": scan.wind_down() or "off",
                           "at": scan.WIND_DOWN_AT or None},
@@ -1611,7 +1663,12 @@ class Dashboard:
                 t.append(f" (+{hdr['untracked']} untracked)", style="dim")
         t.append("\n ")
         gen = hdr["generated_at"]
-        if self.m.snap_running:
+        engine = self.m.engine_status(now)
+        if engine["state"] == "acting":
+            t.append("⏭ acting", style="cyan")
+        elif engine["state"] == "stale":
+            t.append(f"tick running {ago(engine['since_s'])}+ (hung?)", style="red")
+        elif self.m.snap_running:
             t.append("GitHub ⟳ refreshing", style="cyan")
         elif gen:
             age = now - gen
@@ -1625,7 +1682,9 @@ class Dashboard:
         t.append("  ·  last tick ")
         t.append(ago(now - hdr["last_tick"]) + " ago" if hdr["last_tick"]
                  else "never", style="dim")
-        t.append(f"  ·  orchestrator {hdr['orch'][1]}", style="dim")
+        label = {"on": "engine on", "plan": "engine plan (logs only)",
+                 "off": "engine off here"}[engine["mode"]]
+        t.append(f"  ·  {label}", style="dim")
         t.append(f"  ·  {time.strftime('%H:%M:%S')}", style="dim")
         return t
 
@@ -2193,6 +2252,7 @@ def headless(model):
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, lambda signum, _frame: stopping.append(signum))
     model.poll_files()
+    model.log_engine = log
     model.start()
     log(f"headless dashboard: writing {VIEW_FILE}")
     kick_seen = kick_mtime()

@@ -3,7 +3,9 @@ does not act: with the engine on there is nobody to wake."""
 import contextlib
 import json
 import os
+import shutil
 import tempfile
+import time
 import types
 import unittest
 from unittest import mock
@@ -234,3 +236,196 @@ class HoldMarkerTest(unittest.TestCase):
     def test_the_wind_down_hold_asks_for_the_engine_marker(self):
         self.assertEqual(dashboard.HOLDS["wind-down"][0], engine.CONFIRMED_PAST)
         self.assertEqual(dashboard.HOLDS["cap"][0], engine.CONFIRMED_OVER)
+
+
+@unittest.skipIf(dashboard is None, "dashboard needs rich")
+class EngineStatusTest(unittest.TestCase):
+    """The header's engine state: the GitHub pass and a request's drain."""
+
+    NOW = 1100
+
+    def setUp(self):
+        mode = mock.patch.object(dashboard.scan, "engine_mode", return_value="on")
+        self.mode = mode.start()
+        self.addCleanup(mode.stop)
+
+    def model(self, **attrs):
+        model = dashboard.Model(None)
+        for name, value in attrs.items():
+            setattr(model, name, value)
+        return model
+
+    def test_off_wherever_the_engine_is_not_on(self):
+        self.mode.return_value = "off"
+        status = self.model().engine_status(self.NOW)
+        self.assertEqual((status["mode"], status["state"], status["since_s"]),
+                         ("off", "off", None))
+
+    def test_plan_is_reported_as_plan(self):
+        self.mode.return_value = "plan"
+        self.assertEqual(self.model().engine_status(self.NOW)["mode"], "plan")
+
+    def test_idle_when_nothing_runs(self):
+        status = self.model().engine_status(self.NOW)
+        self.assertEqual((status["state"], status["since_s"]), ("idle", None))
+
+    def test_scanning_while_the_pass_has_not_written_yet(self):
+        model = self.model(snap_running=True, snap_started=1000,
+                           snap={"generated_at": 990})
+        status = model.engine_status(self.NOW)
+        self.assertEqual((status["state"], status["since_s"]), ("scanning", 100))
+
+    def test_acting_once_the_pass_has_written_its_snapshot(self):
+        model = self.model(snap_running=True, snap_started=1000,
+                           snap={"generated_at": 1005})
+        status = model.engine_status(self.NOW)
+        self.assertEqual((status["state"], status["since_s"]), ("acting", 100))
+
+    def test_acting_while_a_request_drain_runs(self):
+        model = self.model(drain_running=True, drain_started=1050)
+        status = model.engine_status(self.NOW)
+        self.assertEqual((status["state"], status["since_s"]), ("acting", 50))
+
+    def test_stale_once_a_pass_runs_past_the_limit(self):
+        started = self.NOW - dashboard.TICK_STALE_SECS - 1
+        model = self.model(snap_running=True, snap_started=started,
+                           snap={"generated_at": 0})
+        status = model.engine_status(self.NOW)
+        self.assertEqual((status["state"], status["since_s"]),
+                         ("stale", dashboard.TICK_STALE_SECS + 1))
+
+    def test_the_last_lines_pass_through(self):
+        last = {"at": 1000, "verb": "drain", "lines": ["go 3 started"]}
+        self.assertEqual(self.model(engine_last=last).engine_status(self.NOW)["last"],
+                         last)
+
+
+@unittest.skipIf(dashboard is None, "dashboard needs rich")
+class EngineOutputTest(unittest.TestCase):
+    def test_a_tick_keeps_its_lines_and_logs_each_but_the_busy_note(self):
+        model = dashboard.Model(None)
+        logged = []
+        model.log_engine = logged.append
+        model.engine_output("tick", "engine busy: another run acts\ngo 3 started\nno 4 done")
+        self.assertEqual(model.engine_last["lines"], ["go 3 started", "no 4 done"])
+        self.assertEqual(model.engine_last["verb"], "tick")
+        self.assertEqual(logged, ["go 3 started", "no 4 done"])
+
+    def test_a_busy_only_run_keeps_the_last_lines(self):
+        model = dashboard.Model(None)
+        model.engine_output("drain", "engine busy: the drain retries later")
+        self.assertIsNone(model.engine_last)
+
+    def test_a_tick_pass_captures_its_output(self):
+        model = dashboard.Model(None)
+        with mock.patch.object(dashboard, "sh", return_value=(0, "go 3 started", "")):
+            model.refresh_snapshot(force=True, verb="tick")
+        self.assertEqual(model.engine_last["lines"], ["go 3 started"])
+
+    def test_only_a_request_marks_the_drain_as_requested(self):
+        with tempfile.TemporaryDirectory() as d:
+            events = os.path.join(d, "events.jsonl")
+            with open(events, "w") as fh:
+                fh.write(json.dumps({"kind": "tick"}) + "\n")
+            paths = {"EVENTS_FILE": events,
+                     "SNAPSHOT_FILE": os.path.join(d, "snapshot.json"),
+                     "STATE_FILE": os.path.join(d, "state.json")}
+            with contextlib.ExitStack() as stack:
+                for name, value in paths.items():
+                    stack.enter_context(mock.patch.object(dashboard, name, value))
+                model = dashboard.Model(None)
+                model.poll_files()
+                with open(events, "a") as fh:
+                    fh.write(json.dumps({"kind": "report", "state": "ready"}) + "\n")
+                model.poll_files()
+                self.assertTrue(model.drain_kick.is_set())
+                self.assertFalse(model.drain_request)
+                with open(events, "a") as fh:
+                    fh.write(json.dumps({"kind": "request", "text": "go 3"}) + "\n")
+                model.poll_files()
+                self.assertTrue(model.drain_request)
+
+
+@unittest.skipIf(dashboard is None, "dashboard needs rich")
+class EngineViewTest(unittest.TestCase):
+    def setUp(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        paths = {"EVENTS_FILE": os.path.join(d, "events.jsonl"),
+                 "SNAPSHOT_FILE": os.path.join(d, "snapshot.json"),
+                 "STATE_FILE": os.path.join(d, "state.json")}
+        for name, value in paths.items():
+            patch = mock.patch.object(dashboard, name, value)
+            patch.start()
+            self.addCleanup(patch.stop)
+        mode = mock.patch.object(dashboard.scan, "engine_mode", return_value="on")
+        mode.start()
+        self.addCleanup(mode.stop)
+        self.model = dashboard.Model(None)
+
+    def test_the_header_carries_the_engine_and_no_orchestrator_label(self):
+        view = dashboard.view_for(self.model)
+        self.assertEqual(view["header"]["engine"]["state"], "idle")
+        self.assertEqual(view["header"]["engine"]["mode"], "on")
+        self.assertNotIn("orch_label", view["header"])
+        self.assertFalse(view["pan"]["busy"])
+
+    def test_the_pan_is_busy_while_the_engine_acts(self):
+        self.model.drain_running, self.model.drain_started = True, time.time()
+        view = dashboard.view_for(self.model)
+        self.assertTrue(view["pan"]["busy"])
+
+    def test_since_s_does_not_count_as_a_change(self):
+        view = dashboard.view_for(self.model)
+        self.assertNotIn("since_s", dashboard.stable(view)["header"]["engine"])
+
+    def test_the_header_names_the_engine_and_its_state(self):
+        view = dashboard.Dashboard.__new__(dashboard.Dashboard)
+        view.m = self.model
+        hdr = {"active": None, "untracked": 0, "generated_at": None,
+               "last_tick": None}
+        data = {"needs": [], "running": [], "orch": [], "pick": []}
+        self.assertIn("engine on", view.header(data, hdr, time.time()).plain)
+        self.model.drain_running, self.model.drain_started = True, time.time()
+        self.assertIn("⏭ acting", view.header(data, hdr, time.time()).plain)
+        self.model.snap_running, self.model.snap_started = True, 1
+        self.assertIn("hung?", view.header(data, hdr, time.time()).plain)
+
+
+@unittest.skipIf(dashboard is None, "dashboard needs rich")
+class EngineReactionTest(unittest.TestCase):
+    def test_a_skipped_budget_names_what_was_cut(self):
+        ev = {"kind": "engine-skip", "key": "budget", "reason": "act budget spent",
+              "left": "go owner/repo#3, no owner/repo#4"}
+        self.assertIn("go owner/repo#3, no owner/repo#4", dashboard.event_detail(ev))
+        r = dashboard.kitchen_reaction(ev)
+        self.assertEqual(r["text"], "skipped: go owner/repo#3, no owner/repo#4")
+        self.assertEqual(r["tone"], "bad")
+
+    def test_a_skip_with_nothing_left_gives_the_reason(self):
+        ev = {"kind": "engine-skip", "key": "budget", "reason": "act budget spent"}
+        self.assertEqual(dashboard.kitchen_reaction(ev)["text"],
+                         "skipped: act budget spent")
+
+    def test_a_hold_says_what_held_it(self):
+        ev = {"kind": "held", "key": "owner/repo#3", "reason": "at the cap"}
+        r = dashboard.kitchen_reaction(ev)
+        self.assertEqual(r["text"], "held repo#3: at the cap")
+        self.assertEqual(r["tone"], "info")
+
+    def test_a_refused_go_or_request_is_bad_with_its_reason(self):
+        ev = {"kind": "go-refused", "key": "owner/repo#8", "verb": "go",
+              "reason": "issue is closed"}
+        r = dashboard.kitchen_reaction(ev)
+        self.assertEqual(r["text"], "go repo#8 refused: issue is closed")
+        self.assertEqual(r["tone"], "bad")
+        ev = {"kind": "request-refused", "verb": "no", "reason": "nothing tracked"}
+        r = dashboard.kitchen_reaction(ev)
+        self.assertEqual(r["text"], "no refused: nothing tracked")
+        self.assertEqual(r["tone"], "bad")
+
+    def test_a_started_go_is_good(self):
+        ev = {"kind": "go", "key": "owner/repo#3", "title": "Fix the thing"}
+        r = dashboard.kitchen_reaction(ev)
+        self.assertEqual(r["text"], "started repo#3 Fix the thing")
+        self.assertEqual(r["tone"], "good")
