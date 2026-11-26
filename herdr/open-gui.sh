@@ -750,7 +750,8 @@ keep_saved_records() {
     value=$(label_of "$holder" "$v")
     if [ -z "$value" ]; then continue; fi
     record_label "$1" "$v" "$value"
-    "$HC" label "$holder" "$v=" >/dev/null
+    # Cleared from the holder only once the host shows the value.
+    if [ "$(label_of "$1" "$v")" = "$value" ]; then "$HC" label "$holder" "$v=" >/dev/null; fi
   done
 }
 
@@ -804,6 +805,8 @@ focus_main() {
 
 # The space is found before the retirement and the reap, which may end the terminals that prove it.
 known_space=$(existing_space)
+# Dead shells go first: the pre-checks and the records holder must not see them.
+for a in "$HEADLESS_AGENT" "$PROMPTER_AGENT"; do reap_dead "$a"; done
 # Layouts this run cannot build over are refused before anything is ended.
 if [ -n "$known_space" ] && [ "$TERMINALS" = 0 ]; then
   old=$(legacy_dashboard "$known_space")
@@ -827,7 +830,6 @@ if [ -n "$known_space" ] && [ "$TERMINALS" = 1 ] && [ -z "$(find_host)" ]; then
   fi
 fi
 retire_orchestrator "$known_space"
-for a in "$HEADLESS_AGENT" "$PROMPTER_AGENT"; do reap_dead "$a"; done
 host=$(find_host)
 if [ -n "$host" ]; then
   located=$(locate "$host")
@@ -855,6 +857,8 @@ if [ -n "$host" ]; then
 fi
 
 if [ -n "$host" ]; then
+  # A run that failed after the host was labelled left the records on the holder.
+  keep_saved_records "$host"
   name_space "$space"
   if [ "$TERMINALS" = 1 ]; then
     parked=$(parked_engine)
