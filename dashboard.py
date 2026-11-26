@@ -352,9 +352,7 @@ class Model:
         self.sessions = {}
         self.kick = threading.Event()
         self.drain_kick = threading.Event()
-        # Set with drain_kick when a request (not only a report) woke the drain:
-        # only that drain shows as acting.
-        self.drain_request = False
+        # Set and read under self.lock together: a drain is acting from its start.
         self.drain_running = False
         self.drain_started = None
         # The last lines a tick or drain printed, for the header and the kitchen.
@@ -418,8 +416,6 @@ class Model:
             if not first and any(e.get("kind") in KICK_EVENTS for e in fresh):
                 self.kick.set()
             if not first and any(e.get("kind") in DRAIN_EVENTS for e in fresh):
-                if any(e.get("kind") == "request" for e in fresh):
-                    self.drain_request = True
                 self.drain_kick.set()
             self.changed.set()
 
@@ -524,8 +520,8 @@ class Model:
                 os.replace(tmp, WOKEN_FILE)
 
     def engine_output(self, verb, out):
-        """Keep the lines a tick or drain printed, unless it only said it was
-        busy with another run's act; the headless dashboard logs each one."""
+        """Keep the lines a tick or drain printed for the header, and log each one
+        when headless. Both callers run --quiet, so a busy note is only a guard."""
         lines = [l for l in out.splitlines()
                  if l.strip() and not l.startswith("engine busy")]
         if not lines:
@@ -538,28 +534,25 @@ class Model:
     def engine_loop(self):
         """Drain the engine's inbox (scan.py drain): once at start, then on each
         request or report in the events log, and at least every DRAIN_EVERY
-        seconds. Only where the engine is on. Only a request's drain shows as
-        acting."""
-        woke_for_request = False
+        seconds. Only where the engine is on."""
         while True:
             # Cleared before the drain, so a request that lands during it wakes the next.
             self.drain_kick.clear()
-            self.drain_request = False
             try:
                 if scan.engine_mode(checkout=DIR) == "on":
-                    if woke_for_request:
-                        self.drain_running, self.drain_started = True, time.time()
+                    with self.lock:
+                        self.drain_started, self.drain_running = time.time(), True
                     try:
                         _, out, _ = sh([sys.executable, os.path.join(DIR, "scan.py"),
                                         "drain", "--quiet"], timeout=DRAIN_TIMEOUT_SECS)
                         self.engine_output("drain", out)
                     finally:
-                        self.drain_running = False
+                        with self.lock:
+                            self.drain_running = False
             except Exception:
                 # Silent like the other loops: the next wake retries.
                 pass
-            woke = self.drain_kick.wait(timeout=DRAIN_EVERY)
-            woke_for_request = woke and self.drain_request
+            self.drain_kick.wait(timeout=DRAIN_EVERY)
 
     def notify_loop(self):
         """Kick the GitHub loop when the user's notifications bring something
@@ -742,12 +735,17 @@ class Model:
             generated = (self.snap or {}).get("generated_at") or 0
             drain_running, drain_started = self.drain_running, self.drain_started
             last = self.engine_last
+        # generated_at is whole seconds: compare it with the start's second.
         if mode == "off":
             state, since = "off", None
         elif running and now - started > TICK_STALE_SECS:
             state, since = "stale", started
-        elif drain_running or (running and generated >= started):
-            state, since = "acting", drain_started if drain_running else started
+        elif drain_running and now - drain_started > TICK_STALE_SECS:
+            state, since = "stale", drain_started
+        elif drain_running:
+            state, since = "acting", drain_started
+        elif running and generated >= int(started):
+            state, since = "acting", started
         elif running:
             state, since = "scanning", started
         else:
@@ -1231,7 +1229,8 @@ def kitchen_reaction(ev):
         return rx("worried", 3000, "smoke", line=f"skipped: {text('left') or text('reason')}",
                   bad=True)
     if kind == "held":
-        return rx("worried", 2500, "smoke", True, f"held {k}: {text('reason')}")
+        return rx("worried", 2500, "smoke", True,
+                  f"held {short(key or 'request')}: {text('reason')}")
     if kind in ("go-refused", "request-refused"):
         verb = text("verb") or ("go" if kind == "go-refused" else "request")
         return rx("sad", 3500, "smoke", True,

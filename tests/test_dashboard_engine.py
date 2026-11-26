@@ -281,7 +281,7 @@ class EngineStatusTest(unittest.TestCase):
         status = model.engine_status(self.NOW)
         self.assertEqual((status["state"], status["since_s"]), ("acting", 100))
 
-    def test_acting_while_a_request_drain_runs(self):
+    def test_acting_while_a_drain_runs(self):
         model = self.model(drain_running=True, drain_started=1050)
         status = model.engine_status(self.NOW)
         self.assertEqual((status["state"], status["since_s"]), ("acting", 50))
@@ -290,6 +290,19 @@ class EngineStatusTest(unittest.TestCase):
         started = self.NOW - dashboard.TICK_STALE_SECS - 1
         model = self.model(snap_running=True, snap_started=started,
                            snap={"generated_at": 0})
+        status = model.engine_status(self.NOW)
+        self.assertEqual((status["state"], status["since_s"]),
+                         ("stale", dashboard.TICK_STALE_SECS + 1))
+
+    def test_acting_in_the_second_the_pass_started(self):
+        model = self.model(snap_running=True, snap_started=1000.5,
+                           snap={"generated_at": 1000})
+        status = model.engine_status(self.NOW)
+        self.assertEqual(status["state"], "acting")
+
+    def test_stale_once_a_drain_runs_past_the_limit(self):
+        started = self.NOW - dashboard.TICK_STALE_SECS - 1
+        model = self.model(drain_running=True, drain_started=started)
         status = model.engine_status(self.NOW)
         self.assertEqual((status["state"], status["since_s"]),
                          ("stale", dashboard.TICK_STALE_SECS + 1))
@@ -311,7 +324,7 @@ class EngineOutputTest(unittest.TestCase):
         self.assertEqual(model.engine_last["verb"], "tick")
         self.assertEqual(logged, ["go 3 started", "no 4 done"])
 
-    def test_a_busy_only_run_keeps_the_last_lines(self):
+    def test_a_busy_only_run_keeps_nothing(self):
         model = dashboard.Model(None)
         model.engine_output("drain", "engine busy: the drain retries later")
         self.assertIsNone(model.engine_last)
@@ -321,29 +334,6 @@ class EngineOutputTest(unittest.TestCase):
         with mock.patch.object(dashboard, "sh", return_value=(0, "go 3 started", "")):
             model.refresh_snapshot(force=True, verb="tick")
         self.assertEqual(model.engine_last["lines"], ["go 3 started"])
-
-    def test_only_a_request_marks_the_drain_as_requested(self):
-        with tempfile.TemporaryDirectory() as d:
-            events = os.path.join(d, "events.jsonl")
-            with open(events, "w") as fh:
-                fh.write(json.dumps({"kind": "tick"}) + "\n")
-            paths = {"EVENTS_FILE": events,
-                     "SNAPSHOT_FILE": os.path.join(d, "snapshot.json"),
-                     "STATE_FILE": os.path.join(d, "state.json")}
-            with contextlib.ExitStack() as stack:
-                for name, value in paths.items():
-                    stack.enter_context(mock.patch.object(dashboard, name, value))
-                model = dashboard.Model(None)
-                model.poll_files()
-                with open(events, "a") as fh:
-                    fh.write(json.dumps({"kind": "report", "state": "ready"}) + "\n")
-                model.poll_files()
-                self.assertTrue(model.drain_kick.is_set())
-                self.assertFalse(model.drain_request)
-                with open(events, "a") as fh:
-                    fh.write(json.dumps({"kind": "request", "text": "go 3"}) + "\n")
-                model.poll_files()
-                self.assertTrue(model.drain_request)
 
 
 @unittest.skipIf(dashboard is None, "dashboard needs rich")
@@ -423,6 +413,11 @@ class EngineReactionTest(unittest.TestCase):
         r = dashboard.kitchen_reaction(ev)
         self.assertEqual(r["text"], "no refused: nothing tracked")
         self.assertEqual(r["tone"], "bad")
+
+    def test_a_hold_without_a_key_is_a_request(self):
+        ev = {"kind": "held", "reason": "kitchen closed"}
+        self.assertEqual(dashboard.kitchen_reaction(ev)["text"],
+                         "held request: kitchen closed")
 
     def test_a_started_go_is_good(self):
         ev = {"kind": "go", "key": "owner/repo#3", "title": "Fix the thing"}
