@@ -461,22 +461,63 @@ class HcBackend:
         return data.get("spaces", [])
 
     def sessions(self, spaces):
-        """Linked-worktree spaces, shaped like HerdrBackend.sessions()."""
+        """Linked-worktree spaces, and the tabs of other local spaces that run in
+        a linked worktree (a worker's), shaped like HerdrBackend.sessions()."""
         if spaces is None:
             return None
+        checkouts = {}  # worktree_of() once per folder in this scan
+
+        def checkout(folder):
+            if folder not in checkouts:
+                checkouts[folder] = worktree_of(folder)
+            return checkouts[folder]
+        cwds = None
         out = []
         for sp in spaces:
             # A space on another machine has a folder this one cannot see.
-            if sp.get("machine") or not sp.get("folder"):
+            if sp.get("machine"):
                 continue
-            wt = worktree_of(sp["folder"])
+            wt = checkout(sp["folder"]) if sp.get("folder") else None
             if wt:
-                path, repo, branch = wt
-                out.append({"id": sp["id"], "title": sp.get("name"), "path": path,
-                            "backend": self.name,
-                            "worktree": {"branch": branch or None,
-                                         "main_repo_path": repo}})
+                out.append(self.session_row(sp["id"], sp.get("name"), sp["id"], wt))
+                continue
+            if cwds is None:
+                cwds = self.terminal_cwds()
+            for tab in sp.get("tabs", []):
+                row = self.tab_row(sp, tab, cwds, checkout)
+                if row:
+                    out.append(row)
         return out
+
+    def session_row(self, session, title, space, wt):
+        """A session row for a checkout: wt is worktree_of()'s (path, repo, branch)."""
+        path, repo, branch = wt
+        return {"id": session, "title": title, "path": path, "backend": self.name,
+                "space": space,
+                "worktree": {"branch": branch or None, "main_repo_path": repo}}
+
+    def terminal_cwds(self):
+        """{terminal: cwd} for the terminals hc lists, {} when it cannot say."""
+        code, data, _ = hc(["ls", "--json"], timeout=10)
+        if code != 0 or not data:
+            return {}
+        return {t["address"]: t.get("cwd") for t in data.get("terminals", [])}
+
+    def tab_row(self, space, tab, cwds, checkout):
+        """The row of a tab with a terminal in a linked worktree, or None. The
+        launcher's terminals (octopilot.dir) are not a worker's."""
+        for t in tab.get("terminals", []):
+            folder = cwds.get(t.get("terminal"))
+            wt = checkout(folder) if folder else None
+            if not wt:
+                continue
+            code, info, _ = hc(["get", t["terminal"], "--json"], timeout=10)
+            if code != 0 or not isinstance(info, dict):
+                continue  # labels unknown: not a worker's either
+            if (info.get("labels") or {}).get("octopilot.dir"):
+                continue
+            return self.session_row(tab["id"], tab.get("name"), space["id"], wt)
+        return None
 
     def agents(self):
         """[{session, ids, agent, pane, status}] for every terminal running an agent.
@@ -502,8 +543,7 @@ class HcBackend:
         """-> (worktree sessions, answered, open session ids)."""
         spaces = self.spaces()
         rows = self.sessions(spaces)
-        ids = {s.get("id") for s in spaces or []}
-        return rows or [], rows is not None, ids
+        return rows or [], rows is not None, open_ids(spaces or [])
 
     def live(self):
         return live_map(self.agents(), HC_STATE, self.name)
@@ -642,6 +682,12 @@ class HcBackend:
             host["warning"] = (f"agent {name} is blocked at startup; check "
                                f"space {ws} before sending it a prompt")
         return host
+
+
+def open_ids(spaces):
+    """Every space and tab id herdr-app lists, settled tabs included."""
+    return ({sp.get("id") for sp in spaces}
+            | {t.get("id") for sp in spaces for t in sp.get("tabs", [])})
 
 
 HERDR = HerdrBackend()
