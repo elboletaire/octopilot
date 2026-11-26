@@ -102,6 +102,17 @@ class OctopilotSpaceTest(HostSpaceTest):
         self.terminal("t1", HEADLESS, **{"herdr.space": "sp1"})
         self.assertIsNone(scan.octopilot_space())
 
+    def test_an_unlabelled_terminal_is_not_taken(self):
+        self.space("sp1")
+        self.terms["t1"] = (HEADLESS, {"herdr.space": "sp1"})
+        self.assertIsNone(scan.octopilot_space())
+
+    def test_another_checkouts_terminal_is_not_taken(self):
+        self.space("sp1")
+        self.terms["t1"] = (HEADLESS, {"herdr.space": "sp1",
+                                       "octopilot.dir": os.path.join(self.this, "..")})
+        self.assertIsNone(scan.octopilot_space())
+
     def test_the_prompter_is_the_fallback(self):
         self.space("sp3")
         self.terminal("t3", PROMPTER, **{"herdr.space": "sp3"})

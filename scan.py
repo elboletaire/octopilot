@@ -256,10 +256,8 @@ def owned_worktree(wt, repo):
 
 
 def live_map(agents, states, backend):
-    """Agents -> {session: {session, agent, pane, backend, state}}, each agent
-    under every id it carries (its space or workspace, and its tab). Octopilot
-    runs one agent per session; when the user opened more, the one octopilot
-    named (ap-*) wins."""
+    """-> {id: entry}, each agent under every id it carries (its space or
+    workspace, and its tab); on a shared id the ap-* agent wins."""
     out = {}
     for a in agents:
         mine = (a.get("agent") or "").startswith("ap-")
@@ -700,17 +698,29 @@ def spawn_backend():
     return backend
 
 
+def own_labels(agent):
+    """The labels of this checkout's terminal running agent, or None: only a
+    terminal labelled with this checkout's dir, as open-gui.sh's is_mine."""
+    code, data, _ = hc(["ls", "--json", "--label", f"octopilot.agent={agent}"],
+                       timeout=10)
+    for t in (data or {}).get("terminals", []) if code == 0 else []:
+        code, info, _ = hc(["get", t["address"], "--json"], timeout=10)
+        if code != 0 or not isinstance(info, dict):
+            continue
+        labels = info.get("labels") or {}
+        d = labels.get("octopilot.dir")
+        if d and os.path.realpath(d) == os.path.realpath(OCTOPILOT_DIR):
+            return labels
+    return None
+
+
 def octopilot_space():
     """The GUI's Octopilot space: that of the headless engine, the code agent or
     the prompter (their herdr.space label, else octopilot.space once parked),
     when this computer lists it. None when none is found."""
     local = {s.get("id") for s in HC.spaces() or [] if not s.get("machine")}
     for label in (HEADLESS_AGENT, CODE_AGENT, PROMPTER_AGENT):
-        found = HC.find(label)
-        if not found:
-            continue
-        code, info, _ = hc(["get", found[len(HC.prefix):], "--json"], timeout=10)
-        labels = (info.get("labels") or {}) if code == 0 and isinstance(info, dict) else {}
+        labels = own_labels(label) or {}
         space = labels.get("herdr.space") or labels.get("octopilot.space")
         if space in local:
             return space
