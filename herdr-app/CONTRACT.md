@@ -122,7 +122,7 @@ Action:
  "args": ["repo", "question", "read_only"] /* investigate only */}
 ```
 Row action ids (TUI key): `focus` (Enter), `peek` (v), `shell` (t), `browser` (o), `go` (g), `no` (n), `grant` (R),
-`rereview` (e), `ack` (x), `detach` (z), `park` / `unpark` (d), `remove` (Del).
+`rereview` (e), `ack` (x), `detach` (z), `park` / `unpark` (d), `remove` (Del, or Shift+Backspace on a Mac).
 Global ids: `refresh` (r), `pause` / `resume` (P), `investigate` (i), `prompter` (a). `toggle_done` (D) and
 `fold_all` (C), folding and selection are mod-side only (the mod passes `--show-all-done` state to nothing: Done
 filtering uses `hidden`/`open` fields).
