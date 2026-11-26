@@ -84,6 +84,8 @@ HEADLESS_AGENT = "octopilot-headless"
 # herdr agent in the "Octopilot (code changes)" tab (herdr/open.sh): changes
 # and fixes to octopilot itself go there.
 CODE_AGENT = "octopilot-code"
+# The name herdr/open.sh gives the Octopilot workspace (the TUI's host).
+OCTOPILOT_LABEL = "Octopilot"
 
 AGENT_MARKER = "controlled by elboletaire"
 FEEDBACK_IGNORE = set(
@@ -696,6 +698,35 @@ def spawn_backend():
         raise SystemExit(f"OCTOPILOT_BACKEND must be herdr or hc, not "
                          f"{OCTOPILOT_BACKEND!r}")
     return backend
+
+
+def octopilot_space():
+    """The GUI's Octopilot space: that of the headless engine, the code agent or
+    the prompter (their herdr.space label, else octopilot.space once parked),
+    when this computer lists it. None when none is found."""
+    local = {s.get("id") for s in HC.spaces() or [] if not s.get("machine")}
+    for label in (HEADLESS_AGENT, CODE_AGENT, PROMPTER_AGENT):
+        found = HC.find(label)
+        if not found:
+            continue
+        code, info, _ = hc(["get", found[len(HC.prefix):], "--json"], timeout=10)
+        labels = (info.get("labels") or {}) if code == 0 and isinstance(info, dict) else {}
+        space = labels.get("herdr.space") or labels.get("octopilot.space")
+        if space in local:
+            return space
+    return None
+
+
+def octopilot_workspace():
+    """The TUI's Octopilot workspace (labelled as herdr/open.sh does), else the
+    one the prompter runs in. None when neither is found."""
+    for w in HERDR.workspaces() or []:
+        if w.get("label") == OCTOPILOT_LABEL:
+            return w.get("workspace_id")
+    code, data, _ = herdr(["agent", "get", PROMPTER_AGENT])
+    if code != 0:
+        return None
+    return (((data or {}).get("result") or {}).get("agent") or {}).get("workspace_id")
 
 
 def worker_host():
@@ -2961,7 +2992,8 @@ def chat_keys(args):
 
 SELF_LOCKING = {"tick", "drain"}
 READ_ONLY = {"render", "status", "siblings", "snapshot", "wind-down", "plugin-settings",
-             "inbox", "installed-dir", "speech", "chat", "chat-send", "chat-keys"}
+             "inbox", "installed-dir", "speech", "chat", "chat-send", "chat-keys",
+             "host-space"}
 
 
 def claude_plugin_dirs():
@@ -3204,6 +3236,12 @@ def dispatch(cmd, args, state):
             return 0
         print(f"sent to {CODE_AGENT}" + (f" ({sent} with earlier queued)"
                                          if sent > 1 else ""))
+        return 0
+    if cmd == "host-space":
+        # host-space: the Octopilot space (GUI) or workspace (TUI) that worker tabs open in.
+        host = octopilot_space() if spawn_backend() is HC else octopilot_workspace()
+        if host:
+            print(host)
         return 0
     if cmd == "speech":
         print(json.dumps(speech_cmd(state)))
