@@ -5,7 +5,7 @@
 import { div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import {
-  AGENT_GLYPH, CI_GLYPH, ago, liveAge, elapsed, pickSummary, FLASH_MS, isRepoKey, isStale,
+  AGENT_GLYPH, CI_GLYPH, ago, liveAge, elapsed, pickSummary, FLASH_MS, isRepoKey, isStale, engineLabel,
 } from "./model.js";
 
 // Column id -> the theme colour its title, count and card edge take.
@@ -79,6 +79,7 @@ export function header(v, t, now) {
   const elapsedSecs = elapsed(view, now);
   const lastTick = liveAge(h.last_tick_s, view, now);
   const stale = isStale(view, now);
+  const engine = engineLabel(h.engine, view, now);
   const on = v.machine() ?? null;
   return v_flex().gap(6)
     .child(h_flex().items_center().gap(12)
@@ -100,13 +101,13 @@ export function header(v, t, now) {
         .child(`engine not running (view ${Math.floor(elapsedSecs)} s old)`)))
       .child(github(t, h.github ?? {}, elapsedSecs))
       .child(`last tick ${lastTick == null ? "never" : `${ago(lastTick)} ago`}`)
-      .child(`orchestrator ${h.orch_label}`));
+      .when(Boolean(engine), (el) => el.child(div().text_color(t[engine.tone]).child(engine.text))));
 }
 
 export function paused(t) {
   return h_flex().h(30).px(14).items_center().rounded(9).bg(t.working + "26")
     .text_color(t.working).font_semibold().text_size(12)
-    .child("⏸  PAUSED: the orchestrator acts on nothing until resumed (P)");
+    .child("⏸  PAUSED: octopilot starts and acts on nothing until resumed (P)");
 }
 
 // The selected card's edge is its own left border drawn thicker, so it follows the rounded

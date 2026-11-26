@@ -45,6 +45,18 @@ export const elapsed = (view, now) => Math.max(0, now / 1000 - (view.generated_a
 export const liveAge = (secs, view, now) => (secs == null ? null : secs + elapsed(view, now));
 export const isStale = (view, now) => elapsed(view, now) > STALE_S;
 
+// The header's engine label (CONTRACT.md header.engine), or null for a view with no
+// engine block (one written before the header had it, still on disk during a switch).
+export function engineLabel(engine, view, now) {
+  if (!engine) return null;
+  const since = liveAge(engine.since_s, view, now);
+  if (engine.state === "stale") return { text: `engine hung? ${ago(since)}`, tone: "blocked" };
+  if (engine.mode === "off") return { text: "engine off", tone: "dim" };
+  if (engine.mode === "plan") return { text: "engine plan", tone: "dim" };
+  if (engine.state === "acting") return { text: `⏭ acting ${ago(since)}`, tone: "working" };
+  return { text: "engine on", tone: "dim" };
+}
+
 // Board columns with the rows they show (Done hides closed rows unless asked),
 // and the Pick next tree as the lines it draws, plus every key the cursor can
 // stand on, in the order j/k walk them.
