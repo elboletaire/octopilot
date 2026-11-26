@@ -13,6 +13,12 @@ class Slugify(unittest.TestCase):
         self.assertEqual(naming.slugify("  --a__b--  "), "a-b")
         self.assertEqual(naming.slugify("!!!"), "")
 
+    def test_letters_nfkd_cannot_split(self):
+        self.assertEqual(naming.slugify("Straße"), "strasse")
+        self.assertEqual(naming.slugify("ẞ"), "ss")
+        self.assertEqual(naming.slugify("Ørsted Łódź"), "orsted-lodz")
+        self.assertEqual(naming.slugify("Æon Đà Nẵng"), "aeon-da-nang")
+
     def test_accents_and_unicode(self):
         self.assertEqual(naming.slugify("Crème brûlée"), "creme-brulee")
         self.assertEqual(naming.slugify("Añadir soporte para ñandú"), "anadir-soporte-para-nandu")
@@ -71,12 +77,15 @@ class BranchNames(unittest.TestCase):
             with self.subTest(title=title):
                 branch, shown = naming.issue_names(1756, title)
                 self.assertEqual(shown, expected)
-                self.assertEqual(naming.title_from_branch(branch), expected)
+                self.assertEqual(naming.title_from_branch(branch, strip_number=True), expected)
 
-    def test_title_from_branch_drops_only_the_trailing_number(self):
-        self.assertEqual(naming.title_from_branch("feat/vertical-login-1756"), "Vertical Login")
-        self.assertEqual(naming.title_from_branch("fix/x-1-1756"), "X 1")
-        self.assertEqual(naming.title_from_branch("feat/issue-26"), "Issue")
+    def test_title_from_branch_strips_the_number_only_when_asked(self):
+        self.assertEqual(naming.title_from_branch("feat/vertical-login-1756", strip_number=True),
+                         "Vertical Login")
+        self.assertEqual(naming.title_from_branch("fix/x-1-1756", strip_number=True), "X 1")
+        self.assertEqual(naming.title_from_branch("feat/issue-26", strip_number=True), "Issue")
+        self.assertEqual(naming.title_from_branch("chore/upgrade-to-python-3"),
+                         "Upgrade To Python 3")
 
     def test_branch_type_without_labels_or_prefix(self):
         self.assertEqual(naming.branch_type("Something new"), "feat")
@@ -84,27 +93,69 @@ class BranchNames(unittest.TestCase):
         self.assertEqual(naming.branch_type("Explain the readme"), "docs")
 
 
+FREE = lambda repo, branch: False
+
+
 class InvestigationNames(unittest.TestCase):
+    def pick(self, question, read_only=False, **kw):
+        return naming.pick_investigation(question, read_only, "/repo", "owner/repo",
+                                         ref_exists=kw.pop("ref_exists", FREE), **kw)
+
     def test_default_is_chore(self):
-        name, branch, title = naming.investigation_names("How does the cache invalidate entries?")
+        name, branch, title = self.pick("How does the cache invalidate entries?")
         self.assertEqual(name, "how-does-the-cache-invalidate")
         self.assertEqual(branch, "chore/how-does-the-cache-invalidate")
         self.assertEqual(title, "How Does The Cache Invalidate")
 
     def test_fix_and_docs_keywords(self):
-        self.assertEqual(naming.investigation_names("Why does sync crash?")[1],
-                         "fix/why-does-sync-crash")
-        self.assertEqual(naming.investigation_names("Audit the docs folder", True)[1],
-                         "docs/audit-the-docs-folder")
+        self.assertEqual(self.pick("Why does sync crash?")[1], "fix/why-does-sync-crash")
+        self.assertEqual(self.pick("Audit the docs folder")[1], "docs/audit-the-docs-folder")
+
+    def test_read_only_is_always_chore(self):
+        self.assertEqual(self.pick("Why does sync crash?", read_only=True)[1],
+                         "chore/why-does-sync-crash")
+
+    def test_digits_in_the_question_stay_in_the_title(self):
+        name, branch, title = self.pick("Upgrade to Python 3")
+        self.assertEqual(branch, "chore/upgrade-to-python-3")
+        self.assertEqual(title, "Upgrade To Python 3")
 
     def test_empty_question_falls_back(self):
-        self.assertEqual(naming.investigation_names("???")[0], "investigation")
+        self.assertEqual(self.pick("???")[0], "investigation")
+
+    def test_same_question_twice_gets_a_new_branch_and_key(self):
+        first_name, first_branch, _ = self.pick("Why does sync crash?")
+        second = self.pick("Why does sync crash?",
+                           taken_keys={f"owner/repo?{first_name}"},
+                           taken_branches={first_branch})
+        self.assertEqual(second[0], "why-does-sync-crash-2")
+        self.assertEqual(second[1], "fix/why-does-sync-crash-2")
+        self.assertEqual(second[2], "Why Does Sync Crash 2")
+
+    def test_branch_taken_on_disk_moves_the_name_too(self):
+        taken = lambda repo, branch: branch == "chore/how-x"
+        name, branch, _ = self.pick("How x", ref_exists=taken)
+        self.assertEqual((name, branch), ("how-x-2", "chore/how-x-2"))
+
+    def test_key_taken_without_branch_moves_the_name(self):
+        name, branch, _ = self.pick("How x", taken_keys={"owner/repo?how-x"})
+        self.assertEqual((name, branch), ("how-x-2", "chore/how-x-2"))
+        name, branch, _ = self.pick("How x", taken_keys={"owner/repo?how-x",
+                                                         "owner/repo?how-x-2"})
+        self.assertEqual((name, branch), ("how-x-3", "chore/how-x-3"))
+
+    def test_key_of_another_repo_does_not_collide(self):
+        name, branch, _ = self.pick("How x", taken_keys={"other/repo?how-x"})
+        self.assertEqual((name, branch), ("how-x", "chore/how-x"))
 
     def test_choose_names_dispatches(self):
         self.assertEqual(naming.choose_names("issue", number=3, title="Vertical login"),
                          naming.issue_names(3, "Vertical login", ()))
-        self.assertEqual(naming.choose_names("investigation", question="Why sync?"),
-                         naming.investigation_names("Why sync?", False))
+        with tempfile.TemporaryDirectory() as repo:  # not a git repo: no refs exist
+            self.assertEqual(naming.choose_names("investigation", question="Why sync?",
+                                                 repo_path=repo, repo_slug="owner/repo",
+                                                 taken_keys={"owner/repo?why-sync"}),
+                             ("why-sync-2", "chore/why-sync-2", "Why Sync 2"))
         with self.assertRaises(ValueError):
             naming.choose_names("other")
 
