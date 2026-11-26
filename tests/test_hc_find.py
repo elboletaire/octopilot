@@ -32,7 +32,9 @@ class HcFindTest(unittest.TestCase):
             return 0, {"terminals": [{"address": a} for a in self.listed]}, ""
         if args[0] == "get":
             info = self.labels.get(args[1])
-            return (0, {"labels": info}, "") if info is not None else (1, None, "gone")
+            if info is None:
+                return 1, {"error": {"kind": "not_found"}}, "terminal not found"
+            return 0, {"labels": info}, ""
         raise AssertionError(f"unexpected hc call {args}")
 
     def test_prefers_this_checkouts_terminal_over_an_unlabelled_one(self):
@@ -58,10 +60,15 @@ class HcFindTest(unittest.TestCase):
         self.labels = {"t2": {"octopilot.dir": self.other}}
         self.assertIsNone(scan.HC.find("octopilot"))
 
-    def test_skips_a_terminal_whose_labels_cannot_be_read(self):
+    def test_a_failed_get_is_skipped_not_taken_as_unlabelled(self):
+        # t1's error reply has no labels: it must not pass for a worker's terminal.
         self.listed = ["t1", "t2"]
         self.labels = {"t2": {}}
         self.assertEqual(scan.HC.find("octopilot"), "hc:t2")
+
+    def test_none_when_every_get_fails(self):
+        self.listed = ["t1"]
+        self.assertIsNone(scan.HC.find("octopilot"))
 
     def test_none_when_nothing_is_listed(self):
         self.assertIsNone(scan.HC.find("octopilot"))

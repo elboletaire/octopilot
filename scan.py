@@ -64,6 +64,7 @@ EVENTS_FILE = os.path.join(os.path.dirname(STATE_FILE), "events.jsonl")
 SNAPSHOT_FILE = os.path.join(os.path.dirname(STATE_FILE), "snapshot.json")
 # The headless dashboard's view (dashboard.py VIEW_FILE): speech reads the
 # engine's last lines from it, and a view older than VIEW_STALE_SECS is no engine.
+# Three times dashboard.py's VIEW_EVERY.
 VIEW_FILE = os.path.join(os.path.dirname(STATE_FILE), "view.json")
 VIEW_STALE_SECS = 15
 # One tick at a time: a tick that finds it held returns at once.
@@ -521,8 +522,8 @@ class HcBackend:
         terms = (data or {}).get("terminals", []) if code == 0 else []
         unlabelled = None
         for t in terms:
-            _, info, _ = hc(["get", t["address"], "--json"], timeout=10)
-            if not isinstance(info, dict):
+            code, info, _ = hc(["get", t["address"], "--json"], timeout=10)
+            if code != 0 or not isinstance(info, dict):
                 continue  # labels unknown: not ours, and not a worker's either
             d = (info.get("labels") or {}).get("octopilot.dir")
             if not d:
@@ -2806,8 +2807,10 @@ def speech_cmd(state):
     if view is None or engine.get("mode") == "off":
         return out
     address = agent_address(HEADLESS_AGENT)
+    # A hung engine is one the user must look at: the kitchen shows it as blocked.
+    status = {"acting": "working", "stale": "blocked"}.get(engine.get("state"), "idle")
     out.update(terminal=address, agent=HC.prefix + address if address else None,
-               status="working" if engine.get("state") == "acting" else "idle")
+               status=status)
     last = engine.get("last")
     if last:
         text = "\n".join("- " + line for line in last.get("lines") or [])

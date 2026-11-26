@@ -48,6 +48,10 @@ class SpeechTest(unittest.TestCase):
         self.write_view(state="acting")
         self.assertEqual(scan.speech_cmd({})["status"], "working")
 
+    def test_a_stale_engine_is_blocked(self):
+        self.write_view(state="stale")
+        self.assertEqual(scan.speech_cmd({})["status"], "blocked")
+
     def test_no_last_gives_no_text(self):
         self.write_view(state="idle")
         out = scan.speech_cmd({})
