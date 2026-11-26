@@ -317,15 +317,18 @@ class HerdrBackend:
             return None
         return (data.get("result") or {}).get("workspaces", [])
 
-    def sessions(self, workspaces):
-        """Linked-worktree workspaces as [{id,title,path,backend,worktree}]."""
-        if workspaces is None:
+    def sessions(self, workspaces, tabs, panes):
+        """Linked-worktree workspaces as [{id,title,path,backend,worktree}], then
+        the tabs on a worktree outside them, with their workspace as "space"."""
+        if workspaces is None or tabs is None or panes is None:
             return None
         by_repo = {}
+        linked = set()
         for w in workspaces:
             wt = w.get("worktree") or {}
             if wt.get("is_linked_worktree") and wt.get("repo_root"):
                 by_repo.setdefault(wt["repo_root"], []).append((w, wt))
+                linked.add(w["workspace_id"])
         out = []
         for repo, rows in by_repo.items():
             code, d, _ = herdr(["worktree", "list", "--cwd", repo])
@@ -337,7 +340,42 @@ class HerdrBackend:
                             "path": wt.get("checkout_path"), "backend": self.name,
                             "worktree": {"branch": branch.get(w["workspace_id"]),
                                          "main_repo_path": repo}})
+        labels = {t.get("tab_id"): t.get("label") for t in tabs}
+        # The launcher's terminals run in this checkout, which may be a worktree too.
+        launchers = (HEADLESS_AGENT, CODE_AGENT, PROMPTER_AGENT)
+        checked, seen = {}, set()
+        for p in panes:
+            tab, cwd = p.get("tab_id"), p.get("cwd")
+            if (tab in seen or not cwd or p.get("workspace_id") in linked
+                    or p.get("agent") in launchers):
+                continue
+            if cwd not in checked:
+                checked[cwd] = worktree_of(cwd)
+            if not checked[cwd]:
+                continue
+            path, repo, branch = checked[cwd]
+            seen.add(tab)
+            out.append({"id": tab, "title": labels.get(tab), "path": path,
+                        "backend": self.name, "space": p.get("workspace_id"),
+                        "worktree": {"branch": branch or None,
+                                     "main_repo_path": repo}})
         return out
+
+    def tabs(self):
+        """Every open tab, or None when herdr could not be asked."""
+        return self.result_list(["tab", "list"], "tabs")
+
+    def panes(self):
+        """Every open pane, or None when herdr could not be asked."""
+        return self.result_list(["pane", "list"], "panes")
+
+    def result_list(self, args, key):
+        if not shutil.which("herdr"):
+            return []
+        code, data, _ = herdr(args)
+        if code != 0 or not data:
+            return None
+        return (data.get("result") or {}).get(key, [])
 
     def agents(self):
         """[{session, agent, pane, status, ids}] for every herdr agent; ids are
@@ -354,9 +392,10 @@ class HerdrBackend:
 
     def listing(self):
         """-> (worktree sessions, answered, open session ids)."""
-        workspaces = self.workspaces()
-        rows = self.sessions(workspaces)
-        ids = {w.get("workspace_id") for w in workspaces or []}
+        workspaces, tabs, panes = self.workspaces(), self.tabs(), self.panes()
+        rows = self.sessions(workspaces, tabs, panes)
+        ids = {w.get("workspace_id") for w in workspaces or []} \
+            | {t.get("tab_id") for t in tabs or []}
         return rows or [], rows is not None, ids
 
     def live(self):
@@ -411,6 +450,11 @@ class HerdrBackend:
                                 cwd=wt, timeout=180)
             raw = err or out
         return code, raw
+
+    def checkout_of(self, session):
+        """The worktree path of a worker tab, or None."""
+        rows = self.sessions(self.workspaces(), self.tabs(), self.panes()) or []
+        return next((r["path"] for r in rows if r["id"] == session), None)
 
     def spawn(self, key_, path, wt, title, model):
         """A herdr workspace on the worktree, running a named claude agent."""

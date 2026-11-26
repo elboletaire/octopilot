@@ -116,5 +116,89 @@ class TargetTest(BackendCase):
         self.assertIsNone(scan.HERDR.target({"session": "w96:t2"}))
 
 
+class ListingTest(BackendCase):
+    def setUp(self):
+        super().setUp()
+        self.tabs = [{"tab_id": "w1:t1", "workspace_id": "w1", "label": "ws"},
+                     {"tab_id": "w96:t1", "workspace_id": "w96", "label": "OCTOPILOT"},
+                     {"tab_id": "w96:t2", "workspace_id": "w96", "label": "fix"},
+                     {"tab_id": "w96:t3", "workspace_id": "w96", "label": "code"},
+                     {"tab_id": "w97:t1", "workspace_id": "w97", "label": "work"}]
+        self.panes = [
+            # A linked workspace's own pane: its workspace row covers it.
+            {"pane_id": "w1:p1", "tab_id": "w1:t1", "workspace_id": "w1",
+             "cwd": "/wt/ws"},
+            # A plain checkout: not a worktree, so no row.
+            {"pane_id": "w96:p1", "tab_id": "w96:t1", "workspace_id": "w96",
+             "cwd": "/home/x"},
+            # A worker tab on a worktree in the Octopilot workspace.
+            {"pane_id": "w96:p2", "tab_id": "w96:t2", "workspace_id": "w96",
+             "cwd": "/wt/a", "agent": "ap-x-1"},
+            # The code tab runs in the checkout, which may be a worktree itself.
+            {"pane_id": "w96:p3", "tab_id": "w96:t3", "workspace_id": "w96",
+             "cwd": "/wt/code", "agent": "octopilot-code"},
+            # A worker tab in another workspace; its second pane adds nothing.
+            {"pane_id": "w97:p1", "tab_id": "w97:t1", "workspace_id": "w97",
+             "cwd": "/wt/b"},
+            {"pane_id": "w97:p2", "tab_id": "w97:t1", "workspace_id": "w97",
+             "cwd": "/wt/b"},
+        ]
+        self.checkouts = {"/wt/ws": ("/wt/ws", "/repo", "feat/ws"),
+                          "/wt/a": ("/wt/a", "/repo", "fix/a"),
+                          "/wt/code": ("/wt/code", "/repo", "main"),
+                          "/wt/b": ("/wt/b", "/repo", "feat/b"),
+                          "/home/x": None}
+        self.workspaces = [
+            {"workspace_id": "w1", "label": "ws",
+             "worktree": {"is_linked_worktree": True, "repo_root": "/repo",
+                          "checkout_path": "/wt/ws"}},
+            {"workspace_id": "w96", "label": "OCTOPILOT",
+             "worktree": {"is_linked_worktree": False}},
+            {"workspace_id": "w97", "label": "work", "worktree": {}}]
+        self.patch(scan, "worktree_of", side_effect=lambda cwd: self.checkouts[cwd])
+
+    def answer(self):
+        return self.herdr({
+            ("workspace", "list"): (0, {"result": {"workspaces": self.workspaces}}, ""),
+            ("tab", "list"): (0, {"result": {"tabs": self.tabs}}, ""),
+            ("pane", "list"): (0, {"result": {"panes": self.panes}}, ""),
+            ("worktree", "list"): (0, {"result": {"worktrees": [
+                {"open_workspace_id": "w1", "branch": "feat/ws"}]}}, ""),
+        })
+
+    def test_lists_worker_tabs_beside_linked_workspaces(self):
+        self.answer()
+        rows, answered, ids = scan.HERDR.listing()
+        self.assertTrue(answered)
+        self.assertEqual(rows, [
+            {"id": "w1", "title": "ws", "path": "/wt/ws", "backend": "herdr",
+             "worktree": {"branch": "feat/ws", "main_repo_path": "/repo"}},
+            {"id": "w96:t2", "title": "fix", "path": "/wt/a", "backend": "herdr",
+             "space": "w96",
+             "worktree": {"branch": "fix/a", "main_repo_path": "/repo"}},
+            {"id": "w97:t1", "title": "work", "path": "/wt/b", "backend": "herdr",
+             "space": "w97",
+             "worktree": {"branch": "feat/b", "main_repo_path": "/repo"}},
+        ])
+        self.assertEqual(ids, {"w1", "w96", "w97", "w1:t1", "w96:t1", "w96:t2",
+                               "w96:t3", "w97:t1"})
+
+    def test_a_failed_tab_list_leaves_the_listing_unanswered(self):
+        fake = self.herdr({
+            ("workspace", "list"): (0, {"result": {"workspaces": self.workspaces}}, ""),
+            ("tab", "list"): (1, None, "boom"),
+            ("pane", "list"): (0, {"result": {"panes": self.panes}}, ""),
+        })
+        rows, answered, _ = scan.HERDR.listing()
+        self.assertEqual(rows, [])
+        self.assertFalse(answered)
+        self.assertEqual(len(fake.argvs("pane", "list")), 1)
+
+    def test_checkout_of_finds_a_worker_tab(self):
+        self.answer()
+        self.assertEqual(scan.HERDR.checkout_of("w96:t2"), "/wt/a")
+        self.assertIsNone(scan.HERDR.checkout_of("w96:t1"))
+
+
 if __name__ == "__main__":
     unittest.main()
