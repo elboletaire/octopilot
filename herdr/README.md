@@ -274,20 +274,33 @@ Rerun the launcher right after pulling this layer. Until it runs, the old headle
 keeps its code and engine mode: with the engine off nothing drains the requests, and
 the old orchestrator's doorbell exits at once.
 
-- **GUI**: run Open Octopilot (or `herdr/open-gui.sh`). It retires this checkout's
-  orchestrator and restarts the headless. Then `/clear` the prompter and run
-  `/octopilot:prompter`, and reload the mods (or restart herdr-app) so the new mod
-  code reads `view.json`.
+- **GUI**: run Open Octopilot (or `herdr/open-gui.sh`). When an orchestrator is still
+  running, it retires it and restarts the headless. If you closed the orchestrator
+  yourself before pulling, nothing restarts the headless: end the old
+  `octopilot-headless` terminal first (`hc kill`, or close its tab), then rerun the
+  launcher. Then `/clear` the prompter and run `/octopilot:prompter`, and reload the
+  mods (or restart herdr-app) so the new mod code reads `view.json`.
 - **TUI**: close the old `octopilot` pane (the messenger). Restart the dashboard pane:
   `q`, then reopen it (`prefix+a`). The curses dashboard is the engine's host and keeps
   running the old code until it is restarted. Then `/clear` the prompter and run
   `/octopilot:prompter` in it.
 
+To change `OCTOPILOT_ENGINE` later, end the `octopilot-headless` terminal and then rerun
+the launcher (GUI) or reopen the dashboard pane (TUI): a rerun keeps a running headless
+as it is, so the mode it started with stays. The TUI dashboard pane is a herdr plugin
+pane and takes the herdr server's environment (`open.sh` passes none), so for the TUI
+the variable must be set in the shell that starts herdr, and changing it means
+restarting the herdr server, not just the pane.
+
 **Rollback.** Previous main with `OCTOPILOT_ENGINE=off` is not enough: the previous
 launcher never restarts a running headless, which keeps acting, and it starts a new
 messenger. End the `octopilot-headless` terminal first (GUI: `hc kill` it, or close its
-tab; TUI: `q` in the dashboard pane, then reopen it with the old code), unset any
-`OCTOPILOT_ENGINE=on` override, then rerun the old launcher.
+tab; TUI: `q` in the dashboard pane). Unset any `OCTOPILOT_ENGINE=on` override (for the
+TUI, in the shell that starts herdr, then restart herdr), then rerun the old launcher
+(GUI) or reopen the dashboard pane with the old code (TUI). The old launcher may warn
+that the prompter pane is not recorded in the tab (`octopilot.chat`): the chat and
+kitchen records lived on the killed headless. The existing tab and kitchen stay, and
+the warning is harmless.
 
 ## What it shows
 
@@ -308,7 +321,7 @@ dashboards share one refresh. GitHub notifications are polled every 60s
 the Next tick rows itself. `OCTOPILOT_ENGINE` picks what it does: `on` (the default,
 set in config.sh) acts; `plan` logs the tick's row actions as "would ..." without acting,
 and `off` acts on nothing. It is read when open-gui.sh (or the TUI dashboard pane)
-starts, so change it by restarting that. The dashboard drains the inbox only under `on`, so under
+starts; to change it, see Upgrading from the orchestrator. The dashboard drains the inbox only under `on`, so under
 `plan` and `off` requests wait there (`scan.py drain --plan` prints what a drain would
 do). Under `on`, the dashboard runs `scan.py drain` at once on each request it sees, and
 at least every 60s (`DRAIN_EVERY`). The `g`/`n`/`i` keys and the prompter's commands are
