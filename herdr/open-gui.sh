@@ -258,10 +258,39 @@ locate() {
     $tab.terminals[] | select(.terminal == $t) | [$s.id, $tab.id, .pane] | @tsv'
 }
 
-# The id of a tab of a space by its name, if it has one.
+# The id of a tab of a space by its name, if it has one. A worker's tab may take the same
+# name: the hinted tab $3 (the one holding this checkout's expected terminal) wins when it
+# is one of them, else the first named so.
 tab_named() {
-  "$APP" ls | jq -r --arg s "$1" --arg n "$2" \
-    '.spaces[] | select(.id == $s) | .tabs[] | select(.name == $n) | .id' | head -n1
+  local space=$1 name=$2 hint=${3:-} ids
+  ids=$("$APP" ls | jq -r --arg s "$space" --arg n "$name" \
+    '.spaces[] | select(.id == $s) | .tabs[] | select(.name == $n) | .id')
+  if [ -n "$hint" ] && grep -qxF "$hint" <<<"$ids"; then
+    echo "$hint"
+    return 0
+  fi
+  head -n1 <<<"$ids"
+}
+
+# The tab of space $2 that holds this checkout's agent $1, if it runs there: a hint for tab_named.
+agent_tab() {
+  local t located
+  t=$(find_agent "$1")
+  if [ -z "$t" ]; then return 0; fi
+  located=$(locate "$t")
+  if [ -n "$located" ] && [ "$(cut -f1 <<<"$located")" = "$2" ]; then cut -f2 <<<"$located"; fi
+}
+
+# The tab the host's octopilot.chat or octopilot.kitchen record names, if any: a hint for the
+# OCTOPILOT tab in tab_named.
+recorded_main_tab() {
+  local host v
+  host=$(find_host)
+  if [ -z "$host" ]; then return 0; fi
+  for v in octopilot.chat octopilot.kitchen; do
+    v=$(label_of "$host" "$v")
+    if [ -n "$v" ]; then echo "${v%%:*}"; return 0; fi
+  done
 }
 
 # True when herdr-app shows a space with this id.
@@ -360,7 +389,7 @@ record_label() {
 # (octopilot.chat=<tab>:<pane>) so the kitchen can split from it; herdr-app ls lists no mod panes.
 add_main_tab() {
   local created chat pane tab
-  if [ -n "$(tab_named "$1" "$MAIN_TAB")" ]; then return 0; fi
+  if [ -n "$(tab_named "$1" "$MAIN_TAB" "$(recorded_main_tab)")" ]; then return 0; fi
   created=$(app do tab.new --space "$1" --name "$MAIN_TAB" \
     --mod octopilot-chat --props "$PROMPTER_PROPS" --focus false)
   chat=$(jq -r '.pane // empty' <<<"$created")
@@ -373,7 +402,7 @@ add_main_tab() {
     --mod octopilot-dashboard --props "$DASH_PROPS")
   pane=$(jq -r '.pane // empty' <<<"$created")
   name_mod_pane "$pane" "$(pane_name "$DASHBOARD_PANE")"
-  tab=$(tab_named "$1" "$MAIN_TAB")
+  tab=$(tab_named "$1" "$MAIN_TAB" "$(recorded_main_tab)")
   if [ -n "$chat" ] && [ -n "$tab" ]; then record_label "$(find_host)" octopilot.chat "$tab:$chat"; fi
 }
 
@@ -401,7 +430,7 @@ size_kitchen() {
 add_kitchen() {
   local space=$1 host main kitchen chat created top out
   host=$(find_host)
-  main=$(tab_named "$space" "$MAIN_TAB")
+  main=$(tab_named "$space" "$MAIN_TAB" "$(recorded_main_tab)")
   if [ -z "$host" ] || [ -z "$main" ]; then
     echo "open-gui.sh: no $MAIN_TAB tab or $HEADLESS_AGENT agent to add the $KITCHEN_PANE pane to" >&2
     return 0
@@ -514,8 +543,8 @@ drop_side_panel() {
 # or a parked agent, never ending its claude; a tab holding another terminal is refused.
 add_code_tab() {
   local space=$1 old code located t
-  old=$(tab_named "$space" "$CODE_TAB")
   code=$(find_agent "$CODE_AGENT")
+  old=$(tab_named "$space" "$CODE_TAB" "$(agent_tab "$CODE_AGENT" "$space")")
   if [ -n "$old" ]; then
     for t in $(tab_terminals "$old"); do
       if [ "$t" != "$code" ]; then
@@ -611,7 +640,7 @@ unpark_engine() {
     t=$(find_agent "$label")
     if [ -z "$t" ] || [ -n "$(locate "$t")" ]; then continue; fi
     "$HC" label "$t" "herdr.space=$space" "octopilot.space=$space" >/dev/null
-    tab=$(tab_named "$space" "$ENGINE_TAB")
+    tab=$(tab_named "$space" "$ENGINE_TAB" "$(agent_tab "$HEADLESS_AGENT" "$space")")
     keep=(--terminal "$t")
     if [ -n "$tab" ]; then
       keep+=(--place right)
@@ -789,18 +818,25 @@ name_space() {
   fi
 }
 
-# Puts the engine tab third in the space, after OCTOPILOT and the code tab. Nothing when
-# the engine tab is not shown (--hide-engine parked it).
-place_engine_tab() {
-  local tab
-  tab=$(tab_named "$1" "$ENGINE_TAB")
+# Puts the space's tabs in order: OCTOPILOT first, the code tab second, the engine tab third,
+# each only when it is present (--hide-engine parks the engine's, so its tab is not there).
+# Worker tabs opened later land after them.
+place_tabs() {
+  local space=$1 tab engine
+  tab=$(tab_named "$space" "$MAIN_TAB" "$(recorded_main_tab)")
+  if [ -n "$tab" ]; then app do tab.move --id "$tab" --index 1 >/dev/null; fi
+  tab=$(tab_named "$space" "$CODE_TAB" "$(agent_tab "$CODE_AGENT" "$space")")
+  if [ -n "$tab" ]; then app do tab.move --id "$tab" --index 2 >/dev/null; fi
+  engine=$(agent_tab "$HEADLESS_AGENT" "$space")
+  if [ -z "$engine" ]; then engine=$(agent_tab "$PROMPTER_AGENT" "$space"); fi
+  tab=$(tab_named "$space" "$ENGINE_TAB" "$engine")
   if [ -n "$tab" ]; then app do tab.move --id "$tab" --index 3 >/dev/null; fi
 }
 
 # Shows the space and its OCTOPILOT tab.
 focus_main() {
   app do space.select --id "$1" >/dev/null
-  app do tab.select --id "$(tab_named "$1" "$MAIN_TAB")" >/dev/null
+  app do tab.select --id "$(tab_named "$1" "$MAIN_TAB" "$(recorded_main_tab)")" >/dev/null
 }
 
 # The space is found before the retirement and the reap, which may end the terminals that prove it.
@@ -894,7 +930,7 @@ if [ -n "$host" ]; then
     add_main_tab "$space"
     add_kitchen "$space"
     add_code_tab "$space"
-    place_engine_tab "$space"
+    place_tabs "$space"
     focus_main "$space"
   fi
   finish "$space"
@@ -950,7 +986,7 @@ else
   add_main_tab "$space"
   add_kitchen "$space"
   add_code_tab "$space"
-  place_engine_tab "$space"
+  place_tabs "$space"
   focus_main "$space"
 fi
 finish "$space"
