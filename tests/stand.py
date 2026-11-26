@@ -43,7 +43,7 @@ class RequestCase(unittest.TestCase):
 
     def setUp(self):
         self.issue = {"number": 12, "title": "Add login", "labels": [{"name": "bug"}],
-                      "body": "", "comments": []}
+                      "state": "OPEN", "body": "", "comments": []}
         self.prs = {31: {"headRefName": "feat/b", "headRefOid": HEAD,
                          "title": "Second layer"}}
         self.open_prs = [{"number": 31, "headRefName": "feat/b", "baseRefName": "main"}]

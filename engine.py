@@ -1041,9 +1041,11 @@ def do_go(req, ctx):
     layers, stack_spec, start = None, None, key
     if kind == "issue":
         iss = scan.gh_json(["issue", "view", str(num), "-R", slug, "--json",
-                            "title,labels"], default=None)
+                            "title,labels,state"], default=None)
         if not iss:
             return _refuse(ctx, "go", key, "could not read the issue", title=title)
+        if iss.get("state") != "OPEN":
+            return _refuse(ctx, "go", key, "issue is closed", title=title)
         branch, title = naming.choose_names("issue", number=num,
                                             title=iss.get("title") or "",
                                             labels=iss.get("labels") or [])

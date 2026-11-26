@@ -162,6 +162,13 @@ class GoTest(RequestCase):
         self.assertEqual(self.spawns(), [])
         self.assertIn("already tracked as", out)
 
+    def test_go_refused_on_a_closed_issue(self):
+        self.issue["state"] = "CLOSED"
+        out = self.handle(f"go {ISSUE}")
+        self.assertEqual(out, f"go {ISSUE} refused: issue is closed")
+        self.assertEqual(self.spawns(), [])
+        self.assertEqual([k for k, _, _ in self.logs], ["go-refused"])
+
     def test_go_refused_for_an_uncloned_repo_with_the_clone_hint(self):
         other = "other/repo!4"
         self.snapshot(rows=[{"kind": "UNCLONED", "key": other, "title": "Old"}])
