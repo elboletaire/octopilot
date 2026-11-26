@@ -37,7 +37,7 @@ REVIEW_LEVEL_COMMENT="high"
 
 # Model pinned per spawned session, by the prompt that CREATES it. Written
 # explicitly onto the `claude` command line, so a worker never inherits the
-# orchestrator's model -- running octopilot on haiku still gets you opus
+# prompter's model -- running octopilot on haiku still gets you opus
 # workers. Later prompts (rebase, address-feedback) land in an existing
 # session and run on whatever it was spawned with; the model cannot be changed
 # without restarting the session, which would destroy its conversation.

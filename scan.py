@@ -2,8 +2,7 @@
 """Octopilot reconciler.
 
 Reads GitHub + herdr, diffs against a small state file, prints a compact table of
-actionable rows. Deterministic; no model involved. See SKILL.md for how the
-rows are acted on.
+actionable rows. Deterministic; no model involved. engine.py acts on the rows.
 """
 import copy
 import fcntl
@@ -34,8 +33,8 @@ AGENT_STALL_MIN = int(os.environ.get("AGENT_STALL_MIN", "35"))
 RE_REVIEW_QUIET_HOURS = float(os.environ.get("RE_REVIEW_QUIET_HOURS", "4"))
 
 # Model per spawn, keyed by the template that creates the session. Pinned onto
-# the claude command line rather than inherited, so the orchestrator's own
-# model never decides what the workers run on.
+# the claude command line rather than inherited, so the model of the session
+# that started octopilot never decides what the workers run on.
 MODEL_FOR = {
     "work": os.environ.get("MODEL_WORK", "claude-opus-5-5[1m]"),
     "investigate": os.environ.get("MODEL_INVESTIGATE", "claude-fable-5-2[1m]"),
@@ -1189,7 +1188,7 @@ def scan(state, refresh=False, info=None):
         if it.get("phase") == "booting":
             active += 1
             # A reboot whose wait timed out leaves a busy agent: a BOOTING row
-            # would have the orchestrator prompt it mid-task.
+            # would have the engine prompt it mid-task.
             if live.get(sess, {}).get("state") == "running":
                 rows.append(("WORKING", k, f"mode={it['mode']} {smeta} "
                                            "booting, agent not idle yet"))
@@ -1246,7 +1245,7 @@ def scan(state, refresh=False, info=None):
                     continue
                 active += 1
                 # An agent-driven item runs its own review loop; a REVIEW row
-                # here would tell the orchestrator to reboot it mid-flight.
+                # here would tell the engine to reboot it mid-flight.
                 if it.get("driver") == "agent":
                     rows.append(("WORKING", nk,
                                  f"branch={it.get('branch')} {smeta} driver=agent "
@@ -1334,7 +1333,7 @@ def scan(state, refresh=False, info=None):
             else head
 
         # An agent-driven item runs its own loop: it waits on its own CI,
-        # claims its own rounds and reports when it is done. The orchestrator
+        # claims its own rounds and reports when it is done. The engine
         # never sends it a review prompt -- it only watches for the agent
         # going quiet, because a dead agent and a working one look identical
         # from here.
@@ -1614,14 +1613,13 @@ def split_key(k):
 def issue_context(slug, number, body_max=8000, comment_max=1500, keep=8):
     """The issue, verbatim, for splicing into the prompt.
 
-    Fetched here rather than summarised by the orchestrator: a paraphrase of a
-    requirement is lossy in exactly the way that matters, and the orchestrator
-    typically read only the title and body while the discussion often lives in
-    the comments.
+    Fetched here rather than summarised: a paraphrase of a requirement is lossy
+    in exactly the way that matters, and an agent that reads only the title and
+    body misses the discussion, which often lives in the comments.
 
     Body and comments get separate budgets. A single overlong body must never
     be able to push the comments out -- the comments are the part the
-    orchestrator has not seen, so they are the last thing to drop.
+    agent has not seen, so they are the last thing to drop.
     """
     d = gh_json(["issue", "view", str(number), "-R", slug, "--json",
                  "number,title,body,labels,comments"], default=None)
@@ -1918,7 +1916,7 @@ def spawn_item(state, key_, branch, title, new_branch, question=None,
 def spawn(state, key_, branch, title, new_branch, question=None,
           read_only=False, stack_spec=None):
     """spawn <key> <branch> <title> [--new] [--stack "PR:branch ..."]: prints
-    what the orchestrator needs to send the first prompt."""
+    what the caller needs to send the first prompt."""
     r = spawn_item(state, key_, branch, title, new_branch, question=question,
                    read_only=read_only, stack_spec=stack_spec)
     it = state["items"][key_]
@@ -2025,7 +2023,7 @@ def print_sibling_rows(rows, base):
         return
     print("SIBLINGS:")
     for k, it in rows:
-        # A trailing `stack` tells the orchestrator to send rebase-stack.
+        # A trailing `stack` marks a sibling that needs rebase-stack, not rebase.
         marker = " stack" if it.get("stack") else ""
         print(f"  {it['session']} {it['branch']} {it['pr']} {base} {k}{marker}")
 
@@ -2267,7 +2265,7 @@ def detach_item(state, k):
 
 
 def set_paused(state, paused):
-    """Pause or resume the orchestrator's work. -> {"ok", "error", "paused"}."""
+    """Pause or resume the engine's work. -> {"ok", "error", "paused"}."""
     state["paused"] = paused
     save(state)
     log_event("pause" if paused else "resume")
@@ -2439,7 +2437,7 @@ def reboot(state, k):
         it["rerequest_head"] = it.pop("pending_rerequest")
     save(state)
     log_event("reboot", k)
-    # Still booting either way; a non-zero exit tells the orchestrator not to
+    # Still booting either way; a non-zero exit tells the engine not to
     # send the prompt in this same tick to an agent that is not idle yet.
     if code != 0:
         print(f"{k} cleared but not idle yet -> booting: {raw}",
@@ -2554,7 +2552,7 @@ def send_code(state, text=None):
 
 
 def to_inbox(state, text):
-    """Queue one message for the orchestrator. Caller holds the lock."""
+    """Queue one message for the engine's drain. Caller holds the lock."""
     box = state.setdefault("inbox", [])
     box.append({"at": int(time.time()), "text": text})
     del box[:-INBOX_MAX]
@@ -2664,7 +2662,7 @@ def transcript_path(info):
     in its foreground (claude's sessions/<pid>.json, which follows /clear), else
     the octopilot.session label's, else None. A live session whose transcript is
     not written yet gives None, never the stale label. No guess from the folder:
-    the orchestrator and the prompter share one."""
+    the prompter and the code-changes session share one."""
     session = live_session_id(info) or (info.get("labels") or {}).get("octopilot.session") or ""
     if not UUID_RE.match(session):
         return None

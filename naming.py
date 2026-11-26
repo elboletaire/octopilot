@@ -1,7 +1,7 @@
 """Heuristic branch and session-title names for new worktrees.
 
-Replaces the choices the orchestrator LLM made when spawning. The engine's spawn
-path calls choose_names(), the one seam a model call could later replace. This
+Picks them by heuristic, with no model call. The engine's spawn path calls
+choose_names(), the one seam a model call could later replace. This
 module does not import scan, so it stays stdlib-only and testable on its own.
 """
 import os
