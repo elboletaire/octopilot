@@ -1,0 +1,244 @@
+{
+  "active": 6,
+  "generated_at": 1794315600,
+  "last_tick": 1794315600,
+  "max_active": 6,
+  "max_rounds": 3,
+  "orch": "herdr:octopilot",
+  "paused": false,
+  "repos": 3,
+  "rows": [
+    {
+      "checks": "pass",
+      "draft": false,
+      "extra": "mode=fix session=w9zz1 checks=pass -> you merge",
+      "fields": {
+        "checks": "pass",
+        "mode": "fix",
+        "session": "w9zz1"
+      },
+      "head": "a1b2c3d",
+      "key": "vocdoni/vocdoni-app#101",
+      "kind": "READY",
+      "note": "you merge",
+      "title": "Voting UI polish",
+      "url": "https://github.com/vocdoni/vocdoni-app/pull/101"
+    },
+    {
+      "draft": false,
+      "extra": "mode=fix session=w9zy2 since=2026-11-09T09:00 alice review \"nit: rename this helper\"",
+      "fields": {
+        "mode": "fix",
+        "session": "w9zy2",
+        "since": "2026-11-09T09:00"
+      },
+      "head": "b2c3d4e",
+      "key": "vocdoni/vocdoni-app#102",
+      "kind": "FEEDBACK",
+      "title": "nit: rename this helper",
+      "url": "https://github.com/vocdoni/vocdoni-app/pull/102"
+    },
+    {
+      "extra": "mode=fix session=w9zx3 template=review-fix",
+      "fields": {
+        "mode": "fix",
+        "session": "w9zx3",
+        "template": "review-fix"
+      },
+      "head": "c9d8e7f",
+      "key": "vocdoni/vocdoni-app#103",
+      "kind": "BOOTING"
+    },
+    {
+      "extra": "merged=#100 next=#104 branch=feat/stack-top session=w9zw4",
+      "fields": {
+        "branch": "feat/stack-top",
+        "merged": "#100",
+        "next": "#104",
+        "session": "w9zw4"
+      },
+      "key": "vocdoni/vocdoni-app#104",
+      "kind": "RESTACK"
+    },
+    {
+      "extra": "branch=chore/deps session=w9zv5",
+      "fields": {
+        "branch": "chore/deps",
+        "session": "w9zv5"
+      },
+      "key": "vocdoni/vocdoni-integrator-sdk#7",
+      "kind": "MERGED",
+      "title": "Bump the deps"
+    },
+    {
+      "extra": "branch=feat/old-api session=w9zu6 -> not merged; session left alone",
+      "fields": {
+        "branch": "feat/old-api",
+        "session": "w9zu6"
+      },
+      "key": "vocdoni/vocdoni-app#106",
+      "kind": "CLOSED",
+      "note": "not merged; session left alone"
+    },
+    {
+      "extra": "mode=fix session=w9zt8 head=3f9a1c2 rounds=1/3 quiet=50m -> agent not reporting",
+      "fields": {
+        "head": "3f9a1c2",
+        "mode": "fix",
+        "quiet": "50m",
+        "rounds": "1/3",
+        "session": "w9zt8"
+      },
+      "key": "vocdoni/vocdoni-app#108",
+      "kind": "STALLED",
+      "note": "agent not reporting",
+      "title": "Cache the feed"
+    },
+    {
+      "extra": "session=w9zs9 -> gh pr view failed",
+      "fields": {
+        "session": "w9zs9"
+      },
+      "key": "vocdoni/vocdoni-app#109",
+      "kind": "UNKNOWN",
+      "note": "gh pr view failed"
+    },
+    {
+      "draft": false,
+      "extra": "mode=comment session=w9zr1 head=c3d4e5f rounds=3/3 re-requested -> octopilot stopped; you decide",
+      "fields": {
+        "head": "c3d4e5f",
+        "mode": "comment",
+        "rounds": "3/3",
+        "session": "w9zr1"
+      },
+      "head": "c3d4e5f",
+      "key": "vocdoni/vocdoni.io#22",
+      "kind": "CAPPED",
+      "note": "octopilot stopped; you decide",
+      "title": "FAQ rewrite"
+    },
+    {
+      "extra": "mode=comment session=w9zq2 head=d4e5f60 reviewed=e5f6071 quiet=30h -> pushed since our review, never re-requested",
+      "fields": {
+        "head": "d4e5f60",
+        "mode": "comment",
+        "quiet": "30h",
+        "reviewed": "e5f6071",
+        "session": "w9zq2"
+      },
+      "head": "d4e5f60",
+      "key": "vocdoni/vocdoni.io#23",
+      "kind": "PUSHED",
+      "note": "pushed since our review, never re-requested",
+      "title": "Nav menu"
+    },
+    {
+      "extra": "mode=comment session=w9zp3 head=0a1b2c3 reviewed=f607182 round=2/3 re-requested",
+      "fields": {
+        "head": "0a1b2c3",
+        "mode": "comment",
+        "reviewed": "f607182",
+        "round": "2/3",
+        "session": "w9zp3"
+      },
+      "head": "0a1b2c3",
+      "key": "vocdoni/vocdoni.io#24",
+      "kind": "REVIEW",
+      "title": "Search page"
+    },
+    {
+      "extra": "mode=comment session=w9zo4 review posted -> not yours to merge",
+      "fields": {
+        "mode": "comment",
+        "session": "w9zo4"
+      },
+      "head": "0718293",
+      "key": "vocdoni/vocdoni.io#25",
+      "kind": "DONE",
+      "note": "not yours to merge",
+      "title": "Footer links"
+    },
+    {
+      "extra": "branch=feat/issue-55 session=w9zm6 driver=agent rounds=0/3 quiet=2m",
+      "fields": {
+        "branch": "feat/issue-55",
+        "driver": "agent",
+        "quiet": "2m",
+        "rounds": "0/3",
+        "session": "w9zm6"
+      },
+      "key": "vocdoni/vocdoni-app!55",
+      "kind": "WORKING",
+      "title": "Tally lag on relay"
+    },
+    {
+      "extra": "mode=investigate session=w9zl7 state=running age=3m",
+      "fields": {
+        "age": "3m",
+        "mode": "investigate",
+        "session": "w9zl7",
+        "state": "running"
+      },
+      "key": "vocdoni/vocdoni-app?12",
+      "kind": "WORKING"
+    },
+    {
+      "extra": "session=w9zi0 removed outside octopilot -> untracked, slot freed",
+      "fields": {
+        "session": "w9zi0"
+      },
+      "key": "vocdoni/vocdoni-app#111",
+      "kind": "GONE",
+      "note": "untracked, slot freed"
+    },
+    {
+      "extra": "mode=fix sam \"Add retry to uploads\"",
+      "fields": {
+        "mode": "fix"
+      },
+      "key": "vocdoni/vocdoni-app#112",
+      "kind": "PROPOSE",
+      "title": "Add retry to uploads"
+    },
+    {
+      "extra": "mode=fix issue \"Dark mode toggle is missing\"",
+      "fields": {
+        "mode": "fix"
+      },
+      "key": "vocdoni/vocdoni-app!63",
+      "kind": "PROPOSE",
+      "title": "Dark mode toggle is missing"
+    },
+    {
+      "extra": "mode=fix issue \"Typed errors for the relay\"",
+      "fields": {
+        "mode": "fix"
+      },
+      "key": "vocdoni/vocdoni-integrator-sdk!64",
+      "kind": "UNCLONED",
+      "title": "Typed errors for the relay"
+    },
+    {
+      "extra": "mode=comment sam \"Typo in the FAQ\"",
+      "fields": {
+        "mode": "comment"
+      },
+      "key": "vocdoni/vocdoni.io#26",
+      "kind": "UNCLONED",
+      "title": "Typo in the FAQ"
+    },
+    {
+      "extra": "branch=old-spike session=w9zj9 nopr idle=60h",
+      "fields": {
+        "branch": "old-spike",
+        "idle": "60h",
+        "session": "w9zj9"
+      },
+      "key": "vocdoni/vocdoni-app",
+      "kind": "STALE"
+    }
+  ],
+  "stall_min": 35,
+  "untracked": 0
+}
