@@ -2,8 +2,8 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { LogLine } from '../types'
-import { newEvents, react, readKitchen } from './feed'
-import type { OctopilotEvent, Kitchen, Reaction } from './feed'
+import { engineActing, newEvents, react, readEngine, readKitchen } from './feed'
+import type { EngineView, OctopilotEvent, Kitchen, Reaction } from './feed'
 import { COLUMNS, PALETTE, ROWS, encode, holeX, paint, step } from './scene'
 import type { Mood, Particle, Scene } from './scene'
 
@@ -51,11 +51,12 @@ const k = {
   moodUntil: 0,
   focus: -1,
   particles: [] as Particle[],
-  isWorking: false,
+  isWorking: false, // the prompter's own turn: the fallback without a fresh engine view
+  engine: undefined as EngineView | undefined,
   lastActivity: Date.now(),
   lastFrame: Date.now(),
   cursor: { at: 0, seen: [] as string[] },
-  mtimes: { state: 0, events: 0, snapshot: 0 },
+  mtimes: { state: 0, events: 0, snapshot: 0, view: 0 },
   stateDir: '',
   demo: undefined as { step: number; balls: Kitchen['balls'] } | undefined,
   isBlitting: false,
@@ -101,9 +102,14 @@ function burst(kind: NonNullable<Reaction['burst']>, hole: number) {
   }
 }
 
+// The engine acts (view.json's header.engine.state); without a fresh view, the prompter's own turn.
+function working(): boolean {
+  return engineActing(k.engine, now()) ?? k.isWorking
+}
+
 function resting(): Mood {
   if (k.kitchen.paused) return 'sleep'
-  if (k.isWorking) return 'busy'
+  if (working()) return 'busy'
   if (now() - k.lastActivity > DOZE_MS) return 'doze'
   return 'idle'
 }
@@ -121,7 +127,7 @@ function frame(): Scene {
     balls: k.kitchen.balls,
     boxed: k.kitchen.boxed,
     holes: k.kitchen.holes,
-    isWorking: k.isWorking,
+    isWorking: working(),
     focus: k.focus,
     particles: k.particles,
   }
@@ -154,6 +160,14 @@ async function refreshHeader($: EngineInterface) {
 
 async function pollFiles($: EngineInterface) {
   if (!k.active || k.demo) return
+  const viewFile = `${k.stateDir}/view.json`
+  const view = await $.fs.stat(viewFile).catch(() => undefined)
+  if (!view) k.engine = undefined
+  else if (view.mtimeMs !== k.mtimes.view) {
+    k.mtimes.view = view.mtimeMs
+    k.engine = readEngine(await $.fs.read(viewFile).catch(() => ''))
+  }
+
   const stateFile = `${k.stateDir}/state.json`
   const eventsFile = `${k.stateDir}/events.jsonl`
 
@@ -317,7 +331,7 @@ export const register: Register = on => {
     if ((e.args ?? '').trim() === 'demo') {
       k.demo = k.demo ? undefined : { step: 0, balls: [] }
       if (!k.demo) {
-        k.mtimes = { state: 0, events: 0, snapshot: 0 }
+        k.mtimes = { state: 0, events: 0, snapshot: 0, view: 0 }
         k.kitchen = { balls: [], boxed: [], paused: false, holes: 6 }
       }
       await activate($, true)
