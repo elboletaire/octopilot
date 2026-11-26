@@ -73,6 +73,11 @@ EVENTS_MAX_BYTES = 512 * 1024
 EVENTS_KEEP = 1000
 # Backend new sessions spawn on: "herdr" (the TUI) or "hc" (herdr-app's GUI).
 OCTOPILOT_BACKEND = os.environ.get("OCTOPILOT_BACKEND", "herdr")
+# Where worker sessions open: "tab" in the Octopilot space or workspace, or "space"
+# for a space or workspace of their own (the old layout).
+WORKER_HOST = os.environ.get("WORKER_HOST", "tab")
+# Settle a new worker tab at spawn ("1") or leave it as herdr opened it ("0").
+SETTLE_WORKER_TABS = os.environ.get("SETTLE_WORKER_TABS", "1") == "1"
 # The octopilot code dir: where workers find scan.sh and their plugin.
 OCTOPILOT_DIR = (os.environ.get("OCTOPILOT_DIR")
                  or os.path.dirname(os.path.abspath(__file__)))
@@ -189,11 +194,14 @@ def whoami(state):
 # --------------------------------------------------------------- agent hosts
 #
 # An item's session id names its backend: a TUI workspace (`w12`) or a herdr-app
-# space (`sp<hex>`), since it survives restarts that pane ids and names may not.
+# space (`sp<hex>`), or a tab in either (`w12:t3`, `tb<hex>`), since it survives
+# restarts that pane ids and names may not.
 # New items spawn on OCTOPILOT_BACKEND; a bare agent name is the spawn backend's.
 
 HERDR_WS = re.compile(r"^w[0-9A-Za-z]{1,8}$")
 HC_SPACE = re.compile(r"^sp[0-9a-f]+$")
+HERDR_TAB = re.compile(r"^w[0-9A-Za-z]{1,8}:t[0-9A-Za-z]{1,8}$")
+HC_TAB = re.compile(r"^tb[0-9a-f]+$")
 # Agent states in the vocabulary the scan logic speaks.
 HERDR_STATE = {"working": "running", "blocked": "waiting", "idle": "idle",
                "done": "idle", "unknown": "unknown"}
@@ -645,11 +653,34 @@ BACKENDS = {"herdr": HERDR, "hc": HC}
 
 def backend_for(session):
     """The backend a session id belongs to, or None."""
-    if HERDR_WS.match(session or ""):
+    if HERDR_WS.match(session or "") or HERDR_TAB.match(session or ""):
         return HERDR
-    if HC_SPACE.match(session or ""):
+    if HC_SPACE.match(session or "") or HC_TAB.match(session or ""):
         return HC
     return None
+
+
+def is_tab(session):
+    """True for a worker's tab id, not for a whole workspace or space."""
+    return bool(HERDR_TAB.match(session or "") or HC_TAB.match(session or ""))
+
+
+def host_noun(backend, session):
+    """What the session's host is called in messages: a tab for a tab id."""
+    if HC_TAB.match(session or ""):
+        return "herdr-app tab"
+    if HERDR_TAB.match(session or ""):
+        return "herdr tab"
+    return backend.noun
+
+
+def remove_label_for(backend, session):
+    """The command a discard of the session is logged under, by its host."""
+    if HC_TAB.match(session or ""):
+        return "herdr-app tab remove"
+    if HERDR_TAB.match(session or ""):
+        return "herdr tab remove"
+    return backend.remove_label
 
 
 def spawn_backend():
