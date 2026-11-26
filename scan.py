@@ -430,18 +430,38 @@ class HerdrBackend:
         return code, raw
 
     def focus(self, session, target):
-        code, _, raw = herdr(["agent", "focus", target])
+        """The agent's pane, else the tab or workspace the session is."""
+        if target:
+            args = ["agent", "focus", target]
+        elif is_tab(session):
+            args = ["tab", "focus", session]
+        else:
+            args = ["workspace", "focus", session]
+        code, _, raw = herdr(args)
         return code == 0, raw
 
     def rename(self, entry, name):
         return herdr(["agent", "rename", entry["pane"], name])[0] == 0
 
     def close(self, session):
-        code, _, raw = herdr(["workspace", "close", session])
+        """Close the tab or the workspace."""
+        noun = "tab" if is_tab(session) else "workspace"
+        code, _, raw = herdr([noun, "close", session])
         return code, raw
 
     def discard(self, session, wt):
-        """Remove the workspace and its worktree -> (code, message)."""
+        """Remove the tab or workspace and its worktree -> (code, message)."""
+        if is_tab(session):
+            # herdr's worktree remove takes only a workspace: git removes the checkout.
+            wt = wt or self.checkout_of(session)
+            code, _, raw = herdr(["tab", "close", session])
+            if code != 0:
+                return code, raw
+            if wt and os.path.isdir(wt):
+                code, out, err = sh(["git", "worktree", "remove", "--force", wt],
+                                    cwd=wt, timeout=180)
+                raw = err or out
+            return code, raw
         code, _, raw = herdr(["worktree", "remove", "--workspace", session,
                               "--force"], timeout=180)
         if code != 0 and wt and os.path.isdir(wt):
@@ -457,15 +477,51 @@ class HerdrBackend:
         return next((r["path"] for r in rows if r["id"] == session), None)
 
     def spawn(self, key_, path, wt, title, model):
-        """A herdr workspace on the worktree, running a named claude agent."""
+        """A tab of the Octopilot workspace on the worktree when WORKER_HOST is tab,
+        else a workspace; either runs a named claude agent."""
+        tab = worker_host() == "tab"
+        ws = octopilot_workspace() if tab else None
+        if ws:
+            return self.spawn_tab(ws, key_, path, wt, title, model)
+        if tab:
+            print("no Octopilot workspace: the worker opens as its own workspace")
         code, data, raw = herdr(["worktree", "open", "--cwd", path, "--path", wt,
                                  "--label", title, "--no-focus"])
         if code != 0:
             raise SystemExit(f"herdr worktree open failed: {raw}")
         res = data["result"]
         ws, pane = res["workspace"]["workspace_id"], res["root_pane"]["pane_id"]
-
         name = agent_name(key_)
+        host = {"backend": self.name, "session": ws, "agent": name, "worktree": wt}
+        warning = self.start_agent(pane, name, path, wt, model, f"workspace {ws}")
+        if warning:
+            host["warning"] = warning
+        return host
+
+    def spawn_tab(self, ws, key_, path, wt, title, model):
+        """A tab of workspace ws on the worktree, its root pane running claude."""
+        name = agent_name(key_)
+        argv = ["tab", "create", "--workspace", ws, "--cwd", wt,
+                "--label", tab_label(title, name), "--no-focus"]
+        # The tab inherits herdr's environment, not this one: pass on what is set.
+        for var in ("OCTOPILOT_DIR", "OCTOPILOT_STATE_DIR"):
+            if os.environ.get(var):
+                argv += ["--env", f"{var}={os.environ[var]}"]
+        code, data, raw = herdr(argv, timeout=90)
+        if code != 0:
+            raise SystemExit(f"herdr tab create failed: {raw}")
+        res = data["result"]
+        tab, pane = res["tab"]["tab_id"], res["root_pane"]["pane_id"]
+        host = {"backend": self.name, "session": tab, "space": ws, "agent": name,
+                "worktree": wt}
+        warning = self.start_agent(pane, name, path, wt, model, f"tab {tab}")
+        if warning:
+            host["warning"] = warning
+        return host
+
+    def start_agent(self, pane, name, path, wt, model, where):
+        """Start the claude agent name in pane -> its startup warning, or None.
+        where names the host in the messages; a failed start raises SystemExit."""
         args = ["agent", "start", name, "--kind", "claude", "--pane", pane,
                 "--timeout", "60000"]
         if model:
@@ -477,15 +533,14 @@ class HerdrBackend:
             if code == 0 or error_code(data) == "agent_not_ready":
                 break
             time.sleep(2)
-        host = {"backend": self.name, "session": ws, "agent": name, "worktree": wt}
-        if code != 0 and error_code(data) == "agent_not_ready":
-            if not accept_trust(self, name, wt, path):
-                host["warning"] = (f"agent {name} is blocked at startup; check "
-                                   f"workspace {ws} before sending it a prompt")
-        elif code != 0:
-            raise SystemExit(f"herdr agent start failed (workspace {ws} kept): "
-                             f"{raw}")
-        return host
+        if code == 0:
+            return None
+        if error_code(data) == "agent_not_ready":
+            if accept_trust(self, name, wt, path):
+                return None
+            return (f"agent {name} is blocked at startup; check {where} "
+                    "before sending it a prompt")
+        raise SystemExit(f"herdr agent start failed ({where} kept): {raw}")
 
 
 class HcBackend:
@@ -743,6 +798,15 @@ def worker_host():
     if host not in ("tab", "space"):
         raise SystemExit(f"WORKER_HOST must be tab or space, not {host!r}")
     return host
+
+
+# The launcher's tab titles: a worker tab with one of these gets its agent's name too.
+LAUNCHER_TAB_TITLES = ("OCTOPILOT", "engine", "Octopilot (code changes)")
+
+
+def tab_label(title, name):
+    """A worker tab's label: its spawn title, told apart from the launcher's tabs."""
+    return f"{title} ({name})" if title in LAUNCHER_TAB_TITLES else title
 
 
 def split_address(address):
