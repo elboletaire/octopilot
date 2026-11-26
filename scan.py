@@ -64,9 +64,8 @@ EVENTS_FILE = os.path.join(os.path.dirname(STATE_FILE), "events.jsonl")
 SNAPSHOT_FILE = os.path.join(os.path.dirname(STATE_FILE), "snapshot.json")
 # The headless dashboard's view (dashboard.py VIEW_FILE): speech reads the
 # engine's last lines from it, and a view older than VIEW_STALE_SECS is no engine.
-# Three times dashboard.py's VIEW_EVERY.
 VIEW_FILE = os.path.join(os.path.dirname(STATE_FILE), "view.json")
-VIEW_STALE_SECS = 15
+VIEW_STALE_SECS = 15  # three times dashboard.py's VIEW_EVERY
 # One tick at a time: a tick that finds it held returns at once.
 TICK_LOCK = os.path.join(os.path.dirname(STATE_FILE), "tick.lock")
 # Held by each engine phase that acts (engine.run_rows), taken after the state
