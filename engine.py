@@ -840,3 +840,57 @@ def resolve_target(token, state, snap_rows):
             return None, f"#{n} is ambiguous: {' '.join(keys)}"
         return keys[0], None
     return None, f"unknown target {token!r}"
+
+
+# ------------------------------------------------------------------- stacks
+
+def stack_from(open_prs, num, base):
+    """The stack that PR `num` belongs to -> (layers, error).
+
+    layers runs bottom to top as [{pr, branch}], the shape parse_stack and an
+    item's `stack` use. None with no error is a plain PR: alone, or its
+    bottom is not based on the default branch `base`. A fork is an error."""
+    by_num = {p["number"]: p for p in open_prs}
+    if num not in by_num:
+        return None, f"#{num} is not an open PR"
+    seen = {num}
+    below = []
+    cur = by_num[num]
+    while cur["baseRefName"] != base:
+        found = [p for p in open_prs if p["headRefName"] == cur["baseRefName"]]
+        if not found:
+            return None, None
+        if len(found) > 1:
+            return None, f"stack is ambiguous below #{cur['number']}"
+        cur = found[0]
+        if cur["number"] in seen:
+            return None, f"stack loops at #{cur['number']}"
+        seen.add(cur["number"])
+        below.insert(0, cur)
+    above = []
+    top = by_num[num]
+    while True:
+        kids = [p for p in open_prs if p["baseRefName"] == top["headRefName"]]
+        if not kids:
+            break
+        if len(kids) > 1:
+            return None, f"stack forks at #{top['number']}"
+        top = kids[0]
+        if top["number"] in seen:
+            return None, f"stack loops at #{top['number']}"
+        seen.add(top["number"])
+        above.append(top)
+    chain = below + [by_num[num]] + above
+    if len(chain) < 2:
+        return None, None
+    return [{"pr": p["number"], "branch": p["headRefName"]} for p in chain], None
+
+
+def walk_stack(slug, num, base):
+    """stack_from over the repo's open PRs, from one gh call."""
+    import scan  # lazy: scan reads its state at import
+    rows = scan.gh_json(["pr", "list", "-R", slug, "--state", "open",
+                         "--limit", "200", "--json", scan.PR_FIELDS], default=None)
+    if rows is None:
+        return None, f"could not list the open PRs of {slug}"
+    return stack_from(rows, num, base)
