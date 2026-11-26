@@ -14,10 +14,9 @@ A read-only view over three sources, each refreshed at its own pace:
   nothing), every DASHBOARD_REFRESH_SECS and right after any event that
   changes the table.
 
-It never acts on the table: the orchestrator does. The things it sends are the
-ones you ask for (go/no to the orchestrator, pause/resume), and a `request
-tick` doorbell when the table has Next tick work the orchestrator has not
-been woken for.
+It never acts on the table: the engine does. The things it sends are the ones
+you ask for: requests queued for the engine (go/no, re-review, investigate) and
+pause/resume.
 Run it through dashboard.sh so config.sh is loaded.
 """
 import argparse
@@ -59,12 +58,6 @@ SNAPSHOT_LOCK = SNAPSHOT_FILE + ".lock"
 # dashboard so only one of them notifies.
 NOTIFIED_FILE = os.path.join(STATE_DIR, "notified.json")
 NOTIFIED_LOCK = NOTIFIED_FILE + ".lock"
-# The Next tick rows the orchestrator was already woken for, by row key, as
-# [kind, head, *WAKE_FIELDS]: one doorbell per change, shared by dashboards.
-# A re-request on the same head only shows through its reviewed/round fields.
-WAKE_FIELDS = ("since", "reviewed", "round")
-WOKEN_FILE = os.path.join(STATE_DIR, "woken.json")
-WOKEN_LOCK = WOKEN_FILE + ".lock"
 # GitHub notifications watermark, shared so whichever dashboard polls next
 # carries on from it; only the lock holder polls.
 NOTIFY_WATCH_FILE = os.path.join(STATE_DIR, "notifications.json")
@@ -128,6 +121,7 @@ KEY_ALIASES = {"\x7f": "\x1b[3~", "\x08": "\x1b[3~"}
 # Rows by who has the next move. Agent reports and blocked agents are moved
 # into NEEDS on top of these; see build().
 NEEDS_ROWS = {"CAPPED", "READY", "PUSHED", "STALLED", "CLOSED"}
+# Rows the engine acts on at its next tick, not the user (the note says what).
 ORCH_ROWS = {"MERGED": "cleanup + rebase fan-out",
              "RESTACK": "restack + rebase-stack",
              "REVIEW": "reboot for review",
@@ -135,7 +129,7 @@ ORCH_ROWS = {"MERGED": "cleanup + rebase fan-out",
 RUN_ROWS = {"WORKING"}
 DONE_ROWS = {"DONE", "GONE"}
 # Rows that keep a parked card out of Done, whatever the snapshot's age: each
-# needs the orchestrator or the user now.
+# needs the engine or the user now.
 PARK_EXEMPT = {"MERGED", "RESTACK", "CLOSED", "GONE", "FEEDBACK"}
 PICK_ROWS = {"PROPOSE"}
 NOTE_ROWS = {"UNCLONED", "STALE", "UNKNOWN"}
@@ -143,15 +137,16 @@ REPORT_NEEDS = {"blocked", "failed", "stalled", "capped"}
 # Events after which the GitHub view is worth refreshing early.
 KICK_EVENTS = {"report", "spawn", "sent", "cleanup", "track", "detach",
                "park", "unpark", "untrack", "decline", "merged", "tick-asked"}
-# Events that wake the engine's drain: a request queued, or an agent's report.
-DRAIN_EVENTS = {"request", "report"}
+# Events that wake the engine's drain: a request queued.
+DRAIN_EVENTS = {"request"}
 # The drain runs at once on those, and at least this often otherwise.
 DRAIN_EVERY = 60
 # Approximate, not a bound: engine.ACT_BUDGET_SECS (240) plus one go's worst case
 # (about 1380 of timeouts). Left out: the wait for the state lock behind a tick's
 # GitHub pass, and spawn_item's own gh calls (2 x 60). The margin is for those.
 DRAIN_TIMEOUT_SECS = 2400
-# A tick running longer than this is reported as hung (the header's red flag).
+# A tick or drain running longer than this is reported as hung (the header's
+# red flag).
 TICK_STALE_SECS = 900
 
 AGENT_GLYPH = {"running": ("◐", "yellow"), "waiting": ("⏸", "bold red"),
@@ -182,16 +177,6 @@ def read_json(path, default=None):
             return json.load(fh)
     except (OSError, json.JSONDecodeError):
         return default
-
-
-def snapshot_rows():
-    """The well-formed rows of snapshot.json, or none."""
-    snap = read_json(SNAPSHOT_FILE)
-    rows = snap.get("rows") if isinstance(snap, dict) else None
-    if not isinstance(rows, list):
-        return []
-    return [r for r in rows
-            if isinstance(r, dict) and isinstance(r.get("key"), str)]
 
 
 def ago(secs):
@@ -296,7 +281,7 @@ def repo_key(slug):
 
 class Hosts:
     """Where the agents live: herdr workspaces and herdr-app spaces, through
-    scan.py so the dashboard and the orchestrator agree on them."""
+    scan.py so the dashboard and the engine agree on them."""
 
     def live(self):
         return scan.all_live()
@@ -462,62 +447,13 @@ class Model:
                     break
 
     def github_pass(self, force):
-        """One snapshot and doorbell pass; an error must not end the loop."""
+        """One snapshot refresh; an error must not end the loop."""
         try:
             self.refresh_snapshot(force, "tick" if scan.engine_allowed(DIR)
                                   else "snapshot")
-            # The engine acts on the rows itself, so there is no one to ring.
-            if scan.engine_mode(checkout=DIR) != "on":
-                self.wake_orchestrator()
         except Exception:
             # Silent like notify_loop: the next pass retries.
             pass
-
-    def wake_orchestrator(self):
-        """Ring the orchestrator's doorbell with one `request tick` for Next
-        tick rows it was not woken for. Nothing rings while paused."""
-        state = read_json(STATE_FILE)
-        if isinstance(state, dict) and state.get("paused"):
-            return
-        rows = snapshot_rows()
-        present = {r["key"] for r in rows}
-        os.makedirs(STATE_DIR, exist_ok=True)
-        with open(WOKEN_LOCK, "w") as lk:
-            fcntl.flock(lk.fileno(), fcntl.LOCK_EX)
-            first = not os.path.exists(WOKEN_FILE)
-            woken = read_json(WOKEN_FILE)
-            if not isinstance(woken, dict):
-                woken = {}
-            rung = []
-            for r in rows:
-                if r.get("kind") not in ORCH_ROWS:
-                    continue
-                old = woken.get(r["key"])
-                if not (isinstance(old, list)
-                        and len(old) == 2 + len(WAKE_FIELDS)):
-                    old = [None, ""] + [None] * len(WAKE_FIELDS)
-                fields = r.get("fields")
-                if not isinstance(fields, dict):
-                    fields = {}
-                # An empty head is unknown (a failed details fetch): keep the
-                # one already rung for, so a flip to "" does not ring again.
-                cur = [r.get("kind"), r.get("head") or old[1]]
-                cur += [fields.get(f) for f in WAKE_FIELDS]
-                if cur != old:
-                    rung.append((r["key"], cur))
-            # A failed request is not recorded, so the next refresh retries it.
-            if rung and sh([sys.executable, os.path.join(DIR, "scan.py"),
-                            "request", "tick"])[0] != 0:
-                rung = []
-            # Entries stay while their key is in the snapshot at all, so a row
-            # bouncing through UNKNOWN or STALE does not ring again on return.
-            out = {k: woken[k] for k in woken if k in present}
-            out.update(rung)
-            if out != woken or first:
-                tmp = f"{WOKEN_FILE}.tmp.{os.getpid()}"
-                with open(tmp, "w") as fh:
-                    json.dump(out, fh)
-                os.replace(tmp, WOKEN_FILE)
 
     def engine_output(self, verb, out):
         """Keep the lines a tick or drain printed for the header, and log each one
@@ -556,7 +492,7 @@ class Model:
 
     def notify_loop(self):
         """Kick the GitHub loop when the user's notifications bring something
-        new, so a review request or a comment reaches the orchestrator within
+        new, so a review request or a comment reaches the engine within
         about a minute, not at the next scheduled refresh."""
         while True:
             try:
@@ -682,7 +618,7 @@ class Model:
                 out["pick"].append(e)
             # herdr's live state is seconds old; the snapshot can be minutes
             # old. A tracked item's agent mid-turn -- prompted by the
-            # orchestrator or by hand -- is running, whatever its last report
+            # engine or by hand -- is running, whatever its last report
             # or row says, DONE included.
             elif it is not None and e["agent"] == "running" \
                     and kind not in ORCH_ROWS and kind != "GONE":
@@ -896,13 +832,13 @@ def start_holds(model):
     return holds
 
 
-def to_orch(text):
-    """Queue a command in the orchestrator's inbox. Typing it into its pane
-    would also send whatever the user is half-way through there."""
+def queue_request(text):
+    """Queue a request for the engine (scan.py request). Nothing is typed into a
+    pane, which would also send whatever the user is half-way through."""
     code, out, err = sh([sys.executable, os.path.join(DIR, "scan.py"),
                          "request", text])
     if code == 0:
-        return Result(True, f"queued '{text}' for the orchestrator")
+        return Result(True, f"queued '{text}'")
     return Result(False, f"queue failed: {(err or out)[:100]}")
 
 
@@ -912,24 +848,25 @@ def start_request(model, cmd, confirmed=False):
     message of each hold now. True is an old mod's confirmed=1: every hold now."""
     holds = start_holds(model)
     if not holds:
-        return to_orch(cmd)
+        return queue_request(cmd)
     names = [name for name, _ in holds]
     if confirmed is True:
         confirmed = names
     if not confirmed or any(name not in confirmed for name in names):
         return Result(False, "\n".join(msg for _, msg in holds), kitchen=True,
                       holds=tuple(names))
-    return to_orch(cmd + "".join(f" {HOLDS[name][0]}" for name in names))
+    return queue_request(cmd + "".join(f" {HOLDS[name][0]}"
+                                       for name in names))
 
 
-def go_orch(model, key, confirmed=False):
+def go_request(model, key, confirmed=False):
     """`go KEY`. A start held past wind-down or at the cap needs confirmed: the
     second press of the held-start alert."""
     return start_request(model, f"go {key}", confirmed)
 
 
-def investigate_orch(model, repo, question, read_only, confirmed=False):
-    """`/investigate`, which a hold needs confirmed like go_orch."""
+def investigate_request(model, repo, question, read_only, confirmed=False):
+    """`/investigate`, which a hold needs confirmed like go_request."""
     cmd = f"/investigate {'--read-only ' if read_only else ''}{repo} {question}"
     return start_request(model, cmd, confirmed)
 
@@ -981,9 +918,8 @@ def peek_hc(terminal):
 
 
 def open_prompter(model):
-    """The prompter when there is one (that is where the user types), else the
-    orchestrator itself. The prompter is looked up only in the dashboard's own
-    backend; the orchestrator wherever its address points."""
+    """Focus the prompter, where the user types. It is looked up only in the
+    dashboard's own backend."""
     own = scan.HC if scan.OCTOPILOT_BACKEND == "hc" else scan.HERDR
     if own is scan.HC:
         # Peek, not agent.focus: the engine terminals are parked (no pane).
@@ -992,12 +928,7 @@ def open_prompter(model):
             return Result(True, "")
     elif scan.herdr(["agent", "focus", scan.PROMPTER_AGENT], timeout=10)[0] == 0:
         return Result(True, "")
-    backend, target = scan.split_address(scan.orchestrator_target(model.state))
-    if backend is scan.HC:
-        ok = peek_hc(target)
-    else:
-        ok = scan.herdr(["agent", "focus", target], timeout=10)[0] == 0
-    return Result(ok, "" if ok else f"no agent named {target}")
+    return Result(False, "no prompter running")
 
 
 def focus_row(model, e):
@@ -1103,7 +1034,7 @@ def row_refusal(model, aid, e):
             return "remove only applies to tracked items"
         # MERGED needs the SIBLINGS fan-out, RESTACK a restack, not a removal.
         if kind in ("MERGED", "RESTACK"):
-            return "the orchestrator handles MERGED and RESTACK rows"
+            return "octopilot handles MERGED and RESTACK rows itself"
     return None
 
 
@@ -1115,11 +1046,11 @@ def row_confirm(model, aid, e):
     if aid == "go":
         holds = start_holds(model)
         if not holds:
-            return f"press g again to send 'go {key}' to the orchestrator"
+            return f"press g again to queue 'go {key}'"
         why = " · ".join(HOLDS[name][1] for name, _ in holds)
         return f"{why} -- press g again to start {key} anyway"
     if aid == "no":
-        return f"press n again to send 'no {key}' to the orchestrator"
+        return f"press n again to decline {key}"
     if aid == "grant":
         return (f"press R again to grant {key} another "
                 f"{MAX_REVIEW_ROUNDS} review rounds")
@@ -1157,13 +1088,13 @@ def perform(model, aid, e, confirmed=False, suspend=None):
     if aid == "browser":
         return browse_row(e)
     if aid == "go":
-        return go_orch(model, key, confirmed)
+        return go_request(model, key, confirmed)
     if aid == "no":
-        return to_orch(f"no {key}")
+        return queue_request(f"no {key}")
     if aid == "grant":
         return scan_run(["reset-rounds", key])
     if aid == "rereview":
-        return to_orch(f"re-review {key}")
+        return queue_request(f"re-review {key}")
     if aid == "ack":
         return scan_run(["ack-push", key])
     if aid == "detach":
@@ -1177,7 +1108,7 @@ def perform(model, aid, e, confirmed=False, suspend=None):
 
 def pick_groups(rows):
     """[(repo slug, [(#, entry)])], repos in order of first appearance. The #
-    is the row's place in rows, which `go N` and the orchestrator both count
+    is the row's place in rows, which `go N` and the engine both count
     by, so rows are not re-sorted, even when a repo's rows are not together."""
     groups = {}
     for i, e in enumerate(rows):
@@ -1527,9 +1458,9 @@ def run_action(model, aid, key, args):
         question = args.get("question", "").strip()
         if not (repo and question):
             return Result(False, "investigate needs a repo and a question")
-        return investigate_orch(model, repo, question,
-                                truthy(args.get("read_only")),
-                                confirmed_holds(args))
+        return investigate_request(model, repo, question,
+                                   truthy(args.get("read_only")),
+                                   confirmed_holds(args))
     if aid == "prompter":
         return open_prompter(model)
     if aid == "toggle_done":
@@ -1580,7 +1511,7 @@ class Dashboard:
         data, hdr = self.m.build()
         head = [self.header(data, hdr, now)]
         if hdr["paused"]:
-            head.append(Text(" ⏸  PAUSED — the orchestrator acts on nothing "
+            head.append(Text(" ⏸  PAUSED — octopilot starts and acts on nothing "
                              "until resumed (P)", style="bold black on yellow"))
         # Done rows that still hold a workspace or session stay on the board,
         # so they can be opened or detached (z) without toggling D first.
@@ -1666,7 +1597,7 @@ class Dashboard:
         if engine["state"] == "acting":
             t.append("⏭ acting", style="cyan")
         elif engine["state"] == "stale":
-            t.append(f"tick running {ago(engine['since_s'])}+ (hung?)", style="red")
+            t.append(f"engine running {ago(engine['since_s'])}+ (hung?)", style="red")
         elif self.m.snap_running:
             t.append("GitHub ⟳ refreshing", style="cyan")
         elif gen:
@@ -2051,7 +1982,7 @@ class Dashboard:
             k, title, _, _, shown = self.alert
             self.alert = None
             if key == "g":
-                res = go_orch(self.m, k, confirmed=shown)
+                res = go_request(self.m, k, confirmed=shown)
                 # A hold that came up since the alert is asked again, not sent.
                 if res.kitchen:
                     self.hold_alert(k, title, res)
@@ -2129,15 +2060,15 @@ class Dashboard:
         ro = term.read_line(live, "Read-only (a report, no commits or PR)? "
                             "[y/N] ")
         read_only = ro.lower() in ("y", "yes")
-        res = investigate_orch(self.m, repo, question, read_only)
+        res = investigate_request(self.m, repo, question, read_only)
         if res.kitchen:
             held = " · ".join(res.message.splitlines())
             ok = term.read_line(live, f"{held} -- start it anyway? [y/N] ")
             if ok.lower() not in ("y", "yes"):
                 self.say("investigation not started (held)")
                 return
-            res = investigate_orch(self.m, repo, question, read_only,
-                                   confirmed=res.holds)
+            res = investigate_request(self.m, repo, question, read_only,
+                                      confirmed=res.holds)
             if res.kitchen:
                 held = " · ".join(res.message.splitlines())
                 self.say(f"investigation not started (held again: {held})")
