@@ -953,10 +953,9 @@ def review_wait(detail, me):
 
 
 def rereview_hours(it, head, review):
-    """Hours the PR has waited on a re-review at `head`, for the blocking review
-    submitted at `review`, or None before RE_REVIEW_QUIET_HOURS. The first scan
-    that sees a new head or review stamps it, so the clock starts when octopilot
-    first saw the wait, not when the reviewer asked."""
+    """Hours the PR has waited on a re-review of the blocking review at `review`
+    on `head`, or None before RE_REVIEW_QUIET_HOURS. The clock starts at the
+    first scan that sees that pair, not when the reviewer asked."""
     wait = it.get("rereview_wait") or {}
     if (wait.get("head"), wait.get("review")) != (head, review):
         wait = it["rereview_wait"] = {"head": head, "review": review,
