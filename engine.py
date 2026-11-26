@@ -1103,3 +1103,153 @@ def _first_prompt(state, ctx, start, r, branch, slug, num, title, layers, is_iss
         return f"{start}: {tmpl} queued, the host warned: {r['warning']}"
     ctx.log("go", start, title=title, template=tmpl)
     return _send_in(state, ctx, start, tmpl, subs, "go", mark)
+
+
+def do_investigate(req, ctx):
+    """/investigate [--read-only] <repo> <question>: a session for a question, not
+    for a GitHub item. The question goes on the item verbatim; the name and
+    branch are picked so no other investigation has them."""
+    import naming
+    import scan
+    repo, question = req.args
+    state = scan.load()
+    slug, err = _repo_for(state, repo)
+    if err:
+        return _refuse(ctx, req.verb, None, err)
+    title = question.split("\n", 1)[0][:60]
+    held = _held(req, _snapshot(), ctx)
+    if held:
+        return _hold(ctx, None, title, held)
+    read_only = req.verb == "investigate-read-only"
+    with scan.locked():
+        state = scan.load()
+        name, branch, title = naming.pick_investigation(
+            question, read_only, state["registry"][slug]["path"], slug,
+            taken_keys=list(state.get("items", {})),
+            taken_branches=[it.get("branch") for it in state.get("items", {}).values()])
+        key = scan.key(slug, name, "investigate")
+        try:
+            r = scan.spawn_item(state, key, branch, title, True, question=question,
+                                read_only=read_only)
+        except (Exception, SystemExit) as exc:
+            return _refuse(ctx, req.verb, key, f"spawn failed: {exc}", title=title)
+        ctx.spawned += 1
+        ctx.log("investigate", key, title=title, template=r["template"])
+        return _send_in(state, ctx, key, r["template"],
+                        {"KEY": key, "REPO": slug, "BASE": r["base"]}, "go")
+
+
+def _target_of(req, ctx):
+    """The item key a one-target request names -> (key, None), or (None, the
+    refusal line) when the target is unknown or ambiguous."""
+    import scan
+    key, err = resolve_target(req.args[0], scan.load(), _snapshot().get("rows", []))
+    if err:
+        return None, _refuse(ctx, req.verb, None, err)
+    return key, None
+
+
+def do_no(req, ctx):
+    """no <target>: the item is declined and not proposed again."""
+    import scan
+    key, line = _target_of(req, ctx)
+    if key is None:
+        return line
+    with scan.locked():
+        scan.decline(scan.load(), [key])
+    return f"{key}: declined"
+
+
+def do_detach(req, ctx):
+    """detach <target>: close the item's session, keep its worktree and branch,
+    and untrack it so it is proposed again."""
+    import scan
+    key, line = _target_of(req, ctx)
+    if key is None:
+        return line
+    with scan.locked():
+        r = scan.detach_item(scan.load(), key)
+    if not r["ok"]:
+        return _refuse(ctx, req.verb, key, r["error"])
+    return r["msg"]
+
+
+def do_ack(req, ctx):
+    """ack <target>: the user has seen the PUSHED flag; stop flagging this head."""
+    import scan
+    key, line = _target_of(req, ctx)
+    if key is None:
+        return line
+    with scan.locked():
+        r = scan.ack_push(scan.load(), key)
+    if not r["ok"]:
+        return _refuse(ctx, req.verb, key, r["error"])
+    return f"{key}: acked"
+
+
+def do_pause(req, ctx):
+    """pause / resume: the engine's work stops or starts; see drain for what waits."""
+    import scan
+    paused = req.verb == "pause"
+    with scan.locked():
+        scan.set_paused(scan.load(), paused)
+    return "paused" if paused else "resumed"
+
+
+def do_re_review(req, ctx):
+    """re-review <target>: a follow-up review of a comment PR's new commits, through
+    the executor's review path, so the review cap and the reboot apply."""
+    import scan
+    key, line = _target_of(req, ctx)
+    if key is None:
+        return line
+    it = find_item(scan.load(), key)
+    if it is None:
+        return _refuse(ctx, req.verb, key, "not tracked")
+    if it.get("mode") != "comment":
+        return _refuse(ctx, req.verb, key, "only a comment PR gets a re-review")
+    rounds = int(it.get("review_rounds", 0))
+    if rounds >= scan.MAX_REVIEW_ROUNDS:
+        return _refuse(ctx, req.verb, key,
+                       f"at the review cap ({rounds}/{scan.MAX_REVIEW_ROUNDS})")
+    return execute(Action("review", key, {}), ctx)
+
+
+def do_code(req, ctx):
+    """/octopilot-code <text>: a request for the code-changes agent, verbatim. It
+    holds no slot and is never tracked."""
+    import scan
+    with scan.locked():
+        sent, err = scan.send_code(scan.load(), req.args[0])
+    if err:
+        return f"{scan.CODE_AGENT}: kept, still pending ({err})"
+    return f"{scan.CODE_AGENT}: {sent} request(s) delivered"
+
+
+def do_tick(req, ctx):
+    """tick: a full tick was asked for. A drain runs no scan of its own, so drain
+    reports that the next scheduled tick takes it."""
+    ctx.need_tick = True
+    return None
+
+
+def _unknown(req, ctx):
+    """A request outside the grammar: logged and refused, never guessed at."""
+    ctx.log("request-unknown", None, text=req.args[0][:200])
+    return f"unknown request: {req.args[0][:120]}"
+
+
+HANDLERS = {"go": do_go, "no": do_no, "detach": do_detach, "ack": do_ack,
+            "pause": do_pause, "resume": do_pause, "re-review": do_re_review,
+            "investigate": do_investigate, "investigate-read-only": do_investigate,
+            "code": do_code, "tick": do_tick}
+
+
+def _handle(req, ctx):
+    """One request -> its outcome line, or None when it has nothing to say. A
+    report is dropped: the agent's report is already recorded on its item."""
+    if req.verb == "report":
+        return None
+    if req.verb == "unknown":
+        return _unknown(req, ctx)
+    return HANDLERS[req.verb](req, ctx)
