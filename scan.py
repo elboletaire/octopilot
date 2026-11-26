@@ -890,7 +890,7 @@ def pr_detail(slug, number):
     d = gh_json(["pr", "view", str(number), "-R", slug, "--json",
                  "number,state,mergedAt,headRefOid,headRefName,baseRefName,"
                  "statusCheckRollup,isDraft,url,title,reviews,comments,"
-                 "reviewRequests"],
+                 "reviewRequests,reviewDecision"],
                 default=None)
     return d
 
@@ -917,6 +917,14 @@ def review_requested(detail, me):
     """Whether `me` has a review request pending on the PR in `detail`."""
     return me in [(r.get("login") or r.get("name"))
                   for r in (detail or {}).get("reviewRequests") or []]
+
+
+def review_pending(detail):
+    """Whether someone else still owes a review on the PR in `detail`: the
+    repo requires one and none is in, or a reviewer has been asked."""
+    d = detail or {}
+    return d.get("reviewDecision") == "REVIEW_REQUIRED" or \
+        bool(d.get("reviewRequests"))
 
 
 def pr_review_comments(detail):
@@ -1490,8 +1498,18 @@ def scan(state, refresh=False, info=None):
             checks = worst_checks([layer_detail(k, it, layer["pr"])
                                    for layer in it["stack"]]) \
                 if it.get("stack") else checks_of(d)
-            rows.append(("READY", k, f"mode=fix {smeta} checks={checks} "
-                                     "-> you merge"))
+            # The PR that merges first is the one that needs the review. Until
+            # it lands the user cannot merge, so the card holds no slot, as a
+            # comment PR waiting on its author does.
+            first = layer_detail(k, it, it["stack"][0]["pr"]) \
+                if it.get("stack") else d
+            if review_pending(first):
+                active -= 1
+                rows.append(("DONE", k, f"mode=fix {smeta} checks={checks} "
+                                        "-> waiting on review"))
+            else:
+                rows.append(("READY", k, f"mode=fix {smeta} checks={checks} "
+                                         "-> you merge"))
 
     # ---- candidates
     # prev_keys too: an issue re-keyed to its PR is still being worked on, and
