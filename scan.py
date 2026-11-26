@@ -58,8 +58,8 @@ ISSUE_MAX_AGE_DAYS = int(os.environ.get("ISSUE_MAX_AGE_DAYS", "120"))
 STATE_FILE = os.environ.get(
     "STATE_FILE", os.path.expanduser("~/.local/state/octopilot/state.json"))
 # Both live next to the state file and exist for the dashboard: the event log
-# is appended by every mutating command, the snapshot is the last read-only
-# scan rendered as JSON.
+# is appended by every mutating command, the snapshot is the last scan's rows
+# rendered as JSON.
 EVENTS_FILE = os.path.join(os.path.dirname(STATE_FILE), "events.jsonl")
 SNAPSHOT_FILE = os.path.join(os.path.dirname(STATE_FILE), "snapshot.json")
 # One tick at a time: a tick that finds it held returns at once.
@@ -2181,9 +2181,9 @@ def parse_extra(extra):
 def snapshot(state):
     """Run a scan on a throwaway copy of the state and publish it as JSON.
 
-    Nothing is saved: the orchestrator's scan owns every state transition
-    (feedback watermarks, re-keys, untracking), and a dashboard refreshing
-    every two minutes must never consume one of them before it does.
+    Nothing is saved: the transitions this scan finds wait for the next tick.
+    Only idempotent ones are safe to repeat, which is why a dashboard's tick
+    may save first (a re-request is, through pending_rerequest).
     """
     work = copy.deepcopy(state)
     info = {}

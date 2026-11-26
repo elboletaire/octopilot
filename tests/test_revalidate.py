@@ -68,9 +68,17 @@ class RevalidateRowTest(unittest.TestCase):
         self.assertFalse(revalidate_row(row("RESTACK"), state))
 
     def test_rerequested_review_kept_when_head_equals_reviewed(self):
-        item = {K: {"phase": "fixing", "reviewed_sha": "abc1234def"}}
+        # Re-request not yet acted on: pending_rerequest only, no rerequest_head.
+        item = {K: {"phase": "fixing", "reviewed_sha": "abc1234def",
+                    "pending_rerequest": "abc1234def"}}
         r = row("REVIEW", head="abc1234", reviewed="abc1234")
         self.assertTrue(revalidate_row(r, {"items": item}))
+
+    def test_rerequest_acted_on_dropped_after_its_cycle(self):
+        item = {K: {"phase": "fixing", "reviewed_sha": "abc1234def",
+                    "rerequest_head": "abc1234def"}}
+        r = row("REVIEW", head="abc1234", reviewed="abc1234")
+        self.assertFalse(revalidate_row(r, {"items": item}))
 
     def test_review_dropped_after_mark_reviewed(self):
         item = {K: {"phase": "fixing", "reviewed_sha": "fff0000aaa"}}

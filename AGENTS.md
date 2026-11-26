@@ -71,7 +71,12 @@ git worktree add --no-track -b feat/x .worktrees/feat-x origin/main
 - **Never test against the live state.** `~/.local/state/octopilot` is the
   running octopilot. Set `OCTOPILOT_STATE_DIR` to a scratch directory, and narrow
   the scan with `HOME_REPOS`, `ISSUE_ORGS` and `CLONE_ROOTS`. Do not start the
-  orchestrator or spawn workers on the live checkout to try a change.
+  orchestrator or spawn workers on the live checkout to try a change. Dashboard
+  loops (`--headless`, the TUI) started from the live checkout save to the live
+  state through `tick`, so never run them there without `OCTOPILOT_STATE_DIR`. A
+  scratch-state tick still makes read-only `gh search` queries against the real
+  account; `HOME_REPOS`, `ISSUE_ORGS` and `CLONE_ROOTS` don't narrow those.
+- **Unit tests**: `python3 -m unittest discover -s tests -v` from the repo root.
 - **GUI test space**: `open-gui.sh` refuses without `OCTOPILOT_STATE_DIR`. Run it
   from your worktree, then close the test space with
   `herdr-app do space.close --id <space> --confirmed true`. The
@@ -81,9 +86,9 @@ git worktree add --no-track -b feat/x .worktrees/feat-x origin/main
   paint). `herdr-app types <mod>` writes `gpui-kit.d.ts` into the mod folder (git-ignored);
   run it on a copy outside the repo (for example under `/tmp`) to keep that file out
   of the worktree.
-- **TUI changes**: capture `dashboard.sh --once` output with a fixed scratch state
-  before and after the change, and diff them. A change that is not meant to alter
-  the frame must give byte-identical output.
+- **TUI changes**: `tests/frame.sh` prints the `dashboard.sh --once` frame for a
+  fixed scratch state; capture it before and after the change, and diff them. A
+  change that is not meant to alter the frame must give byte-identical output.
 - **Plugin**: `plugin/tests/kitchen.test.tsx` covers the kitchen's feed and scene.
 
 Keep the changes within the request. Update `herdr/README.md` or

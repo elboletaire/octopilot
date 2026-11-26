@@ -102,8 +102,8 @@ OCTOPILOT_ORCH=""
 # is global, so it works from any folder.
 OCTOPILOT_ORCH_CWD="$HOME/src"
 
-# How often the dashboard re-reads GitHub (a read-only scan), in seconds. Agent
-# state and octopilot events update instantly; only PR/CI data waits for this.
+# How often the dashboard re-reads GitHub (a scan its tick saves), in seconds.
+# Agent state and octopilot events update instantly; only PR/CI data waits for this.
 DASHBOARD_REFRESH_SECS=120
 
 # Backend new sessions spawn on: herdr (the TUI, default) or hc (the herdr-app

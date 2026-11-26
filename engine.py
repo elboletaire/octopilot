@@ -50,6 +50,12 @@ def revalidate_row(row, state):
     if kind == "REVIEW":
         if it.get("phase") == "booting":
             return False
+        # A re-request reboot() already acted on has run its cycle: its
+        # mark-reviewed sets reviewed_sha to this same head, so the check below
+        # would keep the row.
+        head = fields.get("head")
+        if head and (it.get("rerequest_head") or "").startswith(head):
+            return False
         # mark-reviewed since the row was built changes reviewed_sha. Comparing
         # head would drop a fresh re-request, whose head equals reviewed_sha.
         # Rows without the field (or empty) are kept.
