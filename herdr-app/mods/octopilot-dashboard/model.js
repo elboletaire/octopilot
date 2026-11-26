@@ -150,6 +150,8 @@ export function pickSummary(entries) {
 export function keyName(e) {
   const m = e.modifiers ?? {};
   if (m.control || m.alt || m.platform) return null;
+  // Macs have no Delete key: Shift+Backspace is remove's alias.
+  if (e.key === "backspace" && m.shift) return "delete";
   const ch = e.key_char;
   if (ch && ch.length === 1 && ch >= " " && ch !== "\x7f") return ch === " " ? "space" : ch;
   return e.key;

@@ -120,6 +120,8 @@ KEY_ROW = {"\r": "focus", "\n": "focus", "v": "peek", "t": "shell",
            "o": "browser", "g": "go", "n": "no", "R": "grant", "e": "rereview",
            "x": "ack", "z": "detach", "\x1b[3~": "remove"}
 KEY_NAMES = {"\r": "Enter", "\x1b[3~": "Delete"}
+# Terminals send Backspace (Shift+Backspace too) as these bytes; Macs have no Delete key.
+KEY_ALIASES = {"\x7f": "\x1b[3~", "\x08": "\x1b[3~"}
 
 # Rows by who has the next move. Agent reports and blocked agents are moved
 # into NEEDS on top of these; see build().
@@ -1025,7 +1027,7 @@ def row_confirm(model, aid, e):
         # An item without a workspace is only untracked by cleanup.
         gone = ("workspace and worktree deleted" if it.get("session")
                 else "worktree kept")
-        return f"{busy}press del again to remove {key} ({gone}, untracked)"
+        return f"{busy}press del (⇧⌫) again to remove {key} ({gone}, untracked)"
     return None
 
 
@@ -1775,7 +1777,7 @@ class Dashboard:
         if tracked:
             keys.append(("z", "detach"))
             if kind not in ("MERGED", "RESTACK"):
-                keys.append(("del", "remove"))
+                keys.append(("del/⇧⌫", "remove"))
             keys.append(("d", "undone" if parked else "done"))
         if not repo:
             keys += [("v", "agent"), ("t", "shell"), ("o", "browser")]
@@ -2026,7 +2028,7 @@ class Terminal:
         if not r:
             return []
         data = os.read(self.fd, 64).decode(errors="ignore")
-        return split_keys(data)
+        return [KEY_ALIASES.get(k, k) for k in split_keys(data)]
 
     def read_line(self, live, prompt):
         """One line typed by the user, with the dashboard paused around it.
