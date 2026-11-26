@@ -53,11 +53,20 @@ class PlanRowsTest(unittest.TestCase):
                          [Action("feedback", K, {"since": "2026-11-26T00:00:00Z",
                                                  "pr": None, "branch": None})])
 
-    def test_comment_mode_feedback_is_a_bug(self):
+    def test_comment_mode_feedback_is_skipped(self):
         state = {"items": {K: {"feedback_seen": "2026-11-20T00:00:00Z"}}}
-        with self.assertRaises(AssertionError):
-            plan_rows([row("FEEDBACK", mode="comment", since="2026-11-26T00:00:00Z")],
-                      state)
+        rows = [row("FEEDBACK", mode="comment", since="2026-11-26T00:00:00Z")]
+        self.assertEqual(plan_rows(rows, state), [])
+
+    def test_one_action_per_key(self):
+        state = {"items": {K: {}}, "handled_merges": []}
+        rows = [row("MERGED"), row("MERGED")]
+        self.assertEqual(plan_rows(rows, state), [Action("cleanup", K, {})])
+
+    def test_stale_row_does_not_shadow_a_valid_one_for_its_key(self):
+        state = {"items": {K: {"phase": "idle"}}, "handled_merges": []}
+        rows = [row("BOOTING", template="review-fix"), row("REVIEW", head="abc1234")]
+        self.assertEqual(plan_rows(rows, state), [Action("review", K, {})])
 
     def test_other_kinds_are_not_planned(self):
         state = {"items": {K: {}}}

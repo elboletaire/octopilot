@@ -116,6 +116,74 @@ class QueueTest(PendingTest):
         queue_send(state, "repo#8", "review-fix", {}, "b")
         self.assertEqual([p["key"] for p in state["pending_sends"]], [K, "repo#8"])
 
+    def test_newer_entry_replaces_one_queued_under_a_prev_key(self):
+        state = {"items": {"repo#9": {"prev_keys": ["repo!5"]}}}
+        queue_send(state, "repo!5", "review-fix", {}, "first")
+        queue_send(state, "repo#9", "re-review", {}, "second")
+        self.assertEqual([p["key"] for p in state["pending_sends"]], ["repo#9"])
+        self.assertEqual(state["pending_sends"][0]["reason"], "second")
+
+
+class ReKeyedTest(PendingTest):
+    def setUp(self):
+        super().setUp()
+        state = {"items": {"repo#9": {"branch": "x", "prev_keys": ["repo!5"]}},
+                 "pending_sends": []}
+        queue_send(state, "repo!5", "review-fix", {}, "boot")
+        scan.save(state)
+
+    def test_one_send_per_item_across_its_keys(self):
+        out = deliver_pending(self.ctx(sent={"repo#9"}))
+        self.assertEqual(out, [])
+        self.send.assert_not_called()
+        self.assertEqual(len(self.pending()), 1)
+
+    def test_sent_key_is_the_current_key(self):
+        ctx = self.ctx()
+        deliver_pending(ctx)
+        self.assertEqual(ctx.sent_keys, {"repo#9"})
+        self.send.assert_called_once()
+        self.assertEqual(self.send.call_args.args[1], "repo#9")
+
+    def test_dry_run_checks_the_current_key_too(self):
+        ctx = self.ctx(dry_run=True, sent={"repo#9"})
+        self.assertEqual(deliver_pending(ctx), [])
+        self.send.assert_not_called()
+
+
+class FailureTest(PendingTest):
+    def queue_two(self):
+        state = {"items": {K: {}, "repo#8": {}}, "pending_sends": []}
+        queue_send(state, K, "review-fix", {}, "a")
+        queue_send(state, "repo#8", "review-fix", {}, "b")
+        scan.save(state)
+
+    def test_render_error_counts_a_try_and_next_entry_still_goes(self):
+        self.queue_two()
+        self.render.side_effect = [RuntimeError("boom"), "TEXT"]
+        out = deliver_pending(self.ctx())
+        self.assertEqual(out, [f"{K}: failed, try 1", "repo#8: sent"])
+        entry = self.pending()[0]
+        self.assertEqual(entry["key"], K)
+        self.assertTrue(entry["error"].startswith(FAILED))
+        self.assertIn("boom", entry["error"])
+
+    def test_send_exit_raising_system_exit_is_a_failed_try(self):
+        self.save_with_send()
+        self.send.side_effect = SystemExit("bad item")
+        out = deliver_pending(self.ctx())
+        self.assertEqual(out, [f"{K}: failed, try 1"])
+        self.assertEqual(self.pending()[0]["tries"], 1)
+
+
+class DryRunTest(PendingTest):
+    def test_dry_run_reports_missing_item_without_dropping(self):
+        self.save_with_send(items=())
+        out = deliver_pending(self.ctx(dry_run=True))
+        self.assertEqual(out, [f"{K}: would drop, item gone"])
+        self.assertEqual(len(self.pending()), 1)
+        self.assertEqual(self.logs, [])
+
 
 if __name__ == "__main__":
     unittest.main()

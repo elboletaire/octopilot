@@ -91,18 +91,22 @@ def plan_rows(rows, state):
     """The actions for the rows still valid against `state`, in row order.
 
     Every kind not in PLANNED is left to the user, CAPPED included. Nothing
-    is planned while paused.
+    is planned while paused. At most one action per key.
     """
     if state.get("paused"):
         return []
     out = []
+    seen = set()
     for row in rows:
         kind, key = row["kind"], row["key"]
-        if kind not in PLANNED:
+        if kind not in PLANNED or key in seen:
             continue
         fields = row.get("fields", {})
-        # Comment-mode items are answered by their review, never by feedback.
-        assert not (kind == "FEEDBACK" and fields.get("mode") == "comment"), key
+        # Comment-mode items get their follow-up from the review, so their
+        # FEEDBACK row is skipped rather than asserted: an assert would crash
+        # the tick, and vanishes under python -O.
+        if kind == "FEEDBACK" and fields.get("mode") == "comment":
+            continue
         if not revalidate_row(row, state):
             continue
         if kind == "BOOTING":
@@ -112,6 +116,7 @@ def plan_rows(rows, state):
                     "branch": fields.get("branch")}
         else:
             data = {}
+        seen.add(key)
         out.append(Action(PLANNED[kind], key, data))
     return out
 
@@ -131,10 +136,20 @@ class Ctx:
     rows: list
 
 
+def _same_item(state, a, b):
+    """Whether two keys name the same tracked item, one maybe a prev key."""
+    if a == b:
+        return True
+    item = find_item(state, a)
+    return item is not None and item is find_item(state, b)
+
+
 def queue_send(state, key, template, subs, reason):
     """Queue a prompt for `key` to be rendered and sent at delivery. A newer
-    one for the same key replaces the older one."""
-    sends = [p for p in state.get("pending_sends", []) if p["key"] != key]
+    one for the same item replaces the older one, whatever key it was queued
+    under."""
+    sends = [p for p in state.get("pending_sends", [])
+             if not _same_item(state, p["key"], key)]
     sends.append({"key": key, "template": template, "subs": subs,
                   "at": int(time.time()), "tries": 0, "error": None,
                   "reason": reason})
@@ -152,29 +167,43 @@ def deliver_pending(ctx):
     out = []
     keys = [p["key"] for p in scan.load().get("pending_sends", [])]
     for key in keys:
-        if key in ctx.sent_keys:
-            continue
         with scan.locked():
             state = scan.load()
             entry = next((p for p in state.get("pending_sends", [])
                           if p["key"] == key), None)
             if entry is None:
                 continue
-            if ctx.dry_run:
-                out.append(f"{key}: would send {entry['template']}")
-                continue
+            # The item may have been re-keyed since queueing: sent_keys and the
+            # executor both use the item's current key.
             resolved = scan.resolve_key(state, key)
+            if resolved in ctx.sent_keys:
+                continue
             # send_item exits on an unknown item, so check before sending.
             if resolved not in state.get("items", {}):
+                if ctx.dry_run:
+                    out.append(f"{key}: would drop, item gone")
+                    continue
                 state["pending_sends"] = [p for p in state["pending_sends"]
                                           if p["key"] != key]
                 scan.save(state)
                 ctx.log("send-dropped", key, template=entry["template"])
                 out.append(f"{key}: dropped, item gone")
                 continue
-            ctx.sent_keys.add(key)
-            text = scan.render_for(state, entry["template"], entry["subs"])
-            code = scan.send_item(state, resolved, text)
+            ctx.sent_keys.add(resolved)
+            if ctx.dry_run:
+                out.append(f"{key}: would send {entry['template']}")
+                continue
+            # A crash here must not wedge the queue: the entry counts as a
+            # failed try and the next entry still goes out.
+            try:
+                text = scan.render_for(state, entry["template"], entry["subs"])
+                code = scan.send_item(state, resolved, text)
+            except (Exception, SystemExit) as exc:
+                entry["tries"] += 1
+                entry["error"] = f"{FAILED}: {type(exc).__name__}: {exc}"
+                out.append(f"{key}: failed, try {entry['tries']}")
+                scan.save(state)
+                continue
             if code == 0:
                 state["pending_sends"] = [p for p in state["pending_sends"]
                                           if p["key"] != key]
