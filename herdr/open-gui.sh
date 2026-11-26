@@ -181,12 +181,14 @@ new_session() {
 SETTINGS="$(OCTOPILOT_DIR="$DIR" "$DIR/scan.sh" plugin-settings)"
 
 # argv for a claude session: its session id (empty: none), optionally started
-# with a prompt, in a folder (empty: the pane's own, `env -C` otherwise).
+# with a prompt, in a folder (empty: the pane's own, `env -C` otherwise), on a model
+# (empty: the global default).
 session_argv() {
   local args=(env)
   if [ -n "${3:-}" ]; then args+=(-C "$3"); fi
   args+=("${envs[@]}" claude)
   if [ -n "$SETTINGS" ]; then args+=(--settings "$SETTINGS"); fi
+  if [ -n "${4:-}" ]; then args+=(--model "$4"); fi
   if [ -n "${1:-}" ]; then args+=(--session-id "$1"); fi
   if [ -n "${2:-}" ]; then args+=("$2"); fi
   argv_json "${args[@]}"
@@ -339,7 +341,7 @@ name_mod_pane() {
 add_prompter() {
   local session term
   session=$(new_session)
-  term=$(start_engine_term "$1" "$2" "$3" "$(session_argv "$session" "/octopilot:prompter")" prompter)
+  term=$(start_engine_term "$1" "$2" "$3" "$(session_argv "$session" "/octopilot:prompter" "" "$MODEL_PROMPTER")" prompter)
   name_agent "$term" "$PROMPTER_AGENT" "$session"
 }
 
@@ -475,7 +477,7 @@ start_code_tab() {
   local session created term
   session=$(new_session)
   created=$(app do tab.new --space "$1" --name "$CODE_TAB" \
-    --argv "$(session_argv "$session" "" "$CODE_CWD")" --focus false)
+    --argv "$(session_argv "$session" "" "$CODE_CWD" "$MODEL_CODE")" --focus false)
   term=$(jq -r '.terminal // empty' <<<"$created")
   if [ -z "$term" ]; then
     echo "open-gui.sh: the $CODE_TAB tab has no terminal for the $CODE_AGENT agent" >&2
@@ -573,7 +575,7 @@ add_code_terminal_tab() {
   local created
   if [ -n "$(find_agent "$CODE_AGENT")" ]; then return 0; fi
   created=$(app do tab.new --space "$1" --name "$CODE_TAB" --folder "$CODE_CWD" \
-    --argv "$(session_argv "" "")" --focus false)
+    --argv "$(session_argv "" "" "" "$MODEL_CODE")" --focus false)
   name_agent "$(jq -r '.terminal' <<<"$created")" "$CODE_AGENT"
 }
 

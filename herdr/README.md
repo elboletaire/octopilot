@@ -46,6 +46,9 @@ whichever of the prompter and the code-changes tab is missing, and names the fir
 tab OCTOPILOT. A retired `octopilot` agent still running there is left alone, and
 `open` says so: close its pane.
 
+The prompter and the code agent start on `MODEL_PROMPTER` and `MODEL_CODE` (config.sh, passed
+to claude as `--model`), not on the global default; a running one keeps its model.
+
 Show octopilot's state on each worker's row in the herdr sidebar (the
 dashboard publishes these tokens; they expire ten minutes after it stops):
 

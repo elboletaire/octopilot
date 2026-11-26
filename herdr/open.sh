@@ -18,12 +18,23 @@ MAIN_TAB="OCTOPILOT"
 CODE_TAB="Octopilot (code changes)"
 CODE_AGENT="octopilot-code"            # scan.py's CODE_AGENT
 CODE_CWD="$DIR"                        # the octopilot dir: its AGENTS.md is the code agent's guide
+set -a
+# shellcheck source=../config.sh
+source "$DIR/config.sh"
+set +a
+
+# Starts a claude agent $1 in pane $3, on model $2 when one is set (empty: the global default).
+start_claude() {
+  local model=()
+  if [ -n "$2" ]; then model=(-- --model "$2"); fi
+  "$H" agent start "$1" --kind claude --pane "$3" --timeout 60000 \
+    ${model[@]+"${model[@]}"}
+}
 
 # Start the prompter in a fresh pane, named so the launcher can find it again.
 start_prompter() {
   "$H" pane rename "$1" "prompter" >/dev/null
-  "$H" agent start "$PROMPTER_AGENT" --kind claude --pane "$1" \
-    --timeout 60000 >/dev/null || return 0
+  start_claude "$PROMPTER_AGENT" "$MODEL_PROMPTER" "$1" >/dev/null || return 0
   # A brand-new pane: nobody is typing in it yet.
   "$H" agent prompt "$PROMPTER_AGENT" "/octopilot:prompter" >/dev/null || true
 }
@@ -62,8 +73,7 @@ add_code_tab() {
   created=$("$H" tab create --workspace "$1" --label "$CODE_TAB" \
     --cwd "$CODE_CWD" --no-focus)
   pane=$(jq -r '.result.root_pane.pane_id' <<<"$created")
-  "$H" agent start "$CODE_AGENT" --kind claude --pane "$pane" \
-    --timeout 60000 >/dev/null || true
+  start_claude "$CODE_AGENT" "$MODEL_CODE" "$pane" >/dev/null || true
 }
 
 # The tab holding the given pane is the main one.
@@ -115,11 +125,6 @@ fi
 # focused once the workspace is built.
 elsewhere=0
 "$H" agent get "$PROMPTER_AGENT" >/dev/null 2>&1 && elsewhere=1
-
-set -a
-# shellcheck source=../config.sh
-source "$DIR/config.sh"
-set +a
 
 created=$("$H" workspace create --label "$LABEL" \
   --cwd "${OCTOPILOT_ORCH_CWD:-$HOME}" --focus)
