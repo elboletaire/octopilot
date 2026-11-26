@@ -87,7 +87,7 @@ class RevalidateRowTest(unittest.TestCase):
         item = {K: {"phase": "fixing", "reviewed_sha": "abc1234def"}}
         self.assertTrue(revalidate_row(row("REVIEW", head="abc1234"), {"items": item}))
 
-    def test_review_dropped_while_booting(self):
+    def test_review_with_reviewed_field_dropped_while_booting(self):
         item = {K: {"phase": "booting"}}
         self.assertFalse(revalidate_row(row("REVIEW", reviewed="none"), {"items": item}))
 
