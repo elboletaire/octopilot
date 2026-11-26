@@ -884,7 +884,7 @@ def scan_run(args, timeout=30):
     lines = (out or err).splitlines()
     # cleanup ends with its SIBLINGS output; show a failed removal first,
     # else its "cleaned up" line.
-    removed = (f"{scan.HERDR.remove_label} ", f"{scan.HC.remove_label} ")
+    removed = tuple(f"{label} " for label in scan.REMOVE_LABELS)
     failed = next((l for l in lines if not l.endswith(": ok")
                    and l.startswith(removed)), None)
     done = next((l for l in lines if l.startswith("cleaned up")), None)

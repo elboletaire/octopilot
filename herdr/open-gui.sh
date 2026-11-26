@@ -100,7 +100,7 @@ fi
 # The scope knobs and the engine mode the caller set, read before config.sh
 # supplies its defaults: only these are forwarded, so the defaults keep applying.
 declare -a scope=()
-for v in HOME_REPOS ISSUE_ORGS CLONE_ROOTS OCTOPILOT_ENGINE; do
+for v in HOME_REPOS ISSUE_ORGS CLONE_ROOTS OCTOPILOT_ENGINE WORKER_HOST SETTLE_WORKER_TABS; do
   if [ -n "${!v:-}" ]; then scope+=("$v=${!v}"); fi
 done
 

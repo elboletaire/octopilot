@@ -109,6 +109,12 @@ OCTOPILOT_BACKEND="${OCTOPILOT_BACKEND:-herdr}"
 # OCTOPILOT_STATE_DIR is set.
 OCTOPILOT_ENGINE="${OCTOPILOT_ENGINE:-on}"
 
+# Where worker sessions open: a tab in the Octopilot space or workspace (tab), or
+# a space or workspace of their own (space, the old layout).
+WORKER_HOST="${WORKER_HOST:-tab}"
+# Settle each new worker tab at spawn (1), or leave it as herdr opened it (0).
+SETTLE_WORKER_TABS="${SETTLE_WORKER_TABS:-1}"
+
 # OCTOPILOT_STATE_DIR in the environment points octopilot at another state
 # (a sandbox, a second profile); unset, it is the usual XDG state dir.
 STATE_DIR="${OCTOPILOT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/octopilot}"

@@ -73,6 +73,8 @@ EVENTS_MAX_BYTES = 512 * 1024
 EVENTS_KEEP = 1000
 # Backend new sessions spawn on: "herdr" (the TUI) or "hc" (herdr-app's GUI).
 OCTOPILOT_BACKEND = os.environ.get("OCTOPILOT_BACKEND", "herdr")
+# Settle a new worker tab at spawn ("1") or leave it as herdr opened it ("0").
+SETTLE_WORKER_TABS = os.environ.get("SETTLE_WORKER_TABS", "1") == "1"
 # The octopilot code dir: where workers find scan.sh and their plugin.
 OCTOPILOT_DIR = (os.environ.get("OCTOPILOT_DIR")
                  or os.path.dirname(os.path.abspath(__file__)))
@@ -189,11 +191,14 @@ def whoami(state):
 # --------------------------------------------------------------- agent hosts
 #
 # An item's session id names its backend: a TUI workspace (`w12`) or a herdr-app
-# space (`sp<hex>`), since it survives restarts that pane ids and names may not.
+# space (`sp<hex>`), or a tab in either (`w12:t3`, `tb<hex>`), since it survives
+# restarts that pane ids and names may not.
 # New items spawn on OCTOPILOT_BACKEND; a bare agent name is the spawn backend's.
 
 HERDR_WS = re.compile(r"^w[0-9A-Za-z]{1,8}$")
 HC_SPACE = re.compile(r"^sp[0-9a-f]+$")
+HERDR_TAB = re.compile(r"^w[0-9A-Za-z]{1,8}:t[0-9A-Za-z]{1,8}$")
+HC_TAB = re.compile(r"^tb[0-9a-f]+$")
 # Agent states in the vocabulary the scan logic speaks.
 HERDR_STATE = {"working": "running", "blocked": "waiting", "idle": "idle",
                "done": "idle", "unknown": "unknown"}
@@ -641,15 +646,41 @@ HERDR = HerdrBackend()
 HC = HcBackend()
 # Both are listed on every scan; a session id belongs to exactly one of them.
 BACKENDS = {"herdr": HERDR, "hc": HC}
+# Every label a discard is logged under, so a failed removal is recognised.
+REMOVE_LABELS = (HERDR.remove_label, HC.remove_label, "herdr tab remove",
+                 "herdr-app tab remove")
 
 
 def backend_for(session):
     """The backend a session id belongs to, or None."""
-    if HERDR_WS.match(session or ""):
+    if HERDR_WS.match(session or "") or HERDR_TAB.match(session or ""):
         return HERDR
-    if HC_SPACE.match(session or ""):
+    if HC_SPACE.match(session or "") or HC_TAB.match(session or ""):
         return HC
     return None
+
+
+def is_tab(session):
+    """True for a worker's tab id, not for a whole workspace or space."""
+    return bool(HERDR_TAB.match(session or "") or HC_TAB.match(session or ""))
+
+
+def host_noun(backend, session):
+    """What the session's host is called in messages: a tab for a tab id."""
+    if HC_TAB.match(session or ""):
+        return "herdr-app tab"
+    if HERDR_TAB.match(session or ""):
+        return "herdr tab"
+    return backend.noun
+
+
+def remove_label_for(backend, session):
+    """The command a discard of the session is logged under, by its host."""
+    if HC_TAB.match(session or ""):
+        return "herdr-app tab remove"
+    if HERDR_TAB.match(session or ""):
+        return "herdr tab remove"
+    return backend.remove_label
 
 
 def spawn_backend():
@@ -658,6 +689,14 @@ def spawn_backend():
         raise SystemExit(f"OCTOPILOT_BACKEND must be herdr or hc, not "
                          f"{OCTOPILOT_BACKEND!r}")
     return backend
+
+
+def worker_host():
+    """Where worker sessions open, read at use: "tab" or "space"."""
+    host = os.environ.get("WORKER_HOST", "tab")
+    if host not in ("tab", "space"):
+        raise SystemExit(f"WORKER_HOST must be tab or space, not {host!r}")
+    return host
 
 
 def split_address(address):
@@ -3238,8 +3277,9 @@ def dispatch(cmd, args, state):
         pr = int(args[5]) if len(args) > 5 else None
         backend = backend_for(session)
         if backend is None:
-            print(f"{session} is not a herdr workspace id (like w12) or a "
-                  "herdr-app space id (like sp<hex>)", file=sys.stderr)
+            print(f"{session} is not a herdr workspace (w12), herdr tab (w12:t1), "
+                  "herdr-app space (sp<hex>) or herdr-app tab (tb<hex>) id",
+                  file=sys.stderr)
             return 1
         _, answered, open_ws = all_sessions()
         if listed(answered, session) and session not in open_ws:
