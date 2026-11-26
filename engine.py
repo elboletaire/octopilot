@@ -786,3 +786,57 @@ def parse_request(text):
     if verb in NO_ARGS and not rest:
         return Request(verb, (), confirmed, over_cap)
     return unknown
+
+
+def _key_number(key):
+    """The number in owner/repo#N or owner/repo!N, else None."""
+    m = re.search(r"[#!](\d+)$", key)
+    return int(m.group(1)) if m else None
+
+
+def _tracked_key(state, token):
+    """The key of the item called `token`, by its own key or a re-keyed one."""
+    items = state.get("items", {})
+    if token in items:
+        return token
+    for k, it in items.items():
+        if token in (it.get("prev_keys") or []):
+            return k
+    return None
+
+
+def resolve_target(token, state, snap_rows):
+    """The item key a request's target names -> (key, error).
+
+    Accepts an exact key (tracked or a row's), a re-keyed one, `repo#N` or
+    `repo!N` with repo a registry slug or a unique suffix of one, and a bare
+    N that names exactly one PROPOSE or tracked row. Pick-list numbers are
+    the prompter's job, so they are not read here."""
+    key = _tracked_key(state, token)
+    if key:
+        return key, None
+    if any(r["key"] == token for r in snap_rows):
+        return token, None
+    m = re.fullmatch(r"(.+?)([#!])(\d+)", token)
+    if m:
+        repo, sep, num = m.groups()
+        slugs = list(state.get("registry", {}))
+        if repo in slugs:
+            return f"{repo}{sep}{int(num)}", None
+        found = sorted(s for s in slugs if s.endswith("/" + repo))
+        if not found:
+            return None, f"{repo} is not in the registry"
+        if len(found) > 1:
+            return None, f"{repo} is ambiguous: {' '.join(found)}"
+        return f"{found[0]}{sep}{int(num)}", None
+    if token.isdigit():
+        n = int(token)
+        keys = sorted({r["key"] for r in snap_rows
+                       if (r["kind"] == "PROPOSE" or r["kind"] in TRACKED)
+                       and _key_number(r["key"]) == n})
+        if not keys:
+            return None, f"no proposed or tracked item #{n}"
+        if len(keys) > 1:
+            return None, f"#{n} is ambiguous: {' '.join(keys)}"
+        return keys[0], None
+    return None, f"unknown target {token!r}"
