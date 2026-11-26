@@ -3,6 +3,7 @@ with GitHub, herdr and git faked (tests/stand.py)."""
 import unittest
 from unittest import mock
 
+import naming
 import scan
 from engine import _handle, parse_request
 from tests.stand import HEAD, REPO, RequestCase
@@ -121,6 +122,11 @@ class InvestigateTest(RequestCase):
                                      "chore/how-does-the-cache-work-2",
                                      "How Does The Cache Work 2"))
         self.assertEqual(args[4], True)
+
+    def test_investigation_branch_is_named_through_choose_names(self):
+        with mock.patch.object(naming, "choose_names", wraps=naming.choose_names) as choose:
+            self.handle(f"/investigate owner/repo {self.QUESTION}")
+        self.assertEqual(choose.call_args.args[0], "investigation")
 
     def test_question_is_kept_verbatim_without_the_confirmation_suffix(self):
         self.handle(f"/investigate owner/repo {self.QUESTION} "

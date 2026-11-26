@@ -1145,7 +1145,7 @@ def pick_groups(rows):
 
 def event_detail(e):
     return " ".join(str(e[f]) for f in ("state", "round", "phase", "branch",
-                                        "msg", "note")
+                                        "msg", "note", "reason", "text", "error")
                     if e.get(f) not in (None, ""))
 
 

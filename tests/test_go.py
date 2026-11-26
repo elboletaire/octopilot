@@ -8,6 +8,7 @@ import unittest
 from unittest import mock
 
 import engine
+import naming
 import scan
 from tests.stand import HEAD, REPO, RequestCase
 
@@ -35,6 +36,12 @@ class GoTest(RequestCase):
         self.assertEqual(self.addresses(), ["herdr:w9"])
         self.assertIn("fix/add-login-12", self.texts()[0])
         self.assertEqual([(k, key) for k, key, _ in self.logs], [("go", ISSUE)])
+
+    def test_an_issue_branch_is_named_through_choose_names(self):
+        with mock.patch.object(naming, "choose_names", wraps=naming.choose_names) as choose:
+            self.handle(f"go {ISSUE}")
+        self.assertEqual(choose.call_args.args[0], "issue")
+        self.assertEqual(self.spawns()[0][2], "fix/add-login-12")
 
     def test_go_pr_stack_is_one_item_keyed_by_its_bottom(self):
         self.open_prs = [

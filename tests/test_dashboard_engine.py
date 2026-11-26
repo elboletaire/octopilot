@@ -57,6 +57,15 @@ class EngineErrorViewTest(unittest.TestCase):
               "msg": "boot failed: worktree has uncommitted changes"}
         self.assertEqual(dashboard.event_detail(ev), ev["msg"])
 
+    def test_activity_shows_why_a_request_was_refused(self):
+        ev = {"kind": "go-refused", "key": "owner/repo#8", "verb": "go",
+              "reason": "issue is closed"}
+        self.assertEqual(dashboard.event_detail(ev), "issue is closed")
+        ev = {"kind": "request-unknown", "text": "hello there"}
+        self.assertEqual(dashboard.event_detail(ev), "hello there")
+        ev = {"kind": "request-failed", "verb": "no", "error": "RuntimeError: boom"}
+        self.assertEqual(dashboard.event_detail(ev), "RuntimeError: boom")
+
 
 @unittest.skipIf(dashboard is None, "dashboard needs rich")
 class StartHoldsTest(unittest.TestCase):

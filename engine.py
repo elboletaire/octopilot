@@ -1044,8 +1044,9 @@ def do_go(req, ctx):
                             "title,labels"], default=None)
         if not iss:
             return _refuse(ctx, "go", key, "could not read the issue", title=title)
-        branch, title = naming.issue_names(num, iss.get("title") or "",
-                                           iss.get("labels") or [])
+        branch, title = naming.choose_names("issue", number=num,
+                                            title=iss.get("title") or "",
+                                            labels=iss.get("labels") or [])
     else:
         d = scan.pr_detail(slug, num)
         if not d:
@@ -1142,7 +1143,6 @@ def do_investigate(req, ctx):
     """/investigate [--read-only] <repo> <question>: a session for a question, not
     for a GitHub item. The question goes on the item verbatim; the name and
     branch are picked so no other investigation has them."""
-    import naming
     import scan
     repo, question = req.args
     state = scan.load()
@@ -1160,8 +1160,9 @@ def do_investigate(req, ctx):
         held = _held(req, state, snap)
         if held:
             return _hold(ctx, None, title, held)
-        name, branch, title = naming.pick_investigation(
-            question, read_only, state["registry"][slug]["path"], slug,
+        name, branch, title = naming.choose_names(
+            "investigation", question=question, read_only=read_only,
+            repo_path=state["registry"][slug]["path"], repo_slug=slug,
             taken_keys=list(state.get("items", {})),
             taken_branches=[it.get("branch") for it in state.get("items", {}).values()])
         key = scan.key(slug, name, "investigate")
