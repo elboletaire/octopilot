@@ -41,7 +41,7 @@ comment and silently truncates the argument.
    you.
 
    Do not run `gh pr checks` yourself to "see how it's going". The loop sends
-   your heartbeats while it runs -- the orchestrator cannot see background
+   your heartbeats while it runs -- octopilot cannot see background
    jobs, only those -- so do not send any of your own while it is in flight.
    If the job dies, the heartbeats stop and you are reported stalled.
 
@@ -185,18 +185,16 @@ Every stop ends with exactly one report:
 $A report "{{KEY}}" <ready|capped|blocked|failed|stalled> <sha> "<one line>"
 ```
 
-It records the report on your item (the dashboard shows it) and queues the
-`OCTOPILOT {{KEY}} <state> <sha> <one line>` message in the orchestrator's
-inbox. The first line of the message must be that one line -- the
-orchestrator reads it as a status, and a human reads it as a summary. Put any
-detail on the lines after it, inside the same quotes. Never message the
-orchestrator any other way (typing into its terminal): that types
-into its pane, over whatever the user is writing there. Never send desktop
-notifications (`PushNotification`) either: the dashboard tells the user when
-your item needs them.
+It records the report on your item: the dashboard shows its first line to the
+user and notifies them. The first line must be that one line -- the dashboard
+shows it, and a human reads it as a summary. Put any detail on the lines after
+it, inside the same quotes. Never type into the octopilot panes: that types
+over whatever the user is writing there. Never send desktop notifications
+(`PushNotification`) either: the dashboard tells the user when your item needs
+them.
 
 If you are going to be working for more than half an hour without pushing and
 without a CI wait in flight, call
-`$A heartbeat "{{KEY}}" "<what you are doing>"` so the orchestrator does not
-report you as stalled. Being reported stalled is harmless; going quiet without
+`$A heartbeat "{{KEY}}" "<what you are doing>"` so octopilot does not flag you
+as stalled. Being reported stalled is harmless; going quiet without
 a heartbeat and without a final message is what leaves work stranded.
