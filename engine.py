@@ -149,7 +149,7 @@ class Ctx:
     deadline: float = None          # clock() reading past which nothing starts
     clock: Callable = time.monotonic
     merging: frozenset = frozenset()  # keys whose cleanup is planned this run
-    restacked: set = field(default_factory=set)  # identities sent a restack
+    restacked: set = field(default_factory=set)  # identities already covered
 
 
 def _over_budget(ctx):
@@ -392,6 +392,9 @@ def _fan_out(ctx, slug, base, siblings):
         if k in ctx.merging or _identity(state, k) in ctx.restacked:
             continue
         out.append(_send(ctx, k, *_rebase_prompt(slug, base, k, it), "rebase"))
+        # Sent or queued, it rebases onto the base with every merge so far, so
+        # a second merge in this run needs no second prompt for the session.
+        ctx.restacked.add(_identity(scan.load(), k))
     return out
 
 

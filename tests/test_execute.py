@@ -397,6 +397,17 @@ class ExecuteTest(unittest.TestCase):
         self.assertIn("budget spent", deliver_pending(ctx)[0])
         self.assertEqual(self.sends(), [])
 
+    def test_two_merges_in_one_run_rebase_a_sibling_once(self):
+        self.save({MERGED: item(7, "feat/a", "w1"),
+                   STACK: item(10, "feat/m", "w4"),
+                   COMMENT: item(11, "feat/x", "w5"),
+                   A: item(8, "feat/b", "w2")})
+        ctx = self.ctx()
+        execute(Action("cleanup", MERGED, {}), ctx)
+        execute(Action("cleanup", STACK, {}), ctx)
+        self.assertEqual(self.addresses().count("herdr:w2"), 1)
+        self.assertEqual(self.state()["pending_sends"], [])
+
 
 if __name__ == "__main__":
     unittest.main()
