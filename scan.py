@@ -449,6 +449,9 @@ class HcBackend:
     prefix = "hc:"
     noun = "herdr-app space"
     remove_label = "herdr-app space remove"
+    # Tab names the Octopilot space already uses: a worker's tab named one of them
+    # gets its agent's name after it.
+    RESERVED_TABS = ("octopilot", "engine", "octopilot (code changes)")
 
     def spaces(self):
         """Every space herdr-app shows, on any machine; None when herdr-app is
@@ -646,7 +649,16 @@ class HcBackend:
                      if s["id"] == session), None)
 
     def spawn(self, key_, path, wt, title, model):
-        """A space on the worktree, its first terminal running a named claude."""
+        """A worker's tab in the Octopilot space, else a space of its own."""
+        if worker_host() == "tab":
+            sp = octopilot_space()
+            if sp:
+                return self.spawn_tab(sp, key_, path, wt, title, model)
+            print("note: no Octopilot space open; the worker gets a space of its own")
+        return self.spawn_space(key_, path, wt, title, model)
+
+    def spawn_command(self, model):
+        """The argv of a worker's terminal: a named claude on this octopilot."""
         # The terminal inherits herdr-core's login environment, not this one,
         # so the octopilot settings the worker needs travel in its argv.
         env = ["OCTOPILOT_BACKEND=hc", f"OCTOPILOT_DIR={OCTOPILOT_DIR}",
@@ -656,18 +668,65 @@ class HcBackend:
         # one wins.
         settings = plugin_settings()
         plugin = ["--settings", settings] if settings else []
-        argv = (["env"] + env + ["claude"] + plugin
+        return (["env"] + env + ["claude"] + plugin
                 + (["--model", model] if model else []))
+
+    def spawn_space(self, key_, path, wt, title, model):
+        """A space on the worktree, its first terminal running a named claude."""
+        argv = json.dumps(self.spawn_command(model))
         code, data, raw = app_do("space.new", ["--name", title, "--folder", wt,
-                                               "--argv", json.dumps(argv),
-                                               "--focus", "false"], timeout=90)
+                                               "--argv", argv, "--focus", "false"],
+                                 timeout=90)
         if code != 0 or not data or "terminal" not in data:
             raise SystemExit(f"herdr-app space.new failed: {raw}")
         ws, term = data["space"], data["terminal"]
         name = agent_name(key_)
+        warning = self.start_agent(term, wt, path, name, f"space {ws}")
+        return self.host_of(ws, name, wt, warning)
+
+    def spawn_tab(self, sp, key_, path, wt, title, model):
+        """A tab of the Octopilot space on the worktree, its terminal running a
+        named claude. A reserved tab name gets the agent's name after it."""
+        name = agent_name(key_)
+        tab_name = title
+        if title.lower() in self.RESERVED_TABS:
+            tab_name = f"{title} ({name})"
+        argv = json.dumps(self.spawn_command(model))
+        code, data, raw = app_do("tab.new", ["--space", sp, "--name", tab_name,
+                                             "--folder", wt, "--argv", argv,
+                                             "--focus", "false"], timeout=90)
+        if code != 0 or not data or "terminal" not in data:
+            raise SystemExit(f"herdr-app tab.new failed: {raw}")
+        term = data["terminal"]
+        tab = data.get("tab") if isinstance(data.get("tab"), str) else self.tab_of(term)
+        if not tab:
+            raise SystemExit(f"herdr-app tab.new: {term} has no tab label (tab kept)")
+        warning = self.start_agent(term, wt, path, name, f"tab {tab}")
+        if SETTLE_WORKER_TABS:
+            code, _, raw = app_do("tab.settle", ["--id", tab])
+            if code != 0:
+                print(f"note: tab {tab} not settled: {raw}")
+        host = self.host_of(tab, name, wt, warning)
+        host["space"] = sp
+        return host
+
+    def tab_of(self, term):
+        """The tab of a terminal, from its herdr.tab label once herdr-core sets it."""
+        for _ in range(30):
+            _, info, _ = hc(["get", term, "--json"], timeout=10)
+            tab = ((info or {}).get("labels") or {}).get("herdr.tab")
+            if tab:
+                return tab
+            time.sleep(0.5)
+        return None
+
+    def start_agent(self, term, wt, path, name, where):
+        """Label the terminal as the named agent, answer its trust dialog and wait
+        for it to settle -> the warning when it is blocked, else None. where
+        names the host in messages."""
         code, _, raw = hc(["label", term, f"octopilot.agent={name}"])
         if code != 0:
-            raise SystemExit(f"hc label failed (space {ws} kept): {raw}")
+            raise SystemExit(f"hc label failed ({where} kept): {raw}")
         # claude draws its trust dialog a moment after it starts: keep looking
         # for it for a while, then wait for the agent to settle.
         for _ in range(30):
@@ -677,10 +736,17 @@ class HcBackend:
                 break
             time.sleep(1)
         self.wait_idle(term)
-        host = {"backend": self.name, "session": ws, "agent": name, "worktree": wt}
         if self.status(term) == "blocked":
-            host["warning"] = (f"agent {name} is blocked at startup; check "
-                               f"space {ws} before sending it a prompt")
+            return (f"agent {name} is blocked at startup; check {where} "
+                    "before sending it a prompt")
+        return None
+
+    def host_of(self, session, name, wt, warning):
+        """The host a spawn returns: the session, its agent and checkout."""
+        host = {"backend": self.name, "session": session, "agent": name,
+                "worktree": wt}
+        if warning:
+            host["warning"] = warning
         return host
 
 
