@@ -112,7 +112,8 @@ DASHBOARD_REFRESH_SECS=120
 OCTOPILOT_BACKEND="${OCTOPILOT_BACKEND:-herdr}"
 
 # Each tick's action on what it finds: off, plan (logs, changes nothing) or on
-# (the engine acts, in place of the orchestrator). Worktrees always stay off.
+# (the engine acts, in place of the orchestrator). A checkout other than the live
+# one stays off unless OCTOPILOT_STATE_DIR is set.
 OCTOPILOT_ENGINE="${OCTOPILOT_ENGINE:-off}"
 
 # OCTOPILOT_STATE_DIR in the environment points octopilot at another state

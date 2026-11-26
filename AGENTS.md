@@ -68,6 +68,9 @@ git worktree add --no-track -b feat/x .worktrees/feat-x origin/main
 
 ## Testing safely
 
+- **`OCTOPILOT_ENGINE=on` (or `plan`) acts on what the scratch state holds.** A
+  scratch state that carries real sessions makes `on` clean up real worktrees
+  and send real prompts. Use fakes (`tests/fake.py`) or an empty state.
 - **Never test against the live state.** `~/.local/state/octopilot` is the
   running octopilot. Set `OCTOPILOT_STATE_DIR` to a scratch directory, and narrow
   the scan with `HOME_REPOS`, `ISSUE_ORGS` and `CLONE_ROOTS`. Do not start the

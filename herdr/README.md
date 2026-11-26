@@ -263,7 +263,8 @@ they are written, and GitHub (PR state, CI) every `DASHBOARD_REFRESH_SECS`
 (config.sh, 120s) or right after an event that changes the table. Several open
 dashboards share one refresh. GitHub notifications are polled every 60s
 (`NOTIFY_POLL_SECS`) and trigger an early refresh; a new Next tick row rings the
-orchestrator's doorbell once (`request tick`).
+orchestrator's doorbell once (`request tick`). With `OCTOPILOT_ENGINE=on` the
+engine acts on the Next tick rows itself and nothing rings the orchestrator.
 
 ## Keys
 
