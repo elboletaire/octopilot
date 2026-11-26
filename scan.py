@@ -1425,13 +1425,12 @@ def scan(state, refresh=False, info=None):
                                            "reviewing, not posted yet"))
                 continue
             active -= 1
-            # `mine` non-empty: our review is posted, so a pending request for
-            # us is a re-request, not the original one. Once per head, so a
-            # request left pending (e.g. we posted nothing) cannot loop. The
-            # head is only marked done by reboot(), so a scan that is run
-            # again before the row is acted on still returns it.
+            # `mine` non-empty: our review is posted, so a pending request is a
+            # re-request. Once per head (rerequest_head, set by reboot()), so a
+            # request left pending cannot loop.
             if requested and mine and it.get("rerequest_head") != head:
                 if rounds >= MAX_REVIEW_ROUNDS:
+                    it.pop("pending_rerequest", None)
                     rows.append(("CAPPED", k,
                                  f"mode=comment {smeta} head={head[:7]} "
                                  f"rounds={rounds}/{MAX_REVIEW_ROUNDS} "
@@ -1444,6 +1443,8 @@ def scan(state, refresh=False, info=None):
                                           f"round={rounds + 1}/{MAX_REVIEW_ROUNDS} "
                                           "re-requested"))
                 continue
+            # The request was withdrawn before reboot() acted on it.
+            it.pop("pending_rerequest", None)
             if not head.startswith(rv):
                 if it.get("head_seen") != head:
                     it["head_seen"] = head
@@ -2835,13 +2836,18 @@ def plugin_settings():
     return json.dumps({"env": {"CLAUDE_CODE_PLUGIN_DIRS": ":".join(dirs)}})
 
 
-def tick(args):
-    """tick [--quiet]: one scan that records what it finds, then the snapshot.
+def engine_allowed(checkout):
+    """Whether the checkout at `checkout` may run `tick`, which saves state: the
+    live one, or any with a scratch state dir (OCTOPILOT_STATE_DIR). A worktree
+    must not consume the live state's transitions."""
+    if os.environ.get("OCTOPILOT_STATE_DIR"):
+        return True
+    return os.path.realpath(checkout) == os.path.realpath(installed_dir())
 
-    The transitions (unparking, untracking, re-requests) are saved here, so
-    this is the only scan that may run without the dashboard watching: the
-    dashboard's snapshot is the same scan's rows, not a second one.
-    """
+
+def tick(args):
+    """tick [--quiet]: one scan that saves the transitions it finds, and writes
+    the dashboard's snapshot from the same rows."""
     os.makedirs(os.path.dirname(TICK_LOCK), exist_ok=True)
     with open(TICK_LOCK, "w") as lk:
         try:
@@ -2865,7 +2871,7 @@ def tick(args):
             # the table changed, not once per two minutes.
             changed = counts != state.get("tick_counts")
             state["tick_counts"] = counts
-            state["last_tick"] = int(time.time())
+            state["last_scan"] = int(time.time())
             save(state)
             write_snapshot(snapshot_doc(state, state, rows, active, n,
                                         untracked, info))

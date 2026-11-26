@@ -23,7 +23,7 @@ class FakeBackend:
         return 0, ""
 
 
-def pr_detail(slug, number):
+def pr_detail(slug, number, requested=True):
     """PR #5, which we reviewed at REVIEWED; its author re-requested a review."""
     return {"url": f"https://github.com/{slug}/pull/{number}", "title": "Fix it",
             "state": "OPEN", "isDraft": False, "headRefOid": HEAD,
@@ -31,7 +31,7 @@ def pr_detail(slug, number):
             "reviews": [{"author": {"login": ME}, "state": "CHANGES_REQUESTED",
                          "submittedAt": "2026-11-10T10:00:00Z",
                          "commit": {"oid": REVIEWED}, "body": "nit"}],
-            "reviewRequests": [{"login": ME}]}
+            "reviewRequests": [{"login": ME}] if requested else []}
 
 
 def new_state():
@@ -67,3 +67,15 @@ class RerequestTest(unittest.TestCase):
             with contextlib.redirect_stdout(io.StringIO()):
                 scan.dispatch("mark-reviewed", ["mark-reviewed", KEY, HEAD], state)
             self.assertEqual(rows(state), [("DONE", KEY)])
+
+    def test_a_request_withdrawn_before_reboot_drops_the_pending_head(self):
+        state = new_state()
+        asked = [True]
+        with fake.fake_world(pr_detail=lambda slug, number:
+                             pr_detail(slug, number, requested=asked[0])):
+            self.assertEqual(rows(state), [("REVIEW", KEY)])
+            self.assertEqual(state["items"][KEY]["pending_rerequest"], HEAD)
+            asked[0] = False
+            self.assertNotIn(("REVIEW", KEY), rows(state))
+            self.assertNotIn("pending_rerequest", state["items"][KEY])
+            self.assertNotIn("rerequest_head", state["items"][KEY])

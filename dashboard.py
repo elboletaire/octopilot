@@ -184,17 +184,6 @@ def snapshot_rows():
             if isinstance(r, dict) and isinstance(r.get("key"), str)]
 
 
-def engine_allowed():
-    """Whether this checkout's dashboard may run `tick`, which saves state.
-    Only the live checkout (the one settings.json loads) or a scratch state dir
-    (OCTOPILOT_STATE_DIR set) may: a worktree's dashboard must not consume the
-    live state's transitions."""
-    if os.environ.get("OCTOPILOT_STATE_DIR"):
-        return True
-    return (os.path.realpath(scan.OCTOPILOT_DIR)
-            == os.path.realpath(scan.installed_dir()))
-
-
 def ago(secs):
     if secs is None:
         return "–"
@@ -410,10 +399,10 @@ class Model:
                 self.kick.set()
             self.changed.set()
 
-    def refresh_snapshot(self, force=False):
-        """Run a read-only scan, unless another dashboard (the pane and a
-        peek overlay, say) is already running one or ran one recently: they
-        all read the same snapshot.json, so one refresh serves them all."""
+    def refresh_snapshot(self, force=False, verb="snapshot"):
+        """Refresh snapshot.json by running scan.py `verb`, unless another
+        dashboard (the pane and a peek overlay, say) is already running one or
+        ran one recently: they all read the same snapshot.json."""
         if not force:
             gen = (read_json(SNAPSHOT_FILE) or {}).get("generated_at") or 0
             if time.time() - gen < REFRESH_SECS - 5:
@@ -426,7 +415,6 @@ class Model:
                 return
             self.snap_running, self.snap_started = True, time.time()
             self.changed.set()
-            verb = "tick" if engine_allowed() else "snapshot"
             code, _, err = sh([sys.executable, os.path.join(DIR, "scan.py"),
                                verb, "--quiet"], timeout=600)
             with self.lock:
@@ -454,7 +442,8 @@ class Model:
     def github_pass(self, force):
         """One snapshot and doorbell pass; an error must not end the loop."""
         try:
-            self.refresh_snapshot(force)
+            self.refresh_snapshot(force, "tick" if scan.engine_allowed(DIR)
+                                  else "snapshot")
             self.wake_orchestrator()
         except Exception:
             # Silent like notify_loop: the next pass retries.

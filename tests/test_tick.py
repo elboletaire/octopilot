@@ -4,6 +4,7 @@ import io
 import json
 import os
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -39,7 +40,11 @@ class TickTest(unittest.TestCase):
                 snap = json.load(fh)
             self.assertEqual(saved["items"][KEY]["pending_rerequest"], HEAD)
             self.assertEqual(saved["tick_counts"], {"REVIEW": 1})
-            self.assertEqual(saved["last_tick"], snap["last_tick"])
+            # last_tick stays the orchestrator's: the dashboard's ticks must not
+            # hide a dead orchestrator behind a fresh header.
+            self.assertIsInstance(saved["last_scan"], int)
+            self.assertNotIn("last_tick", saved)
+            self.assertIsNone(snap["last_tick"])
             self.assertNotIn("orch", saved)
             self.assertEqual([(r["kind"], r["key"]) for r in snap["rows"]],
                              [("REVIEW", KEY)])
@@ -76,9 +81,33 @@ class TickTest(unittest.TestCase):
         self.assertEqual((code, out), (0, "tick already running\n"))
         self.assertFalse(os.path.exists(scan.STATE_FILE))
 
-    def test_main_runs_tick_without_taking_the_state_lock_first(self):
+    def test_main_does_not_wrap_tick_in_the_state_lock(self):
+        # tick takes the lock itself: main() wrapping it too would deadlock,
+        # so count the entries instead of really locking.
+        entries = []
+
+        @contextlib.contextmanager
+        def counting_lock():
+            entries.append(1)
+            yield
+
         with fake.fake_world(pr_detail=pr_detail), \
+                mock.patch.object(scan, "locked", counting_lock), \
                 mock.patch.object(sys, "argv", ["scan.py", "tick", "--quiet"]):
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(scan.main(), 0)
             self.assertTrue(os.path.exists(scan.SNAPSHOT_FILE))
+        self.assertEqual(len(entries), 1)
+
+    def test_engine_runs_for_a_scratch_state_dir_or_the_installed_checkout(self):
+        with tempfile.TemporaryDirectory() as live, \
+                tempfile.TemporaryDirectory() as worktree, \
+                mock.patch.object(scan, "installed_dir", return_value=live), \
+                mock.patch.object(scan, "OCTOPILOT_DIR", live), \
+                mock.patch.dict(os.environ):
+            os.environ.pop("OCTOPILOT_STATE_DIR", None)
+            self.assertTrue(scan.engine_allowed(live))
+            # OCTOPILOT_DIR inherited from the live shell must not decide.
+            self.assertFalse(scan.engine_allowed(worktree))
+            os.environ["OCTOPILOT_STATE_DIR"] = fake.SCRATCH
+            self.assertTrue(scan.engine_allowed(worktree))

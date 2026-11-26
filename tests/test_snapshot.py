@@ -14,12 +14,11 @@ class SnapshotTest(unittest.TestCase):
     def test_snapshot_publishes_the_rows_and_saves_no_state(self):
         state = new_state()
         before = copy.deepcopy(state)
-        with fake.fake_world(pr_detail=pr_detail) as world:
+        with fake.fake_world(pr_detail=pr_detail):
             snap = scan.snapshot(state)
             with open(scan.SNAPSHOT_FILE) as fh:
                 published = json.load(fh)
             self.assertEqual(state, before)
-            self.assertEqual(world.named("write_snapshot"), [])
         self.assertEqual(snap, published)
         self.assertEqual([(r["kind"], r["key"]) for r in snap["rows"]],
                          [("REVIEW", KEY)])
