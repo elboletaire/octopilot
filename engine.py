@@ -736,7 +736,8 @@ def run_rows(rows, mode, started, clock=time.monotonic):
 # ------------------------------------------------------------------ requests
 #
 # One request, as the prompter and the dashboard queue it (the inbox's
-# `REQUEST <text>`, without the prefix), or one agent report line.
+# `REQUEST <text>`, without the prefix), or an agent report queued as
+# `REQUEST OCTOPILOT ...`. The drain leaves bare report lines for the orchestrator.
 
 Request = namedtuple("Request", "verb args confirmed over_cap")
 
@@ -1005,7 +1006,7 @@ def _behind(path, base, branch):
 
 
 def do_go(req, ctx):
-    """go <target>: work on an issue (a branch named by naming.issue_names), or on
+    """go <target>: work on an issue (a branch named by naming.choose_names), or on
     a PR. A PR's stack is one item, keyed by its bottom layer."""
     import scan
     state = scan.load()
@@ -1046,6 +1047,9 @@ def do_go(req, ctx):
         d = scan.pr_detail(slug, num)
         if not d:
             return _refuse(ctx, "go", key, "could not read the PR", title=title)
+        if d.get("state") != "OPEN":
+            reason = "PR is merged" if d.get("state") == "MERGED" else "PR is closed"
+            return _refuse(ctx, "go", key, reason, title=title)
         layers, err = walk_stack(slug, num, base)
         if err:
             return _refuse(ctx, "go", key, err, title=title)
@@ -1281,7 +1285,8 @@ HANDLERS = {"go": do_go, "no": do_no, "detach": do_detach, "ack": do_ack,
 
 def _handle(req, ctx):
     """One request -> its outcome line, or None when it has nothing to say. A
-    report is dropped: the agent's report is already recorded on its item."""
+    report only gets here as a `REQUEST OCTOPILOT ...` line; it is dropped, since
+    the agent's report is already recorded on its item."""
     if req.verb == "report":
         return None
     if req.verb == "unknown":

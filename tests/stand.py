@@ -45,7 +45,7 @@ class RequestCase(unittest.TestCase):
         self.issue = {"number": 12, "title": "Add login", "labels": [{"name": "bug"}],
                       "state": "OPEN", "body": "", "comments": []}
         self.prs = {31: {"headRefName": "feat/b", "headRefOid": HEAD,
-                         "title": "Second layer"}}
+                         "state": "OPEN", "title": "Second layer"}}
         self.open_prs = [{"number": 31, "headRefName": "feat/b", "baseRefName": "main"}]
         self.behind = False
         self.reply = (True, None)     # what send_to answers

@@ -169,6 +169,15 @@ class GoTest(RequestCase):
         self.assertEqual(self.spawns(), [])
         self.assertEqual([k for k, _, _ in self.logs], ["go-refused"])
 
+    def test_go_refused_on_a_closed_or_merged_pr(self):
+        for state, reason in (("CLOSED", "PR is closed"), ("MERGED", "PR is merged")):
+            with self.subTest(state=state):
+                self.prs[31]["state"] = state
+                self.assertEqual(self.handle(f"go {PR}"),
+                                 f"go {PR} refused: {reason}")
+        self.assertEqual(self.spawns(), [])
+        self.assertEqual([k for k, _, _ in self.logs], ["go-refused", "go-refused"])
+
     def test_go_refused_for_an_uncloned_repo_with_the_clone_hint(self):
         other = "other/repo!4"
         self.snapshot(rows=[{"kind": "UNCLONED", "key": other, "title": "Old"}])
