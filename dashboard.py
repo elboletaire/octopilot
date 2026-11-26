@@ -1027,7 +1027,7 @@ def row_confirm(model, aid, e):
         # An item without a workspace is only untracked by cleanup.
         gone = ("workspace and worktree deleted" if it.get("session")
                 else "worktree kept")
-        return f"{busy}press del (⇧⌫) again to remove {key} ({gone}, untracked)"
+        return f"{busy}press del (⌫) again to remove {key} ({gone}, untracked)"
     return None
 
 
@@ -1777,7 +1777,7 @@ class Dashboard:
         if tracked:
             keys.append(("z", "detach"))
             if kind not in ("MERGED", "RESTACK"):
-                keys.append(("del/⇧⌫", "remove"))
+                keys.append(("del/⌫", "remove"))
             keys.append(("d", "undone" if parked else "done"))
         if not repo:
             keys += [("v", "agent"), ("t", "shell"), ("o", "browser")]
