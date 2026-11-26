@@ -18,7 +18,7 @@
     {
       "id": "7f1c2a10-0202",
       "role": "assistant",
-      "text": "Queued **go acme/widgets#402**. The orchestrator started the worker, and it reports the PR is ready.",
+      "text": "Queued **go acme/widgets#402**. The engine started the worker, and it reports the PR is ready.",
       "at": "2026-11-25T11:40:09Z",
       "tools": [
         "Bash: $A wind-down",

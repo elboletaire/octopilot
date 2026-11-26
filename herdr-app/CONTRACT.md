@@ -11,10 +11,10 @@ actions. `$DIR` is the octopilot code dir (`props().dir`, else
 
 | piece | where | role |
 |---|---|---|
-| headless dashboard | `dashboard.sh --headless` in an hc terminal (parked engine terminal, no pane, see herdr/README.md) | runs every dashboard loop (GitHub refresh, doorbell, notifications, desktop notify, sidebar tokens) and writes `$STATE_DIR/view.json` |
+| headless dashboard | `dashboard.sh --headless` in an hc terminal (parked engine terminal, no pane, see herdr/README.md) | runs every dashboard loop (the GitHub refresh with `scan.py tick`, the engine's `drain`, notifications, desktop notify, sidebar tokens) and writes `$STATE_DIR/view.json` |
 | `octopilot-dashboard` mod | pane in the Octopilot tab | renders view.json, keyboard + mouse, sends actions |
 | `octopilot-chat` mod | pane in the Octopilot tab | the prompter as a chat over its hc terminal |
-| `octopilot-kitchen` mod | pane above the `octopilot-chat` mod, in the Octopilot tab, 300 px tall (split down from the chat, then swapped above it by open-gui.sh) | the takoyaki kitchen chef: reads view.json `pan` and `kitchen`, and `scan.sh speech` for the orchestrator's last message. Props: `dir`, `state_dir`, `pane_name`. Its pane is named (role and checkout hash) by open-gui.sh with `pane.rename`, and the mod finds its pane by `pane_name` (its machine, see Remote spaces) |
+| `octopilot-kitchen` mod | pane above the `octopilot-chat` mod, in the Octopilot tab, 300 px tall (split down from the chat, then swapped above it by open-gui.sh) | the takoyaki kitchen chef: reads view.json `pan` and `kitchen`, and `scan.sh speech` for the engine's last lines. Props: `dir`, `state_dir`, `pane_name`. Its pane is named (role and checkout hash) by open-gui.sh with `pane.rename`, and the mod finds its pane by `pane_name` (its machine, see Remote spaces) |
 | `herdr/open-gui.sh` | launcher | builds the space, starts terminals with `--session-id` (through the user's shell, so the gateway env reaches claude), shows the engine terminals in a third tab (`--hide-engine` parks them), gives the code agent its own tab (its claude, never parked), opens the mods: the OCTOPILOT tab is the kitchen over the chat on the left, the dashboard on the right |
 | `octopilot-launcher` mod | palette entry "Open Octopilot" (no view) | runs `herdr/open-gui.sh --close-launcher` in a new tab |
 | `herdr-app/install.sh` | installer | symlinks mods into `~/.config/herdr-app/mods/`, removes links of ours that point into this checkout's mods but whose mod (folder without `mod.json`) is gone, and deletes that folder when it holds only herdr's generated files (`gpui-kit.d.ts`, `jsconfig.json`; never a foreign link, a real folder, or a folder with any other file), adds the `octopilot` program to `programs.json`, removes a `layouts/octopilot.json` of ours (older versions wrote one; no layout is written now); `--key` also binds ctrl-alt-o |
@@ -138,7 +138,7 @@ filtering uses `hidden`/`open` fields).
 ## Actions: `dashboard.sh --action <id> [key] [--arg name=value …]`
 
 Runs the same code path as the TUI key (refusals, messages, wind-down rules). Prints one JSON line:
-`{"ok": true, "message": "queued for the orchestrator: go …"}`.
+`{"ok": true, "message": "queued 'go …'"}`.
 `go` past wind-down without `--arg confirmed=1` returns `{"ok": false, "kitchen": true, "holds": ["wind-down"], "message": "🍳 The kitchen is closed (past 16:00)"}`;
 the mod shows the held-start dialog ("Start held") and re-sends with `confirmed=1`. Same for `investigate`.
 At the cap (slots in use, as the header counts them, plus items started since the snapshot, `>= MAX_ACTIVE`) a go or
@@ -158,7 +158,7 @@ Focus/peek/shell on hc rows may be done by the mod directly with `run()` using `
 
 ## Speech and chat (scan.py)
 
-Both agents are started by open-gui.sh with `claude --session-id <uuid>` and labelled
+The prompter and the code agent are started by open-gui.sh with `claude --session-id <uuid>` and labelled
 `octopilot.session=<uuid>`. The transcript is found from the claude running in the
 terminal: `hc get <t> --json` gives `foreground.pid` (when `foreground.name` is
 `claude`), `~/.claude/sessions/<pid>.json` gives its `sessionId` (used only when its
@@ -166,13 +166,15 @@ terminal: `hc get <t> --json` gives `foreground.pid` (when `foreground.name` is
 `~/.claude/projects/*/<sessionId>.jsonl`. A `/clear` starts a new session, so this
 follows it; the `octopilot.session` label is only the fallback when no claude is in
 the foreground (a live session with no transcript yet gives none, not the stale
-label). There is no guess from the terminal's folder (the orchestrator and the
-prompter share one). The chat reports the session it read; with `--after`, a session
+label). There is no guess from the terminal's folder (the prompter and the code
+agent share one). The chat reports the session it read; with `--after`, a session
 that changed (unknown anchor, or no transcript yet) answers `"reset": true`.
 
-- `scan.sh speech --json` → `{"agent": "hc:t7", "terminal": "t7", "status": "working|blocked|idle|done|offline",
-  "paused": false, "text": "<last orchestrator assistant message, markdown>", "at": "<ISO>", "seq": 41}`
-  (`seq` is a CRC-32 of the message id and text: it changes whenever the text does).
+- `scan.sh speech --json` → `{"agent": "hc:t7", "terminal": "t7", "status": "working|blocked|idle|offline",
+  "paused": false, "text": "- <engine line>\n- …", "at": "<ISO>", "seq": 41}`
+  (`text` and `at` are `header.engine.last`'s lines as `- ` bullets and its time. `working` while the engine acts,
+  `blocked` for a hung run, `offline` with no view or the engine off. `seq` is a CRC-32 of `at` and the text: it
+  changes whenever they do).
 - `scan.sh chat --json [--after <id>] [--limit 50]` → `{"terminal": "t8", "session": "<uuid>", "status": "…",
   "blocked": {"kind": "permission|question|auth", "msg": "…"} | null, "reset": false,
   "messages": [{"id": "<transcript uuid>", "role": "user|assistant", "text": "markdown", "at": "<ISO>", "tools": ["Bash: $A status"]}]}`.

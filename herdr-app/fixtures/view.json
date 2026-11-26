@@ -978,13 +978,13 @@
               "id": "go",
               "key": "g",
               "label": "go",
-              "confirm": "press g again to send 'go acme/gizmo-ui!12' to the orchestrator"
+              "confirm": "press g again to queue 'go acme/gizmo-ui!12'"
             },
             {
               "id": "no",
               "key": "n",
               "label": "no",
-              "confirm": "press n again to send 'no acme/gizmo-ui!12' to the orchestrator"
+              "confirm": "press n again to decline acme/gizmo-ui!12"
             }
           ],
           "driver": null,
@@ -1034,13 +1034,13 @@
               "id": "go",
               "key": "g",
               "label": "go",
-              "confirm": "press g again to send 'go acme/explorer#47' to the orchestrator"
+              "confirm": "press g again to queue 'go acme/explorer#47'"
             },
             {
               "id": "no",
               "key": "n",
               "label": "no",
-              "confirm": "press n again to send 'no acme/explorer#47' to the orchestrator"
+              "confirm": "press n again to decline acme/explorer#47"
             }
           ],
           "driver": null,
@@ -1090,13 +1090,13 @@
               "id": "go",
               "key": "g",
               "label": "go",
-              "confirm": "press g again to send 'go acme/skills#60' to the orchestrator"
+              "confirm": "press g again to queue 'go acme/skills#60'"
             },
             {
               "id": "no",
               "key": "n",
               "label": "no",
-              "confirm": "press n again to send 'no acme/skills#60' to the orchestrator"
+              "confirm": "press n again to decline acme/skills#60"
             }
           ],
           "driver": null,
@@ -1146,13 +1146,13 @@
               "id": "go",
               "key": "g",
               "label": "go",
-              "confirm": "press g again to send 'go acme/widgets!1742' to the orchestrator"
+              "confirm": "press g again to queue 'go acme/widgets!1742'"
             },
             {
               "id": "no",
               "key": "n",
               "label": "no",
-              "confirm": "press n again to send 'no acme/widgets!1742' to the orchestrator"
+              "confirm": "press n again to decline acme/widgets!1742"
             }
           ],
           "driver": null,
@@ -1197,13 +1197,13 @@
               "id": "go",
               "key": "g",
               "label": "go",
-              "confirm": "press g again to send 'go acme/widgets!1797' to the orchestrator"
+              "confirm": "press g again to queue 'go acme/widgets!1797'"
             },
             {
               "id": "no",
               "key": "n",
               "label": "no",
-              "confirm": "press n again to send 'no acme/widgets!1797' to the orchestrator"
+              "confirm": "press n again to decline acme/widgets!1797"
             }
           ],
           "driver": null,
@@ -1248,13 +1248,13 @@
               "id": "go",
               "key": "g",
               "label": "go",
-              "confirm": "press g again to send 'go acme/widgets#1832' to the orchestrator"
+              "confirm": "press g again to queue 'go acme/widgets#1832'"
             },
             {
               "id": "no",
               "key": "n",
               "label": "no",
-              "confirm": "press n again to send 'no acme/widgets#1832' to the orchestrator"
+              "confirm": "press n again to decline acme/widgets#1832"
             }
           ],
           "driver": null,
@@ -1299,13 +1299,13 @@
               "id": "go",
               "key": "g",
               "label": "go",
-              "confirm": "press g again to send 'go acme/widgets#2058' to the orchestrator"
+              "confirm": "press g again to queue 'go acme/widgets#2058'"
             },
             {
               "id": "no",
               "key": "n",
               "label": "no",
-              "confirm": "press n again to send 'no acme/widgets#2058' to the orchestrator"
+              "confirm": "press n again to decline acme/widgets#2058"
             }
           ],
           "driver": null,
@@ -1350,13 +1350,13 @@
               "id": "go",
               "key": "g",
               "label": "go",
-              "confirm": "press g again to send 'go acme/widgets#2072' to the orchestrator"
+              "confirm": "press g again to queue 'go acme/widgets#2072'"
             },
             {
               "id": "no",
               "key": "n",
               "label": "no",
-              "confirm": "press n again to send 'no acme/widgets#2072' to the orchestrator"
+              "confirm": "press n again to decline acme/widgets#2072"
             }
           ],
           "driver": null,
@@ -1406,13 +1406,13 @@
               "id": "go",
               "key": "g",
               "label": "go",
-              "confirm": "press g again to send 'go acme/gizmo-sdk!66' to the orchestrator"
+              "confirm": "press g again to queue 'go acme/gizmo-sdk!66'"
             },
             {
               "id": "no",
               "key": "n",
               "label": "no",
-              "confirm": "press n again to send 'no acme/gizmo-sdk!66' to the orchestrator"
+              "confirm": "press n again to decline acme/gizmo-sdk!66"
             }
           ],
           "driver": null,
@@ -1457,13 +1457,13 @@
               "id": "go",
               "key": "g",
               "label": "go",
-              "confirm": "press g again to send 'go acme/gizmo-sdk!85' to the orchestrator"
+              "confirm": "press g again to queue 'go acme/gizmo-sdk!85'"
             },
             {
               "id": "no",
               "key": "n",
               "label": "no",
-              "confirm": "press n again to send 'no acme/gizmo-sdk!85' to the orchestrator"
+              "confirm": "press n again to decline acme/gizmo-sdk!85"
             }
           ],
           "driver": null,
@@ -1508,13 +1508,13 @@
               "id": "go",
               "key": "g",
               "label": "go",
-              "confirm": "press g again to send 'go acme/gizmo-sdk#93' to the orchestrator"
+              "confirm": "press g again to queue 'go acme/gizmo-sdk#93'"
             },
             {
               "id": "no",
               "key": "n",
               "label": "no",
-              "confirm": "press n again to send 'no acme/gizmo-sdk#93' to the orchestrator"
+              "confirm": "press n again to decline acme/gizmo-sdk#93"
             }
           ],
           "driver": null,
@@ -1559,13 +1559,13 @@
               "id": "go",
               "key": "g",
               "label": "go",
-              "confirm": "press g again to send 'go acme/gizmo-sdk#132' to the orchestrator"
+              "confirm": "press g again to queue 'go acme/gizmo-sdk#132'"
             },
             {
               "id": "no",
               "key": "n",
               "label": "no",
-              "confirm": "press n again to send 'no acme/gizmo-sdk#132' to the orchestrator"
+              "confirm": "press n again to decline acme/gizmo-sdk#132"
             }
           ],
           "driver": null,
@@ -1615,13 +1615,13 @@
               "id": "go",
               "key": "g",
               "label": "go",
-              "confirm": "press g again to send 'go acme/node!1496' to the orchestrator"
+              "confirm": "press g again to queue 'go acme/node!1496'"
             },
             {
               "id": "no",
               "key": "n",
               "label": "no",
-              "confirm": "press n again to send 'no acme/node!1496' to the orchestrator"
+              "confirm": "press n again to decline acme/node!1496"
             }
           ],
           "driver": null,
@@ -1671,13 +1671,13 @@
               "id": "go",
               "key": "g",
               "label": "go",
-              "confirm": "press g again to send 'go acme/gizmo-client#460' to the orchestrator"
+              "confirm": "press g again to queue 'go acme/gizmo-client#460'"
             },
             {
               "id": "no",
               "key": "n",
               "label": "no",
-              "confirm": "press n again to send 'no acme/gizmo-client#460' to the orchestrator"
+              "confirm": "press n again to decline acme/gizmo-client#460"
             }
           ],
           "driver": null,
@@ -1727,13 +1727,13 @@
               "id": "go",
               "key": "g",
               "label": "go",
-              "confirm": "press g again to send 'go acme/site!132' to the orchestrator"
+              "confirm": "press g again to queue 'go acme/site!132'"
             },
             {
               "id": "no",
               "key": "n",
               "label": "no",
-              "confirm": "press n again to send 'no acme/site!132' to the orchestrator"
+              "confirm": "press n again to decline acme/site!132"
             }
           ],
           "driver": null,
@@ -1778,13 +1778,13 @@
               "id": "go",
               "key": "g",
               "label": "go",
-              "confirm": "press g again to send 'go acme/site#232' to the orchestrator"
+              "confirm": "press g again to queue 'go acme/site#232'"
             },
             {
               "id": "no",
               "key": "n",
               "label": "no",
-              "confirm": "press n again to send 'no acme/site#232' to the orchestrator"
+              "confirm": "press n again to decline acme/site#232"
             }
           ],
           "driver": null,
@@ -1829,13 +1829,13 @@
               "id": "go",
               "key": "g",
               "label": "go",
-              "confirm": "press g again to send 'go acme/site#279' to the orchestrator"
+              "confirm": "press g again to queue 'go acme/site#279'"
             },
             {
               "id": "no",
               "key": "n",
               "label": "no",
-              "confirm": "press n again to send 'no acme/site#279' to the orchestrator"
+              "confirm": "press n again to decline acme/site#279"
             }
           ],
           "driver": null,
@@ -1880,13 +1880,13 @@
               "id": "go",
               "key": "g",
               "label": "go",
-              "confirm": "press g again to send 'go acme/site#287' to the orchestrator"
+              "confirm": "press g again to queue 'go acme/site#287'"
             },
             {
               "id": "no",
               "key": "n",
               "label": "no",
-              "confirm": "press n again to send 'no acme/site#287' to the orchestrator"
+              "confirm": "press n again to decline acme/site#287"
             }
           ],
           "driver": null,

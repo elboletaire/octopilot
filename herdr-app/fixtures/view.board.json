@@ -742,13 +742,13 @@
               "id": "go",
               "key": "g",
               "label": "go",
-              "confirm": "press g again to send 'go acme/widgets!457' to the orchestrator"
+              "confirm": "press g again to queue 'go acme/widgets!457'"
             },
             {
               "id": "no",
               "key": "n",
               "label": "no",
-              "confirm": "press n again to send 'no acme/widgets!457' to the orchestrator"
+              "confirm": "press n again to decline acme/widgets!457"
             },
             {
               "id": "browser",
