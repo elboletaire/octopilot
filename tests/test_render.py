@@ -1,5 +1,4 @@
 import unittest
-from unittest import mock
 
 from tests import fake  # noqa: F401  (imported first: sets the environment)
 import scan
@@ -53,8 +52,7 @@ class RenderForTest(unittest.TestCase):
         # orchestrator; rendering must not touch the herdr panes to do it.
         subs = {"REPO": "octo/app", "PR": "1", "BRANCH": "x", "BASE": "main",
                 "KEY": "octo/app#1", "CONTEXT": "none"}
-        with fake.fake_world(), mock.patch.object(
-                scan, "current_orch", side_effect=AssertionError("asked")):
+        with fake.fake_world():
             scan.render_for({"items": {}}, "review-fix", subs)
         self.assertNotIn("ORCH", subs)
 

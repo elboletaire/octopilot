@@ -405,22 +405,6 @@ class HerdrBackend:
             raw = err or out
         return code, raw
 
-    def current(self):
-        """Address of the agent running this command, if it is a herdr agent.
-        In herdr the orchestrator needs a name others can address; an unnamed
-        agent is named ORCH_AGENT on the spot."""
-        pane = os.environ.get("HERDR_PANE_ID")
-        if not pane or not shutil.which("herdr"):
-            return None
-        code, data, _ = herdr(["agent", "get", pane])
-        a = ((data or {}).get("result") or {}).get("agent") or {}
-        if code != 0 or not a:
-            return None
-        name = a.get("name")
-        if not name and herdr(["agent", "rename", pane, ORCH_AGENT])[0] == 0:
-            name = ORCH_AGENT
-        return f"herdr:{name or pane}"
-
     def spawn(self, key_, path, wt, title, model):
         """A herdr workspace on the worktree, running a named claude agent."""
         code, data, raw = herdr(["worktree", "open", "--cwd", path, "--path", wt,
@@ -603,16 +587,6 @@ class HcBackend:
         return next((s["path"] for s in self.sessions(spaces) or []
                      if s["id"] == session), None)
 
-    def current(self):
-        """This terminal's address when it is the orchestrator, i.e. labelled
-        octopilot.agent=octopilot. The user's own claude is not."""
-        tid = os.environ.get("HC_TERMINAL_ID")
-        if not tid or not shutil.which("hc"):
-            return None
-        _, info, _ = hc(["get", tid, "--json"], timeout=10)
-        labels = (info or {}).get("labels") or {}
-        return f"hc:{tid}" if labels.get("octopilot.agent") == ORCH_AGENT else None
-
     def spawn(self, key_, path, wt, title, model):
         """A space on the worktree, its first terminal running a named claude."""
         # The terminal inherits herdr-core's login environment, not this one,
@@ -735,17 +709,6 @@ def send_to(address, text):
     """-> (ok, error code or message)."""
     backend, target = split_address(address)
     return backend.send(target, text)
-
-
-def current_orch():
-    """Address of the agent running this command, if it is one. The TUI is
-    asked first, so it wins when both ran the command."""
-    backends = [HERDR, HC] if OCTOPILOT_BACKEND == "hc" else [HERDR]
-    for backend in backends:
-        address = backend.current()
-        if address:
-            return address
-    return None
 
 
 def sid(session_id):
@@ -2319,9 +2282,9 @@ def render(rows, active, nrepos, state, untracked=0):
     wd = wind_down()
     if wd:
         extra += f"   WIND_DOWN {wd} (from {WIND_DOWN_AT})"
-    shown = inbox_shown(state.get("inbox") or [])
-    if shown:
-        extra += f"   INBOX {len(shown)} (run inbox)"
+    box = state.get("inbox") or []
+    if box:
+        extra += f"   INBOX {len(box)} (run inbox)"
     print(f"PAUSED {'yes' if state.get('paused') else 'no'}   "
           f"REPOS {nrepos}   ACTIVE {active}/{MAX_ACTIVE}{extra}")
     rows.sort(key=row_order)
@@ -2521,12 +2484,10 @@ REPORT_STATES = ("ready", "capped", "blocked", "failed", "stalled")
 def report(state, args):
     """report <key> <state> <sha> <message...> [--to <session>]
 
-    Records the agent's final report on its item and queues it in the
-    orchestrator's inbox as the `OCTOPILOT <key> <state> <sha> <message>`
-    line it already parses. The dashboard shows it from the item.
+    Records the agent's final report on its item and logs it as a `report`
+    event: the dashboard, the kitchen and the Needs-you list show it from there.
 
-    `--to` is accepted and ignored: agents spawned before the inbox still
-    pass it.
+    `--to` is accepted and ignored: agents spawned earlier still pass it.
     """
     if "--to" in args:
         i = args.index("--to")
@@ -2545,8 +2506,8 @@ def report(state, args):
     it = state["items"].get(k)
     if it is None:
         # Detached or cleaned up while its agent was still mid-turn: nobody
-        # is waiting for this, and the orchestrator must not act on it. Keep
-        # a neutral trace in the log (no doorbell) and tell the agent to stop.
+        # is waiting for this, so nothing acts on it. Keep a neutral trace in
+        # the log and tell the agent to stop.
         log_event("orphan-report", k, state=st, sha=sha[:7], msg=msg[:300])
         print(f"{k} is no longer tracked by octopilot (detached or cleaned "
               "up): report not delivered. Stop here; there is nothing left "
@@ -2555,12 +2516,8 @@ def report(state, args):
     it["last_report"] = {"state": st, "sha": sha, "msg": msg[:300], "at": now}
     it["last_seen"] = now
     save(state)
-    # Into the orchestrator's inbox, never typed into its pane: a typed
-    # prompt lands on whatever the user is half-way through writing there
-    # and sends it. The log line below is what its Monitor wakes on.
-    to_inbox(state, f"OCTOPILOT {args[1]} {st} {sha} {msg}".rstrip())
     log_event("report", k, state=st, sha=sha[:7], msg=msg[:300])
-    print(f"reported {k} {st} -> inbox")
+    print(f"reported {k} {st}")
     return 0
 
 
@@ -2601,33 +2558,20 @@ def to_inbox(state, text):
     save(state)
 
 
-def inbox_shown(box):
-    """The messages `inbox` prints: with the engine on, its REQUEST lines are the
-    engine's (drain), so only the reports are the orchestrator's."""
-    if engine_mode() == "on":
-        return [m for m in box if not m["text"].startswith("REQUEST ")]
-    return list(box)
-
-
 def inbox(state):
-    """Print and clear the orchestrator's pending messages, oldest first.
-
-    Agent reports print as the `OCTOPILOT <key> <state> <sha> <message>` line
-    they always were; dashboard requests as `REQUEST <command>`. Continuation
-    lines are indented, so every message starts at column 0. With the engine
-    on, the requests are the engine's (drain): they stay queued for it."""
+    """List the queued requests, oldest first, without clearing them: the
+    engine's drain takes them. Continuation lines are indented, so every
+    message starts at column 0."""
+    print("pending requests (the engine drains them; act on none)")
     box = state.get("inbox") or []
-    shown = inbox_shown(box)
-    if not shown:
+    if not box:
         print("(inbox empty)")
         return 0
-    for m in shown:
+    for m in box:
         first, *rest = m["text"].splitlines() or [""]
         print(f"{time.strftime('%H:%M', time.localtime(m['at']))} {first}")
         for line in rest:
             print(f"    {line}")
-    state["inbox"] = [m for m in box if m not in shown]
-    save(state)
     return 0
 
 
@@ -2967,7 +2911,7 @@ def chat_keys(args):
 
 SELF_LOCKING = {"tick", "drain"}
 READ_ONLY = {"render", "status", "siblings", "snapshot", "wind-down", "plugin-settings",
-             "installed-dir", "speech", "chat", "chat-send", "chat-keys"}
+             "inbox", "installed-dir", "speech", "chat", "chat-send", "chat-keys"}
 
 
 def claude_plugin_dirs():
@@ -3058,8 +3002,11 @@ def exec_lock():
 
 
 def tick(args):
-    """tick [--quiet] [--plan]: one scan that saves the transitions it finds,
-    writes the dashboard's snapshot from the same rows, then runs the engine."""
+    """tick [--quiet] [--plan] [--refresh] [--legacy]: one scan that saves the
+    transitions it finds, writes the dashboard's snapshot from the same rows,
+    then runs the engine. `scan` and `refresh` are this command with --legacy:
+    an orchestrator still running them is told to stop, and gets no engine rows."""
+    mode = engine_mode(args)
     os.makedirs(os.path.dirname(TICK_LOCK), exist_ok=True)
     with open(TICK_LOCK, "w") as lk:
         try:
@@ -3070,7 +3017,8 @@ def tick(args):
         with locked():
             state = load()
             info = {}
-            rows, active, n, untracked = scan(state, info=info)
+            rows, active, n, untracked = scan(state, refresh="--refresh" in args,
+                                              info=info)
             for k, reason in info["revived"]:
                 log_event("unpark", k, reason=reason)
             for kind, k, _ in rows:
@@ -3083,32 +3031,45 @@ def tick(args):
             # the table changed, not once per two minutes.
             changed = counts != state.get("tick_counts")
             state["tick_counts"] = counts
-            state["last_scan"] = int(time.time())
+            state["last_tick"] = int(time.time())
+            state.pop("orch", None)
             save(state)
             write_snapshot(snapshot_doc(state, state, rows, active, n,
                                         untracked, info))
             if changed:
                 log_event("tick", active=active, counts=counts)
+            # `shown` is only what is printed: the engine below gets every row.
+            shown = rows
+            if "--legacy" in args and mode == "on":
+                # The engine acts on these kinds itself: the table leaves them out.
+                import engine
+                print("octopilot has no orchestrator any more: stop ticking, "
+                      "the engine acts on every row")
+                shown = [r for r in rows if r[0] not in engine.PLANNED]
             if "--quiet" not in args:
-                render(rows, active, n, state, untracked)
-        mode = engine_mode(args)
-        if mode == "off" and "--plan" in args:
+                render(shown, active, n, state, untracked)
+        if mode == "off" and "--plan" in args and "--quiet" not in args:
             print(f"engine off here: {OCTOPILOT_DIR} is not the live checkout "
                   "and OCTOPILOT_STATE_DIR is unset")
         if mode != "off":
             import engine
             with exec_lock() as held:
                 # The budget counts from here: the scan is not the engine's to pay for.
-                lines = (engine.run_rows(rows, mode, time.monotonic()) if held
-                         else ["engine busy: another run acts, the next tick does"])
-            if "--quiet" not in args and lines:
+                if held:
+                    lines = engine.run_rows(rows, mode, time.monotonic())
+                elif "--quiet" not in args:
+                    lines = ["engine busy: another run acts, the next tick does"]
+                else:
+                    lines = []
+            if lines:
                 print("\n".join(lines))
     return 0
 
 
 def drain(args):
     """drain [--quiet] [--plan]: handle the inbox's requests in order, then the
-    queued sends. The dashboard runs it quiet when a request or report lands."""
+    queued sends. The dashboard runs it quiet when a request lands; --quiet
+    hides only the off and busy notices, never the outcome lines."""
     mode = engine_mode(args)
     if mode == "off":
         if "--quiet" not in args:
@@ -3122,7 +3083,7 @@ def drain(args):
                 print("engine busy: another run acts, the drain retries later")
             return 0
         lines = engine.drain(mode, time.monotonic())
-    if "--quiet" not in args and lines:
+    if lines:
         print("\n".join(lines))
     return 0
 
@@ -3130,6 +3091,12 @@ def drain(args):
 def main():
     args = sys.argv[1:]
     cmd = args[0] if args else "scan"
+    # scan and refresh are tick: mapped before the lock checks below, or tick
+    # would take the state lock twice in one process and deadlock.
+    if cmd in ("scan", "refresh"):
+        args = ["tick", *args[1:], "--legacy"]
+        args += ["--refresh"] if cmd == "refresh" else []
+        cmd = "tick"
     if cmd in READ_ONLY:
         return dispatch(cmd, args, load())
     # These take the state lock themselves, step by step, rather than for the
@@ -3147,37 +3114,6 @@ def dispatch(cmd, args, state):
         return tick(args)
     if cmd == "drain":
         return drain(args)
-    if cmd in ("scan", "refresh"):
-        info = {}
-        rows, active, n, untracked = scan(state, refresh=(cmd == "refresh"),
-                                          info=info)
-        for k, reason in info["revived"]:
-            log_event("unpark", k, reason=reason)
-        state["last_tick"] = int(time.time())
-        # The orchestrator is whoever runs the tick; remembering it here lets
-        # `report` and the dashboard reach it without being told.
-        orch = current_orch()
-        if orch:
-            state["orch"] = orch
-        save(state)
-        shown = rows
-        if engine_mode() == "on":
-            # The engine acts on these kinds itself; the orchestrator must not.
-            import engine
-            print("ENGINE  acts on MERGED, RESTACK, REVIEW, BOOTING and FEEDBACK, and "
-                  "takes the REQUEST lines of the inbox; not listed here")
-            shown = [r for r in rows if r[0] not in engine.PLANNED]
-        render(shown, active, n, state, untracked)
-        if state.get("code_pending"):
-            sent, err = send_code(state)
-            left = len(state.get("code_pending") or [])
-            print(f"CODE     {sent} queued request(s) delivered to {CODE_AGENT}"
-                  + (f", {left} still pending ({err})" if left else ""))
-        counts = {}
-        for kind, _, _ in rows:
-            counts[kind] = counts.get(kind, 0) + 1
-        log_event("tick", active=active, counts=counts)
-        return 0
     if cmd == "snapshot":
         snap = snapshot(state)
         if "--quiet" not in args:
@@ -3188,15 +3124,15 @@ def dispatch(cmd, args, state):
     if cmd == "inbox":
         return inbox(state)
     if cmd == "request":
-        # A command from the dashboard (go/no/re-review/investigate...),
-        # queued for the orchestrator the same way agent reports are.
+        # A command from the dashboard or the prompter (go/no/re-review/
+        # investigate...), queued for the engine's drain.
         text = " ".join(args[1:]).strip()
         if not text:
             print("usage: request <command...>", file=sys.stderr)
             return 1
         to_inbox(state, f"REQUEST {text}")
         log_event("request", text=text[:200])
-        print(f"queued for the orchestrator: {text}")
+        print(f"queued: {text}")
         return 0
     if cmd == "send":
         # send <key> <text...>: prompt the item's agent, wherever it runs.
@@ -3212,7 +3148,7 @@ def dispatch(cmd, args, state):
         if err:
             # Kept, not dropped: the tab may just be closed for now.
             print(f"{CODE_AGENT}: {err} -- kept, {len(state['code_pending'])} "
-                  "pending; every tick retries them. Do not resend.")
+                  "pending; the engine retries them on its next run. Do not resend.")
             return 0
         print(f"sent to {CODE_AGENT}" + (f" ({sent} with earlier queued)"
                                          if sent > 1 else ""))
@@ -3489,7 +3425,7 @@ def dispatch(cmd, args, state):
         return 0
 
     print(f"unknown command: {cmd}", file=sys.stderr)
-    print("usage: scan.sh [scan|refresh|drain|status|pause|resume|decline|undecline|"
+    print("usage: scan.sh [tick|drain|status|pause|resume|decline|undecline|"
           "track|untrack|detach|park|unpark|set-phase|mark-reviewed|claim-round|heartbeat|"
           "reset-rounds|review-base|"
           "mark-merged|restack|"

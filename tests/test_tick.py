@@ -40,11 +40,9 @@ class TickTest(unittest.TestCase):
                 snap = json.load(fh)
             self.assertEqual(saved["items"][KEY]["pending_rerequest"], HEAD)
             self.assertEqual(saved["tick_counts"], {"REVIEW": 1})
-            # last_tick stays the orchestrator's: the dashboard's ticks must not
-            # hide a dead orchestrator behind a fresh header.
-            self.assertIsInstance(saved["last_scan"], int)
-            self.assertNotIn("last_tick", saved)
-            self.assertIsNone(snap["last_tick"])
+            self.assertIsInstance(saved["last_tick"], int)
+            self.assertNotIn("last_scan", saved)
+            self.assertIsInstance(snap["last_tick"], int)
             self.assertNotIn("orch", saved)
             self.assertEqual([(r["kind"], r["key"]) for r in snap["rows"]],
                              [("REVIEW", KEY)])
