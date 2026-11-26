@@ -74,8 +74,9 @@ git worktree add --no-track -b feat/x .worktrees/feat-x origin/main
   orchestrator or spawn workers on the live checkout to try a change. Dashboard
   loops (`--headless`, the TUI) started from the live checkout save to the live
   state through `tick`, so never run them there without `OCTOPILOT_STATE_DIR`. A
-  scratch-state tick still makes read-only `gh search` queries against the real
-  account; `HOME_REPOS`, `ISSUE_ORGS` and `CLONE_ROOTS` don't narrow those.
+  scratch-state tick still makes read-only `gh search prs` queries against the
+  whole real account: `HOME_REPOS` and `CLONE_ROOTS` don't narrow those (only
+  `ISSUE_ORGS` narrows the issue search).
 - **Unit tests**: `python3 -m unittest discover -s tests -v` from the repo root.
 - **GUI test space**: `open-gui.sh` refuses without `OCTOPILOT_STATE_DIR`. Run it
   from your worktree, then close the test space with

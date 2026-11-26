@@ -2181,9 +2181,8 @@ def parse_extra(extra):
 def snapshot(state):
     """Run a scan on a throwaway copy of the state and publish it as JSON.
 
-    Nothing is saved: the transitions this scan finds wait for the next tick.
-    Only idempotent ones are safe to repeat, which is why a dashboard's tick
-    may save first (a re-request is, through pending_rerequest).
+    Nothing is saved: this runs where `tick` may not (see engine_allowed), and
+    a worktree must not consume the live state's transitions.
     """
     work = copy.deepcopy(state)
     info = {}

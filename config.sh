@@ -102,7 +102,8 @@ OCTOPILOT_ORCH=""
 # is global, so it works from any folder.
 OCTOPILOT_ORCH_CWD="$HOME/src"
 
-# How often the dashboard re-reads GitHub (a scan its tick saves), in seconds.
+# How often the dashboard re-reads GitHub (through tick, or a read-only snapshot
+# in a worktree), in seconds.
 # Agent state and octopilot events update instantly; only PR/CI data waits for this.
 DASHBOARD_REFRESH_SECS=120
 
