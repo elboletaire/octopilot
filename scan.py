@@ -1628,16 +1628,6 @@ def split_key(k):
                      f"or owner/repo?investigation)")
 
 
-def orchestrator_session(state=None):
-    """Address of the orchestrator, for the agent to report back to.
-
-    The session rendering the prompt is the orchestrator, so its own address
-    wins; the recorded one is the fallback. A stale address would silently
-    swallow every agent report.
-    """
-    return current_orch() or orchestrator_target(state or load())
-
-
 def issue_context(slug, number, body_max=8000, comment_max=1500, keep=8):
     """The issue, verbatim, for splicing into the prompt.
 
@@ -1707,8 +1697,6 @@ def render_prompt(name, subs):
     if "{{STACK_LOOP}}" in body:
         with open(os.path.join(pdir, "shared", "stack-loop.md")) as fh:
             subs.setdefault("STACK_LOOP", fh.read().strip())
-    if "{{ORCH}}" in body or "{{LOOP}}" in body or "{{STACK_LOOP}}" in body:
-        subs.setdefault("ORCH", orchestrator_session())
     # Set unconditionally: FIND_MODEL and VERIFY_MODEL also live inside the
     # LOOP fragment, not only in the template body, so an `in body` test would
     # never fire.
@@ -1764,6 +1752,27 @@ def render_prompt(name, subs):
             continue
         body = body.replace("{{" + k + "}}", str(v))
     return re.sub(r"\{\{[A-Z_]+\}\}", "", body).strip()
+
+
+def render_for(state, template, subs):
+    """The prompt `template` renders to for `subs`, with the facts of the item
+    it is for (KEY, question, branch, stack, read-only) filled in from state.
+    Mutates `subs`; the caller's own KEY=VAL values win over the item's."""
+    if "KEY" not in subs and subs.get("REPO") and subs.get("PR"):
+        # BOOTING rows send no KEY: a layer's PR resolves to its stack.
+        found = item_key_for(state, subs["REPO"], subs["PR"])
+        if found:
+            subs["KEY"] = found
+    it_ = state.get("items", {}).get(subs.get("KEY", ""), {})
+    if it_.get("question"):
+        subs.setdefault("QUESTION", it_["question"])
+        subs.setdefault("BRANCH", it_.get("branch", ""))
+    if it_.get("stack"):
+        subs.setdefault("STACK", stack_text(it_["stack"]))
+    # A read-only item never gets a prompt that tells it to commit and
+    # open a PR, whatever template the caller asked for.
+    tmpl = "investigate-readonly" if it_.get("read_only") else template
+    return render_prompt(tmpl, subs)
 
 
 def resolve_mode(slug, num, kind, me):
@@ -1835,8 +1844,19 @@ def check_stack(slug, num, branch, base, layers, me):
     return modes
 
 
-def spawn(state, key_, branch, title, new_branch, question=None,
-          read_only=False, stack_spec=None):
+def spawn_item(state, key_, branch, title, new_branch, question=None,
+               read_only=False, stack_spec=None):
+    """Create the item's worktree and session, and track it.
+
+    Raises SystemExit on a refusal (unknown repo, a stack that does not check
+    out, a session already open on the branch), on a failed git fetch, and when
+    the host cannot start the session. A host failure can come after
+    add_worktree has created the worktree, which is left in place.
+
+    -> {"ok", "error", "key", "template", "base", "slug", "prev", "stack",
+    "warning", "model"}: ok is always True here (refusals raise), template is
+    the prompt to render, prev the sha a re-review follows (or None), stack the
+    parsed layers (or None), warning the host's startup warning (or None)."""
     me = whoami(state)
     slug, num, kind = split_key(key_)
     reg = state.get("registry", {})
@@ -1907,19 +1927,30 @@ def spawn(state, key_, branch, title, new_branch, question=None,
     save(state)
     log_event("spawn", key_, mode=mode, branch=branch, session=item["session"],
               title=title)
+    return {"ok": True, "error": None, "key": key_, "template": tmpl, "base": base,
+            "slug": slug, "prev": reviewed, "stack": stack,
+            "warning": host.get("warning"), "model": model}
 
-    where = " ".join(f"{k}={v}" for k, v in host.items()
-                     if k not in ("session", "warning", "backend"))
-    print(f"spawned {key_} mode={mode} branch={branch} "
-          f"session={item['session']} {where} model={model or 'default'}")
-    if host.get("warning"):
-        print(f"WARNING: {host['warning']}")
+
+def spawn(state, key_, branch, title, new_branch, question=None,
+          read_only=False, stack_spec=None):
+    """spawn <key> <branch> <title> [--new] [--stack "PR:branch ..."]: prints
+    what the orchestrator needs to send the first prompt."""
+    r = spawn_item(state, key_, branch, title, new_branch, question=question,
+                   read_only=read_only, stack_spec=stack_spec)
+    it = state["items"][key_]
+    where = f"agent={it['agent']} worktree={it['worktree']}"
+    print(f"spawned {key_} mode={it['mode']} branch={branch} "
+          f"session={it['session']} {where} model={r['model'] or 'default'}")
+    if r["warning"]:
+        print(f"WARNING: {r['warning']}")
+    tmpl, prev = r["template"], r["prev"]
     print(f"next: `$A send {key_} ...` with the '{tmpl}' prompt"
-          + (" (PREV= from the last line)" if reviewed else ""))
-    prev = f" PREV={reviewed}" if reviewed else ""
-    print(f"PROMPT_TEMPLATE={tmpl} BASE={base} REPO={slug}{prev}")
-    if stack:
-        print(f"STACK=\"{stack_text(stack)}\"")
+          + (" (PREV= from the last line)" if prev else ""))
+    prev_arg = f" PREV={prev}" if prev else ""
+    print(f"PROMPT_TEMPLATE={tmpl} BASE={r['base']} REPO={r['slug']}{prev_arg}")
+    if r["stack"]:
+        print(f"STACK=\"{stack_text(r['stack'])}\"")
     return 0
 
 
@@ -2005,9 +2036,7 @@ def siblings(state, slug, exclude=None):
     return out
 
 
-def print_siblings(state, slug, exclude=None):
-    base = state.get("registry", {}).get(slug, {}).get("base", "main")
-    rows = siblings(state, slug, exclude)
+def print_sibling_rows(rows, base):
     if not rows:
         print("SIBLINGS: none")
         return
@@ -2018,75 +2047,98 @@ def print_siblings(state, slug, exclude=None):
         print(f"  {it['session']} {it['branch']} {it['pr']} {base} {k}{marker}")
 
 
-def cleanup(state, key_):
-    """Remove a merged item's session and worktree, then mark it handled."""
+def print_siblings(state, slug, exclude=None):
+    base = state.get("registry", {}).get(slug, {}).get("base", "main")
+    print_sibling_rows(siblings(state, slug, exclude), base)
+
+
+def cleanup_item(state, key_):
+    """Remove a merged item's session and worktree, then mark it handled.
+
+    -> {"ok", "error", "msg", "discard_error", "siblings", "base"}: error is the
+    refusal (untracked item); msg is the text the CLI prints for it, including
+    the failed discard line; discard_error is the backend's message when its
+    discard failed, which does not stop the cleanup; siblings is the rebase
+    fan-out set afterwards and base the repo's base branch."""
     it = state.get("items", {}).get(key_)
     if not it:
-        print(f"{key_} is not tracked; nothing to clean up", file=sys.stderr)
-        return 1
+        return {"ok": False, "error": f"{key_} is not tracked; nothing to clean up",
+                "msg": None, "discard_error": None, "siblings": [], "base": None}
+    lines, discard_error = [], None
     sess = it.get("session")
     backend = backend_for(sess)
     if backend:
         code, raw = backend.discard(sess, it.get("worktree"))
-        print(f"{backend.remove_label} {sess}: {'ok' if code == 0 else raw}")
+        lines.append(f"{backend.remove_label} {sess}: {'ok' if code == 0 else raw}")
+        if code != 0:
+            discard_error = raw
     if key_ not in state["handled_merges"]:
         state["handled_merges"].append(key_)
     state["items"].pop(key_, None)
     save(state)
     log_event("cleanup", key_)
-    print(f"cleaned up {key_}")
+    lines.append(f"cleaned up {key_}")
     slug = key_.split("#")[0].split("!")[0]
-    print_siblings(state, slug)
+    return {"ok": True, "error": None, "msg": "\n".join(lines),
+            "discard_error": discard_error, "siblings": siblings(state, slug),
+            "base": state.get("registry", {}).get(slug, {}).get("base", "main")}
+
+
+def cleanup(state, key_):
+    """cleanup <key>: remove a merged item's session and worktree."""
+    r = cleanup_item(state, key_)
+    if not r["ok"]:
+        print(r["error"], file=sys.stderr)
+        return 1
+    print(r["msg"])
+    print_sibling_rows(r["siblings"], r["base"])
     return 0
 
 
-def restack(state, k):
+def restack_item(state, k):
     """Drop a stack's merged bottom layers and re-key the item to the new
     bottom. Its session and worktree stay; everything else on the item moves
-    with it. A single layer left is no stack: the item becomes a plain PR."""
+    with it. A single layer left is no stack: the item becomes a plain PR.
+
+    -> {"ok", "error", "new_key", "template", "subs", "siblings"}: error is the
+    refusal the CLI prints (stderr); on success template and subs are the next
+    prompt to render, and siblings the rebase fan-out set without the item."""
+    def refused(error):
+        return {"ok": False, "error": error, "new_key": None, "template": None,
+                "subs": {}, "siblings": [], "base": None}
+
     k = resolve_key(state, k)
     it = state.get("items", {}).get(k)
     if it is None:
-        print(f"unknown item {k}", file=sys.stderr)
-        return 1
+        return refused(f"unknown item {k}")
     if not it.get("stack"):
-        print(f"{k} is not a stack", file=sys.stderr)
-        return 1
+        return refused(f"{k} is not a stack")
     if it.get("mode") != "fix":
-        print(f"{k} is mode={it.get('mode')}: never restacked, nothing of "
-              "theirs is pushed to", file=sys.stderr)
-        return 1
+        return refused(f"{k} is mode={it.get('mode')}: never restacked, nothing "
+                       "of theirs is pushed to")
     slug = k.split("#")[0]
     # Asked again rather than taken from the row: the row is one tick old.
     merged, left = stack_rest(it, lambda pr: pr_detail(slug, pr))
     if not merged:
-        print(f"{k}: the bottom PR is not merged; nothing to restack",
-              file=sys.stderr)
-        return 1
+        return refused(f"{k}: the bottom PR is not merged; nothing to restack")
     if not left:
-        print(f"{k}: every layer is merged; cleanup takes it from here",
-              file=sys.stderr)
-        return 1
+        return refused(f"{k}: every layer is merged; cleanup takes it from here")
     nxt = left[0]
     nk = key(slug, nxt["pr"])
     if nk in state["items"]:
-        print(f"{nk} is already tracked", file=sys.stderr)
-        return 1
+        return refused(f"{nk} is already tracked")
     nxt_d = pr_detail(slug, nxt["pr"])
     if nxt_d is None:
-        print(f"{k}: gh pr view failed for #{nxt['pr']}", file=sys.stderr)
-        return 1
+        return refused(f"{k}: gh pr view failed for #{nxt['pr']}")
     if nxt_d.get("state") == "CLOSED":
-        print(f"{k}: #{nxt['pr']} is closed, not merged; the stack cannot "
-              "restack past it -- you decide", file=sys.stderr)
-        return 1
+        return refused(f"{k}: #{nxt['pr']} is closed, not merged; the stack "
+                       "cannot restack past it -- you decide")
     # rebase-stack replays the layers above from this head, passed on the
     # command line: a squash merge leaves it out of base's history.
     top_head = (pr_detail(slug, merged[-1]["pr"]) or {}).get("headRefOid")
     if not top_head:
-        print(f"{k}: could not read the merged head of #{merged[-1]['pr']}",
-              file=sys.stderr)
-        return 1
+        return refused(f"{k}: could not read the merged head of "
+                       f"#{merged[-1]['pr']}")
     base = state.get("registry", {}).get(slug, {}).get("base", "main")
 
     for layer in merged:
@@ -2109,16 +2161,134 @@ def restack(state, k):
     save(state)
     gone = ",".join(f"#{layer['pr']}" for layer in merged)
     log_event("restack", nk, old=k, merged=gone, next=f"#{nxt['pr']}")
-    print(f"restacked {k} -> {nk} branch={nxt['branch']} "
-          f"layers={len(left)} session={sid(it.get('session'))}")
     if len(left) > 1:
-        print(f"next: `$A send {nk} \"$($A render rebase-stack REPO={slug} "
-              f"BASE={base} KEY={nk} RESTACK_FROM={top_head})\"`")
+        template = "rebase-stack"
+        subs = {"REPO": slug, "BASE": base, "KEY": nk, "RESTACK_FROM": top_head}
     else:
-        print(f"next: `$A send {nk} \"$($A render rebase REPO={slug} "
-              f"PR={nxt['pr']} BRANCH={nxt['branch']} BASE={base})\"`")
-    print_siblings(state, slug, exclude=nk)
+        template = "rebase"
+        subs = {"REPO": slug, "PR": nxt["pr"], "BRANCH": nxt["branch"], "BASE": base}
+    return {"ok": True, "error": None, "new_key": nk, "template": template,
+            "subs": subs, "siblings": siblings(state, slug, exclude=nk),
+            "base": base}
+
+
+def restack(state, k):
+    """restack <key>: drop a stack's merged bottom layers and re-key it."""
+    k = resolve_key(state, k)
+    r = restack_item(state, k)
+    if not r["ok"]:
+        print(r["error"], file=sys.stderr)
+        return 1
+    nk, subs = r["new_key"], r["subs"]
+    it = state["items"][nk]
+    layers = len(it["stack"]) if it.get("stack") else 1
+    print(f"restacked {k} -> {nk} branch={it['branch']} "
+          f"layers={layers} session={sid(it.get('session'))}")
+    if r["template"] == "rebase-stack":
+        print(f"next: `$A send {nk} \"$($A render rebase-stack REPO={subs['REPO']} "
+              f"BASE={subs['BASE']} KEY={nk} RESTACK_FROM={subs['RESTACK_FROM']})\"`")
+    else:
+        print(f"next: `$A send {nk} \"$($A render rebase REPO={subs['REPO']} "
+              f"PR={subs['PR']} BRANCH={subs['BRANCH']} BASE={subs['BASE']})\"`")
+    print_sibling_rows(r["siblings"], r["base"])
     return 0
+
+
+def mark_reviewed(state, k, sha):
+    """Record a review of `k` at `sha`: the item moves to fixing and counts one
+    more round. -> {"ok", "error", "round"}; error names an untracked item."""
+    it = state["items"].get(k)
+    if it is None:
+        return {"ok": False, "error": f"{k} is not tracked", "round": None}
+    it["reviewed_sha"] = sha
+    it["phase"] = "fixing"
+    it["review_rounds"] = int(it.get("review_rounds", 0)) + 1
+    save(state)
+    log_event("reviewed", k, sha=sha[:7], round=it["review_rounds"])
+    return {"ok": True, "error": None, "round": it["review_rounds"]}
+
+
+def mark_feedback(state, k, since, pr=None):
+    """Move `k`'s feedback watermark to `since` and reset its review rounds. On a
+    stack, `pr` names the layer whose watermark moves; a plain PR ignores it.
+    -> {"ok", "error", "pr"}: error names an untracked item or a `pr` that is
+    not one of the stack's layers."""
+    it = state["items"].get(k)
+    if it is None:
+        return {"ok": False, "error": f"{k} is not tracked", "pr": None}
+    if it.get("stack"):
+        if pr not in [layer["pr"] for layer in it["stack"]]:
+            names = " ".join(str(layer["pr"]) for layer in it["stack"])
+            return {"ok": False, "pr": None, "error": f"{k} is a stack: name one "
+                    f"of its layers ({names})"}
+        it.setdefault("layer_seen", {})[str(pr)] = since
+    else:
+        pr = None
+        it["feedback_seen"] = since
+    it["review_rounds"] = 0
+    it.pop("capped_at", None)
+    save(state)
+    log_event("feedback", k, since=since, pr=pr)
+    return {"ok": True, "error": None, "pr": pr}
+
+
+def decline(state, keys):
+    """Add `keys` to the declined list, each once, and log each. -> {"ok",
+    "error", "added"}: added holds the keys this call added."""
+    added = []
+    for k in keys:
+        if k not in state["declined"]:
+            state["declined"].append(k)
+            added.append(k)
+    save(state)
+    for k in keys:
+        log_event("decline", k)
+    return {"ok": True, "error": None, "added": added}
+
+
+def ack_push(state, k):
+    """The user has seen the PUSHED flag: stop flagging this head. A re-request
+    or a further push brings the PR back. -> {"ok", "error", "push_acked"}; error
+    names an untracked item or one without a PR yet."""
+    it = state["items"].get(k)
+    if it and it.get("pr"):
+        d = pr_detail(k.split("#")[0], it["pr"]) or {}
+        it["push_acked"] = d.get("headRefOid")
+        save(state)
+        return {"ok": True, "error": None, "push_acked": it["push_acked"]}
+    return {"ok": False, "error": f"unknown item {k}", "push_acked": None}
+
+
+def detach_item(state, k):
+    """Close the item's workspace or space, keep its worktree and branch, and
+    drop the item so it holds no slot (it is proposed again). -> {"ok", "error",
+    "msg"}: msg is the line to print on success; error is the refusal."""
+    it = state["items"].get(k)
+    if not it:
+        return {"ok": False, "error": f"unknown item {k}", "msg": None}
+    sess = it.get("session")
+    backend = backend_for(sess)
+    if backend:
+        code, raw = backend.close(sess)
+        if code != 0:
+            return {"ok": False, "error": f"{backend.noun} close failed: {raw}",
+                    "msg": None}
+    state["items"].pop(k)
+    save(state)
+    log_event("detach", k, branch=it.get("branch"))
+    worktree = f", worktree kept at {it['worktree']}" if it.get("worktree") \
+        else ", worktree kept"
+    return {"ok": True, "error": None,
+            "msg": (f"detached {k} session={sid(sess)} branch={it.get('branch')} "
+                    f"-> workspace closed{worktree}, untracked")}
+
+
+def set_paused(state, paused):
+    """Pause or resume the orchestrator's work. -> {"ok", "error", "paused"}."""
+    state["paused"] = paused
+    save(state)
+    log_event("pause" if paused else "resume")
+    return {"ok": True, "error": None, "paused": paused}
 
 
 ORDER = ["MERGED", "RESTACK", "REVIEW", "FEEDBACK", "BOOTING", "WORKING",
@@ -2986,21 +3156,7 @@ def dispatch(cmd, args, state):
     if cmd == "render":
         # render <template> KEY=VAL ...
         subs = dict(kv.split("=", 1) for kv in args[2:] if "=" in kv)
-        if "KEY" not in subs and subs.get("REPO") and subs.get("PR"):
-            # BOOTING rows send no KEY: a layer's PR resolves to its stack.
-            found = item_key_for(state, subs["REPO"], subs["PR"])
-            if found:
-                subs["KEY"] = found
-        it_ = state.get("items", {}).get(subs.get("KEY", ""), {})
-        if it_.get("question"):
-            subs.setdefault("QUESTION", it_["question"])
-            subs.setdefault("BRANCH", it_.get("branch", ""))
-        if it_.get("stack"):
-            subs.setdefault("STACK", stack_text(it_["stack"]))
-        # A read-only item never gets a prompt that tells it to commit and
-        # open a PR, whatever template the caller asked for.
-        tmpl = "investigate-readonly" if it_.get("read_only") else args[1]
-        print(render_prompt(tmpl, subs))
+        print(render_for(state, args[1], subs))
         return 0
     if cmd == "spawn":
         # spawn <key> <branch> <title> [--new] [--stack "PR:branch ..."]
@@ -3027,18 +3183,10 @@ def dispatch(cmd, args, state):
         print(json.dumps(state, indent=2, sort_keys=True))
         return 0
     if cmd in ("pause", "resume"):
-        state["paused"] = cmd == "pause"
-        save(state)
-        log_event(cmd)
-        print(f"paused={state['paused']}")
+        print(f"paused={set_paused(state, cmd == 'pause')['paused']}")
         return 0
     if cmd == "decline":
-        for k in args[1:]:
-            if k not in state["declined"]:
-                state["declined"].append(k)
-        save(state)
-        for k in args[1:]:
-            log_event("decline", k)
+        decline(state, args[1:])
         print("declined:", " ".join(args[1:]))
         return 0
     if cmd == "undecline":
@@ -3094,16 +3242,12 @@ def dispatch(cmd, args, state):
     if cmd == "ack-push":
         # ack-push <key>: the user has seen the PUSHED flag; stop flagging this
         # head. A re-request or a further push brings the PR back.
-        k = args[1]
-        it = state["items"].get(k)
-        if it and it.get("pr"):
-            d = pr_detail(k.split("#")[0], it["pr"]) or {}
-            it["push_acked"] = d.get("headRefOid")
-            save(state)
-            print(f"{k} push_acked={str(it['push_acked'])[:7]}")
-            return 0
-        print(f"unknown item {k}", file=sys.stderr)
-        return 1
+        r = ack_push(state, args[1])
+        if not r["ok"]:
+            print(r["error"], file=sys.stderr)
+            return 1
+        print(f"{args[1]} push_acked={str(r['push_acked'])[:7]}")
+        return 0
     if cmd == "park":
         # park <key>: the dashboard's `d` moves a card to Done. Unlike detach
         # the workspace stays open and the item stays tracked; it just holds
@@ -3146,25 +3290,11 @@ def dispatch(cmd, args, state):
         # detach <key>: close its workspace or space, keep the worktree and
         # branch, and drop the item so it holds no slot (it is proposed again).
         # Reverse by hand: reopen the worktree, start claude in it, then `track`.
-        k = args[1]
-        it = state["items"].get(k)
-        if not it:
-            print(f"unknown item {k}", file=sys.stderr)
+        r = detach_item(state, args[1])
+        if not r["ok"]:
+            print(r["error"], file=sys.stderr)
             return 1
-        sess = it.get("session")
-        backend = backend_for(sess)
-        if backend:
-            code, raw = backend.close(sess)
-            if code != 0:
-                print(f"{backend.noun} close failed: {raw}", file=sys.stderr)
-                return 1
-        state["items"].pop(k)
-        save(state)
-        log_event("detach", k, branch=it.get("branch"))
-        print(f"detached {k} session={sid(sess)} branch={it.get('branch')} "
-              "-> workspace closed"
-              f", worktree kept{' at ' + it['worktree'] if it.get('worktree') else ''}"
-              ", untracked")
+        print(r["msg"])
         return 0
     if cmd == "untrack":
         for k in args[1:]:
@@ -3188,37 +3318,24 @@ def dispatch(cmd, args, state):
         # mark-feedback <key> <since> [<layer PR>]: a stack needs the layer's
         # PR, so one layer's mark never hides another layer's feedback.
         k, when = args[1], args[2]
-        if k in state["items"]:
-            it = state["items"][k]
-            pr = None
-            if it.get("stack"):
-                pr = int(args[3]) if len(args) > 3 and args[3].isdigit() else None
-                if pr not in [layer["pr"] for layer in it["stack"]]:
-                    print(f"{k} is a stack: name one of its layers "
-                          f"({' '.join(str(layer['pr']) for layer in it['stack'])})",
-                          file=sys.stderr)
-                    return 1
-                it.setdefault("layer_seen", {})[str(pr)] = when
-            else:
-                it["feedback_seen"] = when
-            it["review_rounds"] = 0
-            it.pop("capped_at", None)
-            save(state)
-            log_event("feedback", k, since=when, pr=pr)
-            layer = f" layer=#{pr}" if pr else ""
-            print(f"{k}{layer} feedback_seen={when} rounds=0")
+        pr = int(args[3]) if len(args) > 3 and args[3].isdigit() else None
+        r = mark_feedback(state, k, when, pr)
+        if not r["ok"]:
+            # An untracked key is a silent no-op.
+            if k in state["items"]:
+                print(r["error"], file=sys.stderr)
+                return 1
+            return 0
+        layer = f" layer=#{r['pr']}" if r["pr"] else ""
+        print(f"{k}{layer} feedback_seen={when} rounds=0")
         return 0
     if cmd == "mark-reviewed":
         k, sha = args[1], args[2]
-        if k in state["items"]:
-            it = state["items"][k]
-            it["reviewed_sha"] = sha
-            it["phase"] = "fixing"
-            it["review_rounds"] = int(it.get("review_rounds", 0)) + 1
-            save(state)
-            log_event("reviewed", k, sha=sha[:7], round=it["review_rounds"])
-            print(f"{k} reviewed={sha[:7]} "
-                  f"round={it['review_rounds']}/{MAX_REVIEW_ROUNDS}")
+        r = mark_reviewed(state, k, sha)
+        if not r["ok"]:
+            # An untracked key is a silent no-op.
+            return 0
+        print(f"{k} reviewed={sha[:7]} round={r['round']}/{MAX_REVIEW_ROUNDS}")
         return 0
     if cmd == "review-base":
         # The base sha a review merged the PR into, so a later base move
