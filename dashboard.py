@@ -89,7 +89,7 @@ META_TTL_MS = 10 * 60 * 1000   # sidebar tokens vanish if the dashboard dies
 META_EVERY = 180               # re-push unchanged tokens before they expire
 KICK_DEBOUNCE = 15     # min seconds between event-triggered GitHub refreshes
 CONFIRM_SECS = 4       # window for the second press of g / n / P
-KITCHEN_SECS = 15      # the kitchen-closed alert cancels itself after this
+KITCHEN_SECS = 15      # the held-start alert cancels itself after this
 KITCHEN_GRACE = 0.5    # a g this soon after the alert opened is a typed-ahead
                        # ggg, not a confirmation of something seen
 # Appended to a request the user already confirmed past WIND_DOWN_AT.
@@ -1579,7 +1579,7 @@ class Dashboard:
         return Group(*head, pick, *tail)
 
     def kitchen(self):
-        """The kitchen-closed alert, alone and centered on the screen."""
+        """The held-start alert (wind-down or cap), alone and centered on the screen."""
         key, title, _, message, _ = self.alert
         body = Text(justify="center")
         body.append(f"{message}\n\n", style="bold red")
