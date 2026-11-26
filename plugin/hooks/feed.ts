@@ -47,7 +47,7 @@ const isDone = (b: Ball) => b.state === 'done'
 // (../../herdr-app/CONTRACT.md). `at` is the view's generated_at, in ms.
 export type EngineView = { acting: boolean; at: number }
 
-// The headless dashboard rewrites the view every 5 s at most, so a view older
+// The headless dashboard rewrites the view at least every 5 s, so a view older
 // than this is stale (no dashboard running).
 export const ENGINE_STALE_MS = 15000
 
