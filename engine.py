@@ -9,6 +9,7 @@ Rows must come from the tick's saved scan, not from snapshot()'s copy: a
 forward re-key (issue key -> PR key) is not mapped by prev_keys, so an issue
 row cannot be followed to the PR it became.
 """
+import re
 import time
 from collections import namedtuple
 from dataclasses import dataclass, field
@@ -719,3 +720,69 @@ def run_rows(rows, mode, started, clock=time.monotonic):
     lines += delivered
     lines += _deliver_code()
     return lines
+
+
+# ------------------------------------------------------------------ requests
+#
+# One request, as the prompter and the dashboard queue it (the inbox's
+# `REQUEST <text>`, without the prefix), or one agent report line.
+
+Request = namedtuple("Request", "verb args confirmed over_cap")
+
+# Appended by the kitchen-closed dialog and by the prompter, after the user
+# confirmed a request past wind-down or over MAX_ACTIVE.
+CONFIRMED_PAST = "(confirmed past wind-down)"
+CONFIRMED_OVER = "(confirmed over cap)"
+
+ONE_TARGET = ("go", "no", "detach", "re-review", "ack")
+NO_ARGS = ("pause", "resume", "tick")
+INVESTIGATE = re.compile(r"/investigate\s+(--read-only\s+)?(\S+)\s+(.+)", re.DOTALL)
+CODE = re.compile(r"/octopilot-code\s+(.+)", re.DOTALL)
+
+
+def _strip_confirmations(text):
+    """-> (text, confirmed past wind-down, confirmed over cap). Only markers at
+    the very end count: one inside a question is part of the question."""
+    confirmed = over_cap = False
+    text = text.rstrip()
+    while text.endswith((CONFIRMED_PAST, CONFIRMED_OVER)):
+        if text.endswith(CONFIRMED_PAST):
+            confirmed = True
+            text = text[:-len(CONFIRMED_PAST)]
+        else:
+            over_cap = True
+            text = text[:-len(CONFIRMED_OVER)]
+        text = text.rstrip()
+    return text, confirmed, over_cap
+
+
+def parse_request(text):
+    """A queued request or report line -> Request. Anything outside the grammar
+    is verb "unknown" with the text as given, for the caller to refuse."""
+    unknown = Request("unknown", (text,), False, False)
+    line = text.strip()
+    # A report's message is the agent's own text: no confirmation markers.
+    if line.startswith("OCTOPILOT "):
+        parts = line.split(maxsplit=4)
+        if len(parts) < 4:
+            return unknown
+        msg = parts[4] if len(parts) > 4 else ""
+        return Request("report", (parts[1], parts[2], parts[3], msg), False, False)
+    line, confirmed, over_cap = _strip_confirmations(line)
+    m = INVESTIGATE.fullmatch(line)
+    if m:
+        read_only, repo, question = m.groups()
+        verb = "investigate-read-only" if read_only else "investigate"
+        return Request(verb, (repo, question), confirmed, over_cap)
+    m = CODE.fullmatch(line)
+    if m:
+        return Request("code", (m.group(1),), confirmed, over_cap)
+    words = line.split(maxsplit=1)
+    if not words:
+        return unknown
+    verb, rest = words[0], (words[1] if len(words) > 1 else "")
+    if verb in ONE_TARGET and len(rest.split()) == 1:
+        return Request(verb, (rest,), confirmed, over_cap)
+    if verb in NO_ARGS and not rest:
+        return Request(verb, (), confirmed, over_cap)
+    return unknown
