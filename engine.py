@@ -9,11 +9,14 @@ Rows must come from the tick's saved scan, not from snapshot()'s copy: a
 forward re-key (issue key -> PR key) is not mapped by prev_keys, so an issue
 row cannot be followed to the PR it became.
 """
+import json
 import re
 import time
 from collections import namedtuple
 from dataclasses import dataclass, field
 from typing import Callable
+
+import naming
 
 # Row kinds the executor acts on, and the action each one becomes.
 PLANNED = {"MERGED": "cleanup", "RESTACK": "restack", "REVIEW": "review",
@@ -163,6 +166,8 @@ class Ctx:
     clock: Callable = time.monotonic
     merging: frozenset = frozenset()  # keys whose cleanup is planned this run
     restacked: set = field(default_factory=set)  # identities already covered
+    need_tick: bool = False  # a `tick` request: left to the next scheduled tick
+    spawned: int = 0         # sessions this run started, counted against the cap
 
 
 def _over_budget(ctx):
@@ -909,3 +914,192 @@ def walk_stack(slug, num, base):
     if rows is None:
         return None, f"could not list the open PRs of {slug}"
     return stack_from(rows, num, base)
+
+
+# ------------------------------------------------------------ starting work
+#
+# The request handlers. Each takes one Request and returns its outcome line, or
+# None for a report (already recorded on its item). A refusal or a hold is
+# logged and the request is consumed: the user asks again rather than the
+# engine retrying it.
+
+def _snapshot():
+    """The last tick's snapshot, or {} before the first one. Read only: a request
+    resolves against the rows the user is looking at."""
+    import scan
+    try:
+        with open(scan.SNAPSHOT_FILE) as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {}
+
+
+def _refuse(ctx, verb, key, reason, **fields):
+    """A request that cannot be done, logged with why."""
+    kind = "go-refused" if verb == "go" else "request-refused"
+    ctx.log(kind, key, verb=verb, reason=reason, **fields)
+    return f"{verb} {key} refused: {reason}" if key else f"{verb} refused: {reason}"
+
+
+def _hold(ctx, key, title, reason):
+    """A start that the wind-down or the cap holds back: logged, not retried."""
+    ctx.log("held", key, title=title, reason=reason)
+    return f"{key or 'request'} held ({reason}): {title}"
+
+
+def _held(req, snap, ctx):
+    """Why a session may not start now -> "wind-down", "cap" or None. A request
+    confirmed past wind-down passes that; one confirmed over the cap passes the cap."""
+    import scan
+    if scan.wind_down() == "yes" and not req.confirmed:
+        return "wind-down"
+    slots = (int(snap.get("active") or 0) + int(snap.get("untracked") or 0)
+             + ctx.spawned)
+    if slots >= scan.MAX_ACTIVE and not req.over_cap:
+        return "cap"
+    return None
+
+
+def _tracked(state, key):
+    """The key of the item holding `key`: itself, a key it was re-keyed from, or
+    the stack a PR is a layer of. None when nothing does."""
+    import scan
+    found, _ = locate_item(state, key)
+    if found:
+        return found
+    slug, num, kind = scan.split_key(key)
+    return (scan.item_key_for(state, slug, num) or None) if kind == "pr" else None
+
+
+def _row_title(rows, key):
+    """The title the snapshot shows for `key`, else the key itself."""
+    return next((r["title"] for r in rows if r["key"] == key and r.get("title")), key)
+
+
+def _base(state, slug):
+    return state.get("registry", {}).get(slug, {}).get("base", "main")
+
+
+def _repo_for(state, token):
+    """The registry slug a request names: exact, or the one slug ending in
+    /token -> (slug, error)."""
+    slugs = list(state.get("registry", {}))
+    if token in slugs:
+        return token, None
+    found = sorted(s for s in slugs if s.endswith("/" + token))
+    if not found:
+        return None, f"{token} is not in the registry: clone it under CLONE_ROOTS first"
+    if len(found) > 1:
+        return None, f"{token} is ambiguous: {' '.join(found)}"
+    return found[0], None
+
+
+def _behind(path, base, branch):
+    """True when origin/<branch> does not contain origin/<base>: a rebase is due.
+    Reads the refs the spawn just fetched."""
+    import scan
+    code, _, _ = scan.sh(["git", "-C", path, "merge-base", "--is-ancestor",
+                          f"origin/{base}", f"origin/{branch}"])
+    return code != 0
+
+
+def do_go(req, ctx):
+    """go <target>: work on an issue (a branch named by naming.issue_names), or on
+    a PR. A PR's stack is one item, keyed by its bottom layer."""
+    import scan
+    state = scan.load()
+    snap = _snapshot()
+    rows = snap.get("rows", [])
+    key, err = resolve_target(req.args[0], state, rows)
+    if err:
+        return _refuse(ctx, "go", None, err)
+    title = _row_title(rows, key)
+    slug, num, kind = scan.split_key(key)
+    if kind == "investigate":
+        return _refuse(ctx, "go", key, "an investigation starts with /investigate",
+                       title=title)
+    tracked = _tracked(state, key)
+    if tracked:
+        return _refuse(ctx, "go", key, f"already tracked as {tracked}", title=title)
+    if slug not in state.get("registry", {}):
+        return _refuse(ctx, "go", key, f"{slug} has no local clone under CLONE_ROOTS: "
+                       "clone it first", title=title)
+    held = _held(req, snap, ctx)
+    if held:
+        return _hold(ctx, key, title, held)
+
+    # The GitHub reads come first: the state lock below is held through the
+    # spawn's git fetch, and only the work prompt's issue context reads GitHub.
+    base = _base(state, slug)
+    layers, stack_spec, start = None, None, key
+    if kind == "issue":
+        iss = scan.gh_json(["issue", "view", str(num), "-R", slug, "--json",
+                            "title,labels"], default=None)
+        if not iss:
+            return _refuse(ctx, "go", key, "could not read the issue", title=title)
+        branch, title = naming.issue_names(num, iss.get("title") or "",
+                                           iss.get("labels") or [])
+    else:
+        d = scan.pr_detail(slug, num)
+        if not d:
+            return _refuse(ctx, "go", key, "could not read the PR", title=title)
+        layers, err = walk_stack(slug, num, base)
+        if err:
+            return _refuse(ctx, "go", key, err, title=title)
+        branch, title = d["headRefName"], (d.get("title") or "")[:60]
+        if layers:
+            start = scan.key(slug, layers[0]["pr"])
+            branch = layers[0]["branch"]
+            stack_spec = " ".join(f"{layer['pr']}:{layer['branch']}" for layer in layers)
+
+    with scan.locked():
+        state = scan.load()
+        tracked = _tracked(state, start)
+        if tracked:
+            return _refuse(ctx, "go", start, f"already tracked as {tracked}", title=title)
+        try:
+            r = scan.spawn_item(state, start, branch, title, kind == "issue",
+                                stack_spec=stack_spec)
+        except (Exception, SystemExit) as exc:
+            return _refuse(ctx, "go", start, f"spawn failed: {exc}", title=title)
+        ctx.spawned += 1
+        return _first_prompt(state, ctx, start, r, branch, slug, num, title,
+                             layers, kind == "issue")
+
+
+def _first_prompt(state, ctx, start, r, branch, slug, num, title, layers, is_issue):
+    """Send the prompt a fresh session starts with, or queue it when the host
+    warned. Caller holds the lock."""
+    import scan
+    base, tmpl = r["base"], r["template"]
+    if is_issue:
+        subs = {"REPO": slug, "ISSUE": num, "BRANCH": branch, "BASE": base}
+    elif r["stack"]:
+        subs = {"REPO": slug, "BASE": base, "KEY": start}
+    else:
+        subs = {"REPO": slug, "PR": num, "BRANCH": branch, "BASE": base}
+        if r["prev"]:
+            subs["PREV"] = r["prev"]
+        # A fix PR behind its base gets the rebase alone: it runs the review loop.
+        if tmpl == "review-fix" and _behind(state["registry"][slug]["path"],
+                                            base, branch):
+            tmpl = "rebase"
+    mark = None
+    if tmpl in ("review-comment", "re-review", "review-stack"):
+        # Someone else's PR is reviewed on its head, and that head is marked.
+        pr = layers[0]["pr"] if layers else num
+        head, note = checkout_pr_head(_worktree(state["items"][start]), pr, branch)
+        if head is None:
+            _note(state, ctx, start, "engine_error", "engine-error",
+                  f"go failed: {note}", action="go")
+            scan.save(state)
+            return f"go {start} failed: {note}"
+        mark = {"op": "reviewed", "sha": head}
+    if r["warning"]:
+        queue_send(state, start, tmpl, subs, "go", mark)
+        scan.save(state)
+        ctx.log("go", start, title=title, template=tmpl, queued=True,
+                warning=r["warning"])
+        return f"{start}: {tmpl} queued, the host warned: {r['warning']}"
+    ctx.log("go", start, title=title, template=tmpl)
+    return _send_in(state, ctx, start, tmpl, subs, "go", mark)
