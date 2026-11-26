@@ -66,7 +66,8 @@ WOKEN_LOCK = WOKEN_FILE + ".lock"
 # carries on from it; only the lock holder polls.
 NOTIFY_WATCH_FILE = os.path.join(STATE_DIR, "notifications.json")
 NOTIFY_LOCK = os.path.join(STATE_DIR, "notifications.lock")
-NOTIFY_WHY = {"READY": "ready to merge", "CAPPED": "out of review rounds",
+NOTIFY_WHY = {"READY": "ready to merge", "overdue": "re-review overdue",
+              "CAPPED": "out of review rounds",
               "PUSHED": "stale: pushed, never re-requested",
               "STALLED": "agent not reporting", "stalled": "agent not reporting",
               "CLOSED": "closed without merging", "blocked": "agent is blocked",
@@ -704,10 +705,14 @@ class Model:
         if parked:
             needs = False
         # Why it needs the user, for the desktop notification: one per reason.
-        why = (kind if kind in NEEDS_ROWS else "stalled" if stalled
-               else rep.get("state") if rep_live
-               and rep.get("state") in rep_needs
-               else "asking" if agent_state == "waiting" else None)
+        # An overdue re-review is a READY row with its own reason, so its
+        # notification and a later plain READY one are told apart.
+        overdue = kind == "READY" and \
+            (row.get("fields") or {}).get("wait") == "overdue"
+        why = ("overdue" if overdue else kind) if kind in NEEDS_ROWS \
+            else "stalled" if stalled else rep.get("state") if rep_live \
+            and rep.get("state") in rep_needs \
+            else "asking" if agent_state == "waiting" else None
         if rep_live:
             note = f"{rep.get('state')}: {rep.get('msg') or ''}"
         elif stalled:

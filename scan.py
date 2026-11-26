@@ -919,6 +919,18 @@ def review_requested(detail, me):
                   for r in (detail or {}).get("reviewRequests") or []]
 
 
+def review_blocks(detail, me):
+    """Reviews by others that still block: each author's latest APPROVED,
+    CHANGES_REQUESTED or DISMISSED review is the one that counts for them."""
+    latest = {}
+    for r in sorted((detail or {}).get("reviews") or [],
+                    key=lambda r: r.get("submittedAt") or ""):
+        if r.get("state") in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED"):
+            latest[(r.get("author") or {}).get("login")] = r
+    return [r for who, r in latest.items()
+            if who != me and r.get("state") == "CHANGES_REQUESTED"]
+
+
 def review_wait(detail, me):
     """The row note for a review `me` waits on in `detail`, or None.
     A set reviewDecision decides; without one only others' pending requests count.
@@ -933,26 +945,22 @@ def review_wait(detail, me):
             return None
         return "waiting on review"
     if decision == "CHANGES_REQUESTED":
-        # The latest blocking review is `me`'s: the user must act, not wait.
-        blocks = [r for r in d.get("reviews") or []
-                  if r.get("state") == "CHANGES_REQUESTED"]
-        last = max(blocks, key=lambda r: r.get("submittedAt") or "",
-                   default=None)
-        if last and (last.get("author") or {}).get("login") == me:
-            return None
-        return "waiting on re-review"
+        # Only `me` still asking for changes: the user must act, not wait.
+        return "waiting on re-review" if review_blocks(d, me) else None
     if decision:
         return None
     return "waiting on review" if asked else None
 
 
-def rereview_hours(it, head):
-    """Hours the PR at `head` has waited on a re-review, or None before
-    RE_REVIEW_QUIET_HOURS. The first scan that sees the wait stamps it, per head,
-    so the clock starts when octopilot first saw the head waiting."""
+def rereview_hours(it, head, review):
+    """Hours the PR has waited on a re-review at `head`, for the blocking review
+    submitted at `review`, or None before RE_REVIEW_QUIET_HOURS. The first scan
+    that sees a new head or review stamps it, so the clock starts when octopilot
+    first saw the wait, not when the reviewer asked."""
     wait = it.get("rereview_wait") or {}
-    if wait.get("head") != head:
-        wait = it["rereview_wait"] = {"head": head, "at": int(time.time())}
+    if (wait.get("head"), wait.get("review")) != (head, review):
+        wait = it["rereview_wait"] = {"head": head, "review": review,
+                                      "at": int(time.time())}
     hours = (time.time() - wait["at"]) / 3600
     return hours if hours >= RE_REVIEW_QUIET_HOURS else None
 
@@ -1363,6 +1371,7 @@ def scan(state, refresh=False, info=None):
             else:
                 layer, fb = None, new_feedback(d, it.get("feedback_seen"))
             if fb:
+                it.pop("rereview_wait", None)
                 who, when, kind, snippet = fb[-1]
                 # since= is the newest feedback's timestamp: mark-feedback
                 # needs it to move the watermark past this feedback.
@@ -1539,14 +1548,21 @@ def scan(state, refresh=False, info=None):
                                            "detail unavailable"))
                 continue
             note = review_wait(first, me)
-            overdue = rereview_hours(it, cmp_head) \
-                if note == "waiting on re-review" else None
+            overdue = None
+            if note == "waiting on re-review":
+                blocked = max(r.get("submittedAt") or ""
+                              for r in review_blocks(first, me))
+                overdue = rereview_hours(it, cmp_head, blocked)
+            else:
+                it.pop("rereview_wait", None)
             if overdue is not None:
                 # Nothing re-requests a review by itself: once it has waited
-                # too long, the user is asked to nudge the reviewer or merge.
+                # too long, the user is asked to nudge, dismiss or merge. The
+                # wait marker tells the dashboard to notify it on its own.
                 rows.append(("READY", k, f"mode=fix {smeta} checks={checks} "
-                                         f"-> re-review overdue ({overdue:.0f}h): "
-                                         "nudge the reviewer or merge"))
+                                         "wait=overdue -> re-review overdue "
+                                         f"({overdue:.0f}h): nudge the reviewer, "
+                                         "dismiss the review or merge"))
             elif note:
                 active -= 1
                 rows.append(("DONE", k, f"mode=fix {smeta} checks={checks} "
