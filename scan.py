@@ -2911,7 +2911,7 @@ def chat_keys(args):
 
 SELF_LOCKING = {"tick", "drain"}
 READ_ONLY = {"render", "status", "siblings", "snapshot", "wind-down", "plugin-settings",
-             "installed-dir", "speech", "chat", "chat-send", "chat-keys"}
+             "inbox", "installed-dir", "speech", "chat", "chat-send", "chat-keys"}
 
 
 def claude_plugin_dirs():
@@ -3002,9 +3002,11 @@ def exec_lock():
 
 
 def tick(args):
-    """tick [--quiet] [--plan] [--refresh]: one scan that saves the transitions
-    it finds, writes the dashboard's snapshot from the same rows, then runs the
-    engine. `scan` and `refresh` are this command."""
+    """tick [--quiet] [--plan] [--refresh] [--legacy]: one scan that saves the
+    transitions it finds, writes the dashboard's snapshot from the same rows,
+    then runs the engine. `scan` and `refresh` are this command with --legacy:
+    an orchestrator still running them is told to stop, and gets no engine rows."""
+    mode = engine_mode(args)
     os.makedirs(os.path.dirname(TICK_LOCK), exist_ok=True)
     with open(TICK_LOCK, "w") as lk:
         try:
@@ -3036,9 +3038,15 @@ def tick(args):
                                         untracked, info))
             if changed:
                 log_event("tick", active=active, counts=counts)
+            legacy = "--legacy" in args and mode == "on"
+            if legacy:
+                # The engine acts on these kinds itself: the table leaves them out.
+                import engine
+                print("octopilot has no orchestrator any more: stop ticking, "
+                      "the engine acts on every row")
+                rows = [r for r in rows if r[0] not in engine.PLANNED]
             if "--quiet" not in args:
                 render(rows, active, n, state, untracked)
-        mode = engine_mode(args)
         if mode == "off" and "--plan" in args and "--quiet" not in args:
             print(f"engine off here: {OCTOPILOT_DIR} is not the live checkout "
                   "and OCTOPILOT_STATE_DIR is unset")
@@ -3046,8 +3054,12 @@ def tick(args):
             import engine
             with exec_lock() as held:
                 # The budget counts from here: the scan is not the engine's to pay for.
-                lines = (engine.run_rows(rows, mode, time.monotonic()) if held
-                         else ["engine busy: another run acts, the next tick does"])
+                if held:
+                    lines = engine.run_rows(rows, mode, time.monotonic())
+                elif "--quiet" not in args:
+                    lines = ["engine busy: another run acts, the next tick does"]
+                else:
+                    lines = []
             if lines:
                 print("\n".join(lines))
     return 0
@@ -3081,7 +3093,8 @@ def main():
     # scan and refresh are tick: mapped before the lock checks below, or tick
     # would take the state lock twice in one process and deadlock.
     if cmd in ("scan", "refresh"):
-        args = ["tick", *args[1:]] + (["--refresh"] if cmd == "refresh" else [])
+        args = ["tick", *args[1:], "--legacy"]
+        args += ["--refresh"] if cmd == "refresh" else []
         cmd = "tick"
     if cmd in READ_ONLY:
         return dispatch(cmd, args, load())
@@ -3134,7 +3147,7 @@ def dispatch(cmd, args, state):
         if err:
             # Kept, not dropped: the tab may just be closed for now.
             print(f"{CODE_AGENT}: {err} -- kept, {len(state['code_pending'])} "
-                  "pending; every tick retries them. Do not resend.")
+                  "pending; the engine retries them on its next run. Do not resend.")
             return 0
         print(f"sent to {CODE_AGENT}" + (f" ({sent} with earlier queued)"
                                          if sent > 1 else ""))

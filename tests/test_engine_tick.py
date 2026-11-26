@@ -2,6 +2,7 @@
 on acts, and a worktree never acts. The scan is replaced by fixed rows, and
 GitHub, git and the agents are faked (fake_world)."""
 import contextlib
+import fcntl
 import io
 import os
 import sys
@@ -146,6 +147,37 @@ class TickEngineTest(unittest.TestCase):
                 self.assertEqual(scan.main(), 0)
                 self.assertIs(scanned.call_args.kwargs["refresh"], refresh)
             self.assertIsInstance(scan.load()["last_tick"], int)
+
+    def test_scan_with_the_engine_on_says_stop_and_leaves_the_engine_rows_out(self):
+        # An orchestrator still running `scan` must not act on the rows the engine acts on.
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {"OCTOPILOT_ENGINE": "on"}), \
+                mock.patch.object(sys, "argv", ["scan.py", "scan"]), \
+                contextlib.redirect_stdout(out):
+            self.assertEqual(scan.main(), 0)
+        text = out.getvalue()
+        self.assertTrue(text.startswith(
+            "octopilot has no orchestrator any more: stop ticking, "
+            "the engine acts on every row\n"), text)
+        self.assertNotIn(f"MERGED   {MERGED}", text)
+
+    def test_a_direct_tick_with_the_engine_on_keeps_the_full_table(self):
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {"OCTOPILOT_ENGINE": "on"}), \
+                contextlib.redirect_stdout(out):
+            self.assertEqual(scan.tick(["tick"]), 0)
+        text = out.getvalue()
+        self.assertIn(f"MERGED   {MERGED}", text)
+        self.assertNotIn("has no orchestrator", text)
+
+    def test_a_quiet_tick_that_finds_exec_lock_held_prints_nothing(self):
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {"OCTOPILOT_ENGINE": "on"}), \
+                open(scan.EXEC_LOCK, "w") as held, \
+                contextlib.redirect_stdout(out):
+            fcntl.flock(held.fileno(), fcntl.LOCK_EX)
+            self.assertEqual(scan.tick(["tick", "--quiet"]), 0)
+        self.assertEqual(out.getvalue(), "")
 
     def test_quiet_tick_with_the_engine_on_prints_only_the_engine_lines(self):
         out = io.StringIO()

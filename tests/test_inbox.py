@@ -3,7 +3,9 @@ the engine's drain takes them. A report is logged, not queued."""
 import contextlib
 import io
 import json
+import sys
 import unittest
+from unittest import mock
 
 from tests import fake
 import scan
@@ -34,6 +36,16 @@ class InboxTest(unittest.TestCase):
         out = run(scan.inbox, {}).splitlines()
         self.assertEqual(out, ["pending requests (the engine drains them; act on none)",
                                "(inbox empty)"])
+
+    def test_inbox_takes_no_lock(self):
+        # It only lists: the state lock is for the commands that save.
+        out = io.StringIO()
+        with fake.fake_world(), \
+                mock.patch.object(scan, "locked", side_effect=AssertionError("locked")), \
+                mock.patch.object(sys, "argv", ["scan.py", "inbox"]), \
+                contextlib.redirect_stdout(out):
+            self.assertEqual(scan.main(), 0)
+        self.assertTrue(out.getvalue().startswith("pending requests"))
 
     def test_the_header_counts_every_queued_message(self):
         out = run(scan.render, [], 0, 0, {"inbox": [dict(m) for m in MESSAGES]})
