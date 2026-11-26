@@ -737,7 +737,7 @@ def run_rows(rows, mode, started, clock=time.monotonic):
 #
 # One request, as the prompter and the dashboard queue it (the inbox's
 # `REQUEST <text>`, without the prefix), or an agent report queued as
-# `REQUEST OCTOPILOT ...`. The drain leaves bare report lines for the orchestrator.
+# `REQUEST OCTOPILOT ...`. Bare report lines from before layer 4 are dropped.
 
 Request = namedtuple("Request", "verb args confirmed over_cap")
 
@@ -834,8 +834,8 @@ def resolve_target(token, state, snap_rows):
         slug, err = _repo_for(state, repo)
         if err:
             return None, err
-        # The messenger accepted either separator for an item: prefer the one
-        # that is tracked or proposed, else keep the one typed.
+        # Either separator names an item: prefer the one that is tracked or
+        # proposed, else keep the one typed.
         built = f"{slug}{sep}{int(num)}"
         other = f"{slug}{'!' if sep == '#' else '#'}{int(num)}"
         return (_known_key(state, snap_rows, built)
@@ -1313,15 +1313,17 @@ def _request_text(message):
 def _next_request(ctx):
     """Pop the first inbox message this drain handles -> its Request. None when
     none is left to handle, SPENT when the budget is gone with one left. Held
-    messages stay where they are, so the rest keep their order. Agent reports
-    are left for the orchestrator (scan.inbox_shown) until layer 4."""
+    messages stay where they are, so the rest keep their order. Bare agent
+    reports (queued before layer 4) are dropped: the report is on its item."""
     import scan
     with scan.locked():
         state = scan.load()
         box = state.get("inbox") or []
+        requests = [m for m in box if m["text"].startswith("REQUEST ")]
+        if len(requests) != len(box):
+            state["inbox"] = box = requests
+            scan.save(state)
         for i, m in enumerate(box):
-            if not m["text"].startswith("REQUEST "):
-                continue
             req = parse_request(_request_text(m["text"]))
             # Read per message: a resume earlier in this drain releases the held ones.
             if state.get("paused") and req.verb in HELD_WHILE_PAUSED:
@@ -1377,7 +1379,7 @@ def _plan_inbox(ctx):
     for m in state.get("inbox") or []:
         if not m["text"].startswith("REQUEST "):
             first = (m["text"].strip().splitlines() or [""])[0][:120]
-            lines.append(f"left for the orchestrator: {first}")
+            lines.append(f"would drop (agent report, already on its item): {first}")
             continue
         text = _request_text(m["text"])
         req = parse_request(text)
