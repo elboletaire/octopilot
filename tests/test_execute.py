@@ -3,6 +3,7 @@ herdr, git and the agents faked (fake_world). Nothing here reaches the live
 state or a real agent."""
 import contextlib
 import io
+import time
 import unittest
 from unittest import mock
 
@@ -206,7 +207,7 @@ class ExecuteTest(unittest.TestCase):
                                side_effect=[SystemExit("boom"), "TEXT"]):
             first = execute(Action("feedback", A, {"since": since}), self.ctx())
             second = execute(Action("feedback", B, {"since": since}), self.ctx())
-        self.assertIn("failed", first)
+        self.assertIn("send raised", first)
         self.assertEqual(second, f"{B}: sent address-feedback")
         self.assertEqual(self.addresses(), ["herdr:w3"])
         self.assertEqual([(kind, key) for kind, key, _ in self.logs],
@@ -226,7 +227,7 @@ class ExecuteTest(unittest.TestCase):
                   pending_sends=[{"key": A, "template": "review-fix",
                                   "subs": {"REPO": REPO, "PR": 8,
                                            "BRANCH": "feat/b", "BASE": "main"},
-                                  "at": 0, "tries": 0, "error": None,
+                                  "at": int(time.time()), "tries": 0, "error": None,
                                   "reason": "boot",
                                   "mark": {"op": "reviewed", "sha": "old"}}])
         self.prs = {8: {"headRefOid": HEAD}}
@@ -264,7 +265,7 @@ class ExecuteTest(unittest.TestCase):
                            feedback_seen="2026-11-20T00:00:00Z",
                            pending=None)},
                   pending_sends=[{"key": A, "template": "rebase", "subs": {},
-                                  "at": 0, "tries": 0, "error": None,
+                                  "at": int(time.time()), "tries": 0, "error": None,
                                   "reason": "rebase"}])
         execute(Action("feedback", A, {"since": "2026-11-26T00:00:00Z"}),
                 self.ctx())
@@ -345,7 +346,7 @@ class ExecuteTest(unittest.TestCase):
         self.save({A: item(8, "feat/b", "w2", engine_error="rebase failed: x",
                            last_note="rebase failed: x", engine_wait="waiting")},
                   pending_sends=[{"key": A, "template": "rebase", "subs": {},
-                                  "at": 0, "tries": 1, "error": "send failed",
+                                  "at": int(time.time()), "tries": 1, "error": "send failed",
                                   "reason": "rebase"}])
         deliver_pending(self.ctx())
         it = self.state()["items"][A]
@@ -374,7 +375,7 @@ class ExecuteTest(unittest.TestCase):
     def test_a_raising_entry_frees_the_slot_and_is_dropped_after_five_tries(self):
         self.save({A: item(8, "feat/b", "w2")},
                   pending_sends=[{"key": A, "template": "rebase", "subs": {},
-                                  "at": 0, "tries": 0, "error": None,
+                                  "at": int(time.time()), "tries": 0, "error": None,
                                   "reason": "rebase"}])
         ctx = self.ctx()
         with mock.patch.object(scan, "render_for", side_effect=KeyError("X")):
@@ -390,7 +391,7 @@ class ExecuteTest(unittest.TestCase):
     def test_budget_also_stops_queued_sends(self):
         self.save({A: item(8, "feat/b", "w2")},
                   pending_sends=[{"key": A, "template": "rebase", "subs": {},
-                                  "at": 0, "tries": 0, "error": None,
+                                  "at": int(time.time()), "tries": 0, "error": None,
                                   "reason": "rebase"}])
         ctx = self.ctx()
         ctx.deadline, ctx.clock = 10, lambda: 10
@@ -407,6 +408,109 @@ class ExecuteTest(unittest.TestCase):
         execute(Action("cleanup", STACK, {}), ctx)
         self.assertEqual(self.addresses().count("herdr:w2"), 1)
         self.assertEqual(self.state()["pending_sends"], [])
+
+    def entry(self, key, reason, **kw):
+        e = {"key": key, "template": "rebase", "subs": {}, "at": int(time.time()),
+             "tries": 0, "error": None, "reason": reason}
+        e.update(kw)
+        return e
+
+    def test_paused_holds_queued_sends_but_not_code_requests(self):
+        self.save({A: item(8, "feat/b", "w2")}, paused=True,
+                  pending_sends=[self.entry(A, "rebase")])
+        with mock.patch("engine._deliver_code", return_value=["code"]) as code:
+            lines = run_rows([], "on", 0, clock=lambda: 0)
+        self.assertEqual(self.sends(), [])
+        self.assertEqual(len(self.state()["pending_sends"]), 1)
+        code.assert_called_once()
+        self.assertIn("code", lines)
+
+    def test_a_pause_set_mid_run_stops_the_next_action_and_entry(self):
+        self.save({A: item(8, "feat/b", "w2", phase="fixing",
+                           feedback_seen="2026-11-20T00:00:00Z"),
+                   B: item(9, "feat/c", "w3", phase="fixing",
+                           feedback_seen="2026-11-20T00:00:00Z")},
+                  pending_sends=[self.entry(B, "rebase")])
+        rows = [("FEEDBACK", A, "mode=fix since=2026-11-26T00:00:00Z"),
+                ("FEEDBACK", B, "mode=fix since=2026-11-26T00:00:00Z")]
+
+        real = execute
+
+        def pause_after_first(action, ctx):
+            out = real(action, ctx)
+            st = scan.load()
+            st["paused"] = True
+            scan.save(st)
+            return out
+        with mock.patch("engine.execute", side_effect=pause_after_first):
+            lines = run_rows(rows, "on", 0, clock=lambda: 0)
+        self.assertEqual(self.addresses(), ["herdr:w2"])
+        self.assertIn("paused", " ".join(lines))
+        state = self.state()
+        self.assertEqual([p["reason"] for p in state["pending_sends"]], ["rebase"])
+        self.assertEqual(state["items"][B]["feedback_seen"], "2026-11-20T00:00:00Z")
+
+    def test_fan_out_queues_the_rest_when_out_of_time(self):
+        self.save({MERGED: item(7, "feat/a", "w1"), A: item(8, "feat/b", "w2"),
+                   B: item(9, "feat/c", "w3")})
+        ctx = self.ctx()
+        ctx.deadline, ctx.clock = 10, lambda: 10
+        out = execute(Action("cleanup", MERGED, {}), ctx)
+        self.assertEqual(self.sends(), [])
+        self.assertEqual(sorted(p["key"] for p in self.state()["pending_sends"]),
+                         [A, B])
+        self.assertIn("out of time", out)
+
+    def test_a_raising_send_does_not_stop_the_fan_out(self):
+        self.save({MERGED: item(7, "feat/a", "w1"), A: item(8, "feat/b", "w2"),
+                   B: item(9, "feat/c", "w3")})
+        ctx = self.ctx()
+        with mock.patch.object(scan, "render_for",
+                               side_effect=[KeyError("X"), "TEXT"]):
+            out = execute(Action("cleanup", MERGED, {}), ctx)
+        self.assertEqual(self.addresses(), ["herdr:w3"])
+        self.assertEqual([p["key"] for p in self.state()["pending_sends"]], [A])
+        self.assertNotIn("w2", ctx.sent_keys)
+        self.assertIn("send raised", out)
+
+    def test_queued_boot_is_dropped_once_the_item_is_not_booting(self):
+        self.save({A: item(8, "feat/b", "w2", phase="fixing")},
+                  pending_sends=[self.entry(A, "boot")])
+        deliver_pending(self.ctx())
+        self.assertEqual(self.sends(), [])
+        self.assertEqual(self.state()["pending_sends"], [])
+        self.assertEqual([k for k, _, _ in self.logs], ["send-dropped"])
+
+    def test_queued_boot_is_dropped_at_the_review_cap(self):
+        self.save({A: item(8, "feat/b", "w2", phase="booting",
+                           review_rounds=scan.MAX_REVIEW_ROUNDS)},
+                  pending_sends=[self.entry(A, "boot")])
+        deliver_pending(self.ctx())
+        self.assertEqual(self.sends(), [])
+
+    def test_queued_feedback_is_dropped_once_marked(self):
+        mark = {"op": "feedback", "since": "2026-11-20T00:00:00Z", "pr": None}
+        self.save({A: item(8, "feat/b", "w2", feedback_seen="2026-11-26T00:00:00Z")},
+                  pending_sends=[self.entry(A, "feedback", mark=mark)])
+        deliver_pending(self.ctx())
+        self.assertEqual(self.sends(), [])
+        self.assertEqual(self.state()["pending_sends"], [])
+
+    def test_queued_send_older_than_a_day_expires(self):
+        self.save({A: item(8, "feat/b", "w2")},
+                  pending_sends=[self.entry(A, "rebase",
+                                            at=int(time.time()) - 90000)])
+        out = deliver_pending(self.ctx())
+        self.assertEqual(self.sends(), [])
+        self.assertIn("older than a day", out[0])
+
+    def test_review_is_deferred_when_the_agent_got_a_prompt_this_run(self):
+        self.save({A: item(8, "feat/b", "w2")})
+        ctx = self.ctx()
+        ctx.sent_keys.add("w2")
+        out = execute(Action("review", A, {}), ctx)
+        self.assertIn("deferred", out)
+        self.reboot_calls.assert_not_called()
 
 
 if __name__ == "__main__":

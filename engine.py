@@ -129,9 +129,16 @@ BLOCKED = "agent blocked"
 FAILED = "send failed"
 
 # How long after the tick's start a new action may begin. The dashboard kills a
-# tick at 600s and one action can take ~360s (two 180s fetches, a 90s reboot),
-# so 240s leaves margin; the rest waits for the next tick.
-ACT_BUDGET_SECS = 240
+# tick at 600s. The slowest action is a review: /clear 120 + wait_idle 90 +
+# pr_detail 60 + two fetches (FETCH_TIMEOUT) 60 + send 120 = 450s, so 100s
+# leaves 50s of margin; the rest waits for the next tick.
+ACT_BUDGET_SECS = 100
+
+# The engine's own git fetch limit, short so a stuck remote cannot eat the tick.
+FETCH_TIMEOUT = 30
+
+# A queued prompt older than this is stale: the world it was written for moved.
+QUEUE_MAX_AGE_SECS = 24 * 3600
 
 # Failed tries after which a queued send is dropped and the item told.
 MAX_TRIES = 5
@@ -197,6 +204,25 @@ def _failed_try(state, ctx, entry, key, out):
     out.append(f"{key}: dropped after {entry['tries']} tries")
 
 
+def _stale(entry, it):
+    """Why a queued prompt no longer holds for its item, or None. The queue can
+    outlive the state it was written for (a review that ran, feedback marked)."""
+    import scan
+    if time.time() - entry["at"] > QUEUE_MAX_AGE_SECS:
+        return "older than a day"
+    reason = entry["reason"]
+    if reason == "boot":
+        if it.get("phase") != "booting":
+            return "item is no longer booting"
+        if int(it.get("review_rounds", 0)) >= scan.MAX_REVIEW_ROUNDS:
+            return "review cap reached"
+    if reason == "feedback" and (entry.get("mark") or {}).get("op") == "feedback":
+        mark = entry["mark"]
+        if mark["since"] <= (scan.layer_since(it, mark.get("pr")) or ""):
+            return "feedback already handled"
+    return None
+
+
 def deliver_pending(ctx):
     """Try each queued send once, in queue order, one per item per run.
     Returns one outcome line per entry tried. Each entry takes the state lock
@@ -213,6 +239,10 @@ def deliver_pending(ctx):
             break
         with scan.locked():
             state = scan.load()
+            # A pause set mid-run takes effect at once; queued prompts wait.
+            if state.get("paused"):
+                out.append("paused: queued sends wait")
+                break
             entry = next((p for p in state.get("pending_sends", [])
                           if (p["key"], p["reason"], p["at"]) == (key, reason, at)),
                          None)
@@ -234,6 +264,17 @@ def deliver_pending(ctx):
                 scan.save(state)
                 ctx.log("send-dropped", key, template=entry["template"])
                 out.append(f"{key}: dropped, item gone")
+                continue
+            why = _stale(entry, state["items"][resolved])
+            if why:
+                if ctx.dry_run:
+                    out.append(f"{key}: would drop, {why}")
+                    continue
+                state["pending_sends"] = [p for p in state["pending_sends"]
+                                          if p is not entry]
+                scan.save(state)
+                ctx.log("send-dropped", key, template=entry["template"], why=why)
+                out.append(f"{key}: dropped, {why}")
                 continue
             ctx.sent_keys.add(ident)
             if ctx.dry_run:
@@ -343,8 +384,18 @@ def _send_in(state, ctx, key, template, subs, reason, mark=None):
         scan.save(state)
         return f"{k}: {template} queued, sent next run"
     ctx.sent_keys.add(ident)
-    text = scan.render_for(state, template, dict(subs))
-    code = scan.send_item(state, k, text)
+    try:
+        text = scan.render_for(state, template, dict(subs))
+        code = scan.send_item(state, k, text)
+    except (Exception, SystemExit) as exc:
+        # Nothing went out: queue it, free the item's slot, and let a fan-out
+        # go on to the next sibling.
+        ctx.sent_keys.discard(ident)
+        queue_send(state, key, template, subs, reason, mark)
+        _note(state, ctx, k, "engine_error", "engine-error",
+              f"{reason} failed: {type(exc).__name__}: {exc}", action=reason)
+        scan.save(state)
+        return f"{k}: queued {template}, send raised"
     if code != 0:
         queue_send(state, key, template, subs, reason, mark)
         if code == 4:
@@ -391,7 +442,16 @@ def _fan_out(ctx, slug, base, siblings):
         state = scan.load()
         if k in ctx.merging or _identity(state, k) in ctx.restacked:
             continue
-        out.append(_send(ctx, k, *_rebase_prompt(slug, base, k, it), "rebase"))
+        template, subs = _rebase_prompt(slug, base, k, it)
+        if _over_budget(ctx):
+            # The merge is already handled: what is left is queued, not lost.
+            with scan.locked():
+                state = scan.load()
+                queue_send(state, k, template, subs, "rebase")
+                scan.save(state)
+            out.append(f"{k}: {template} queued, out of time")
+        else:
+            out.append(_send(ctx, k, template, subs, "rebase"))
         # Sent or queued, it rebases onto the base with every merge so far, so
         # a second merge in this run needs no second prompt for the session.
         ctx.restacked.add(_identity(scan.load(), k))
@@ -406,11 +466,11 @@ def checkout_pr_head(wt, pr, branch):
     if not wt:
         return None, "no worktree for the item"
     code, _, err = scan.sh(["git", "-C", wt, "fetch", "origin", f"pull/{pr}/head"],
-                           timeout=180)
+                           timeout=FETCH_TIMEOUT)
     if code != 0:
         # The PR's own ref can be missing (a fork); its branch may still be there.
         code, _, err = scan.sh(["git", "-C", wt, "fetch", "origin", branch],
-                               timeout=180)
+                               timeout=FETCH_TIMEOUT)
     if code != 0:
         return None, f"fetch failed: {err}"
     _, sha, _ = scan.sh(["git", "-C", wt, "rev-parse", "FETCH_HEAD"])
@@ -482,6 +542,10 @@ def _review(ctx, key):
         if rounds >= scan.MAX_REVIEW_ROUNDS:
             ctx.log("engine-skip", k, reason="review cap reached", rounds=rounds)
             return f"{k}: capped at {rounds}, skipped"
+        # A prompt already went to this agent this run: a /clear now would wipe
+        # it. The REVIEW row is still there next tick.
+        if _identity(state, k) in ctx.sent_keys:
+            return f"{k}: review deferred, the agent got a prompt this run"
         code = scan.reboot(state, k)
     if code == 0:
         return _boot(ctx, k)
@@ -617,6 +681,9 @@ def run_rows(rows, mode, started, clock=time.monotonic):
         return [f"{a.key}: would {a.kind}" for a in plan]
     lines = []
     for i, action in enumerate(plan):
+        if scan.load().get("paused"):
+            lines.append(f"paused: {len(plan) - i} action(s) left")
+            break
         if _over_budget(ctx):
             lines.append(f"budget spent: {len(plan) - i} action(s) left for the next tick")
             break

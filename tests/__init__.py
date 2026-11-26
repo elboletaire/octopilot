@@ -15,4 +15,5 @@ os.environ["OCTOPILOT_STATE_DIR"] = SCRATCH
 os.environ["STATE_FILE"] = os.path.join(SCRATCH, "state.json")
 os.environ["HOME_REPOS"] = "none/none"
 os.environ["ISSUE_ORGS"] = "none-org"
+os.environ["OCTOPILOT_ENGINE"] = "off"   # tests that need on/plan set it themselves
 os.environ["CLONE_ROOTS"] = os.path.join(SCRATCH, "no-clones")

@@ -146,6 +146,14 @@ class TickEngineTest(unittest.TestCase):
         self.assertNotIn("ENGINE", shown["off"])
         self.assertIn(MERGED, shown["off"])
 
+    def test_engine_mode_judges_the_callers_checkout(self):
+        # An inherited OCTOPILOT_DIR must not decide for the dashboard's own.
+        self.worktree()
+        with mock.patch.dict(os.environ, {"OCTOPILOT_ENGINE": "on"}):
+            self.assertEqual(scan.engine_mode(checkout="/live/octopilot"), "on")
+            self.assertEqual(scan.engine_mode(checkout="/wt/other"), "off")
+            self.assertEqual(scan.engine_mode(), "off")
+
     def test_engine_mode_reads_the_env_and_guard(self):
         with mock.patch.object(scan, "OCTOPILOT_DIR", "/wt/octopilot"):
             self.assertEqual(scan.engine_mode(), "off")

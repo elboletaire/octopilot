@@ -32,7 +32,7 @@ class PendingTest(unittest.TestCase):
                    log=self.log, rows=[])
 
     def save_with_send(self, key=K, items=(K,)):
-        state = {"items": {k: {"branch": "x"} for k in items}, "pending_sends": []}
+        state = {"items": {k: {"branch": "x", "phase": "booting"} for k in items}, "pending_sends": []}
         queue_send(state, key, "review-fix", {"PR": "7"}, "boot")
         scan.save(state)
 
@@ -134,7 +134,7 @@ class QueueTest(PendingTest):
 class ReKeyedTest(PendingTest):
     def setUp(self):
         super().setUp()
-        state = {"items": {"repo#9": {"branch": "x", "prev_keys": ["repo!5"]}},
+        state = {"items": {"repo#9": {"branch": "x", "phase": "booting", "prev_keys": ["repo!5"]}},
                  "pending_sends": []}
         queue_send(state, "repo!5", "review-fix", {}, "boot")
         scan.save(state)

@@ -3021,12 +3021,13 @@ def engine_allowed(checkout):
     return os.path.realpath(checkout) == os.path.realpath(installed_dir())
 
 
-def engine_mode(args=()):
+def engine_mode(args=(), checkout=None):
     """off, plan or on: OCTOPILOT_ENGINE picks it, and `tick --plan` forces plan.
-    Off wherever engine_allowed() refuses the checkout: a worktree's events
-    would land in the live log."""
+    Off wherever engine_allowed() refuses the checkout (this one unless
+    `checkout` names the caller's): a worktree's events would land in the live
+    log."""
     mode = "plan" if "--plan" in args else os.environ.get("OCTOPILOT_ENGINE", "off")
-    if mode not in ("plan", "on") or not engine_allowed(OCTOPILOT_DIR):
+    if mode not in ("plan", "on") or not engine_allowed(checkout or OCTOPILOT_DIR):
         return "off"
     return mode
 
