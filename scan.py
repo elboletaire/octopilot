@@ -33,8 +33,7 @@ AGENT_STALL_MIN = int(os.environ.get("AGENT_STALL_MIN", "35"))
 RE_REVIEW_QUIET_HOURS = float(os.environ.get("RE_REVIEW_QUIET_HOURS", "4"))
 
 # Model per spawn, keyed by the template that creates the session. Pinned onto
-# the claude command line rather than inherited, so the model of the session
-# that started octopilot never decides what the workers run on.
+# the claude command line, so a worker never runs on the user's default model.
 MODEL_FOR = {
     "work": os.environ.get("MODEL_WORK", "claude-opus-5-5[1m]"),
     "investigate": os.environ.get("MODEL_INVESTIGATE", "claude-fable-5-2[1m]"),
@@ -2662,7 +2661,7 @@ def transcript_path(info):
     in its foreground (claude's sessions/<pid>.json, which follows /clear), else
     the octopilot.session label's, else None. A live session whose transcript is
     not written yet gives None, never the stale label. No guess from the folder:
-    the prompter and the code-changes session share one."""
+    other claude sessions, the user's own included, may run in the prompter's folder."""
     session = live_session_id(info) or (info.get("labels") or {}).get("octopilot.session") or ""
     if not UUID_RE.match(session):
         return None
@@ -2986,7 +2985,7 @@ def engine_mode(args=(), checkout=None):
     Off wherever engine_allowed() refuses the checkout (this one unless
     `checkout` names the caller's): a worktree's events would land in the live
     log."""
-    mode = "plan" if "--plan" in args else os.environ.get("OCTOPILOT_ENGINE", "off")
+    mode = "plan" if "--plan" in args else os.environ.get("OCTOPILOT_ENGINE", "on")
     if mode not in ("plan", "on") or not engine_allowed(checkout or OCTOPILOT_DIR):
         return "off"
     return mode

@@ -205,8 +205,15 @@ class TickEngineTest(unittest.TestCase):
             self.assertEqual(scan.engine_mode(), "off")
 
     def test_engine_mode_reads_the_env_and_guard(self):
-        with mock.patch.object(scan, "OCTOPILOT_DIR", "/wt/octopilot"):
+        with mock.patch.object(scan, "installed_dir", return_value="/live/octopilot"), \
+                mock.patch.object(scan, "OCTOPILOT_DIR", "/live/octopilot"):
+            os.environ.pop("OCTOPILOT_ENGINE", None)
+            self.assertEqual(scan.engine_mode(), "on")
+        with mock.patch.object(scan, "installed_dir", return_value="/live/octopilot"), \
+                mock.patch.object(scan, "OCTOPILOT_DIR", "/wt/octopilot"):
+            os.environ.pop("OCTOPILOT_STATE_DIR", None)
             self.assertEqual(scan.engine_mode(), "off")
+            os.environ["OCTOPILOT_STATE_DIR"] = "/scratch/octopilot"
             os.environ["OCTOPILOT_ENGINE"] = "on"
             self.assertEqual(scan.engine_mode(), "on")
             self.assertEqual(scan.engine_mode(["--plan"]), "plan")
