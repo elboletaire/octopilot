@@ -11,7 +11,7 @@ row cannot be followed to the PR it became.
 """
 import time
 from collections import namedtuple
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable
 
 # Row kinds the executor acts on, and the action each one becomes.
@@ -97,6 +97,9 @@ def plan_rows(rows, state):
         return []
     out = []
     seen = set()
+    # Restacks go first: a merge's fan-out must reach a stack after its restack
+    # prompt (the one carrying RESTACK_FROM), not before it. A stable sort.
+    rows = sorted(rows, key=lambda r: r["kind"] != "RESTACK")
     for row in rows:
         kind, key = row["kind"], row["key"]
         if kind not in PLANNED or key in seen:
@@ -125,10 +128,13 @@ def plan_rows(rows, state):
 BLOCKED = "agent blocked"
 FAILED = "send failed"
 
-# How long one tick's act phase may start new actions. The dashboard gives the
-# whole tick 600s, and a fetch or a reboot can take minutes, so the rest waits
-# for the next tick.
-ACT_BUDGET_SECS = 300
+# How long after the tick's start a new action may begin. The dashboard kills a
+# tick at 600s and one action can take ~360s (two 180s fetches, a 90s reboot),
+# so 240s leaves margin; the rest waits for the next tick.
+ACT_BUDGET_SECS = 240
+
+# Failed tries after which a queued send is dropped and the item told.
+MAX_TRIES = 5
 
 
 @dataclass
@@ -140,6 +146,14 @@ class Ctx:
     sent_keys: set
     log: Callable
     rows: list
+    deadline: float = None          # clock() reading past which nothing starts
+    clock: Callable = time.monotonic
+    merging: frozenset = frozenset()  # keys whose cleanup is planned this run
+    restacked: set = field(default_factory=set)  # identities sent a restack
+
+
+def _over_budget(ctx):
+    return ctx.deadline is not None and ctx.clock() >= ctx.deadline
 
 
 def _identity(state, key):
@@ -169,6 +183,20 @@ def queue_send(state, key, template, subs, reason, mark=None):
     state["pending_sends"] = sends
 
 
+def _failed_try(state, ctx, entry, key, out):
+    """Count a failed try. After MAX_TRIES the entry is dropped, so it cannot
+    hold the item's queue for good, and the item says why (logged once)."""
+    entry["tries"] += 1
+    if entry["tries"] < MAX_TRIES:
+        return
+    state["pending_sends"] = [p for p in state["pending_sends"] if p is not entry]
+    ctx.log("send-dropped", key, template=entry["template"], tries=entry["tries"])
+    _note(state, ctx, key, "engine_error", "engine-error",
+          f"{entry['reason']} dropped: {entry['template']} failed "
+          f"{entry['tries']} times", action=entry["reason"])
+    out.append(f"{key}: dropped after {entry['tries']} tries")
+
+
 def deliver_pending(ctx):
     """Try each queued send once, in queue order, one per item per run.
     Returns one outcome line per entry tried. Each entry takes the state lock
@@ -178,7 +206,11 @@ def deliver_pending(ctx):
     out = []
     refs = [(p["key"], p["reason"], p["at"])
             for p in scan.load().get("pending_sends", [])]
-    for key, reason, at in refs:
+    for i, (key, reason, at) in enumerate(refs):
+        if _over_budget(ctx):
+            out.append(f"budget spent: {len(refs) - i} queued send(s) left "
+                       "for the next tick")
+            break
         with scan.locked():
             state = scan.load()
             entry = next((p for p in state.get("pending_sends", [])
@@ -213,12 +245,15 @@ def deliver_pending(ctx):
                 text = scan.render_for(state, entry["template"], entry["subs"])
                 code = scan.send_item(state, resolved, text)
             except (Exception, SystemExit) as exc:
-                entry["tries"] += 1
+                # Nothing went out, so the item's slot for this run is free.
+                ctx.sent_keys.discard(ident)
                 entry["error"] = f"{FAILED}: {type(exc).__name__}: {exc}"
-                out.append(f"{key}: failed, try {entry['tries']}")
+                out.append(f"{key}: failed, try {entry['tries'] + 1}")
+                _failed_try(state, ctx, entry, resolved, out)
                 scan.save(state)
                 continue
             if code == 0:
+                _clear_notes(state["items"][resolved])
                 if entry.get("mark"):
                     _apply_mark(state, resolved, entry["mark"])
                 state["pending_sends"] = [p for p in state["pending_sends"]
@@ -232,9 +267,9 @@ def deliver_pending(ctx):
                 entry["error"] = BLOCKED
                 out.append(f"{key}: blocked, kept for retry")
             else:
-                entry["tries"] += 1
                 entry["error"] = FAILED
-                out.append(f"{key}: failed, try {entry['tries']}")
+                out.append(f"{key}: failed, try {entry['tries'] + 1}")
+                _failed_try(state, ctx, entry, resolved, out)
             scan.save(state)
     return out
 
@@ -347,8 +382,17 @@ def _rebase_prompt(slug, base, key, it):
 
 
 def _fan_out(ctx, slug, base, siblings):
-    return [_send(ctx, k, *_rebase_prompt(slug, base, k, it), "rebase")
-            for k, it in siblings]
+    """Rebase prompts for the siblings, except those the restack prompt already
+    covers (it rebases onto the current base, merge included) and items whose
+    own merge is cleaned up this run."""
+    import scan
+    out = []
+    for k, it in siblings:
+        state = scan.load()
+        if k in ctx.merging or _identity(state, k) in ctx.restacked:
+            continue
+        out.append(_send(ctx, k, *_rebase_prompt(slug, base, k, it), "rebase"))
+    return out
 
 
 def checkout_pr_head(wt, pr, branch):
@@ -416,6 +460,8 @@ def _restack(ctx, key):
     if not r["ok"]:
         return _fail(ctx, key, "restack", r["error"])
     slug = scan.split_key(key)[0]
+    with scan.locked():
+        ctx.restacked.add(_identity(scan.load(), r["new_key"]))
     sent = [_send(ctx, r["new_key"], r["template"], r["subs"], "restack")]
     sent += _fan_out(ctx, slug, r["base"], r["siblings"])
     return "; ".join(sent)
@@ -552,8 +598,10 @@ def run_rows(rows, mode, started, clock=time.monotonic):
                   "fields": scan.parse_extra(extra)["fields"]}
                  for kind, key, extra in sorted(rows, key=scan.row_order)]
     dry = mode == "plan"
-    ctx = Ctx(dry_run=dry, sent_keys=set(), log=scan.log_event, rows=dict_rows)
     plan = plan_rows(dict_rows, state)
+    ctx = Ctx(dry_run=dry, sent_keys=set(), log=scan.log_event, rows=dict_rows,
+              deadline=started + ACT_BUDGET_SECS, clock=clock,
+              merging=frozenset(a.key for a in plan if a.kind == "cleanup"))
     if dry:
         planned = [f"{a.key} {a.kind}" for a in plan]
         if planned != (state.get("engine_plan") or []):
@@ -564,10 +612,9 @@ def run_rows(rows, mode, started, clock=time.monotonic):
             for a in plan:
                 scan.log_event("engine-plan", a.key, action=a.kind)
         return [f"{a.key}: would {a.kind}" for a in plan]
-    deadline = started + ACT_BUDGET_SECS
     lines = []
     for i, action in enumerate(plan):
-        if clock() >= deadline:
+        if _over_budget(ctx):
             lines.append(f"budget spent: {len(plan) - i} action(s) left for the next tick")
             break
         lines.append(execute(action, ctx))

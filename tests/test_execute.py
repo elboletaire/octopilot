@@ -325,7 +325,8 @@ class ExecuteTest(unittest.TestCase):
                            feedback_seen="2026-11-20T00:00:00Z")})
         rows = [("FEEDBACK", A, "mode=fix since=2026-11-26T00:00:00Z"),
                 ("FEEDBACK", B, "mode=fix since=2026-11-26T00:00:00Z")]
-        clock = iter([0, ACT_BUDGET_SECS]).__next__
+        ticks = iter([0, ACT_BUDGET_SECS])
+        clock = lambda: next(ticks, ACT_BUDGET_SECS)
         lines = run_rows(rows, "on", 0, clock=clock)
         self.assertEqual(self.addresses(), ["herdr:w2"])
         self.assertIn("1 action(s) left for the next tick", lines[-1])
@@ -338,6 +339,62 @@ class ExecuteTest(unittest.TestCase):
         with open(scan.EVENTS_FILE) as fh:
             self.assertEqual(fh.read().count('"kind": "engine-plan"'), 1)
         self.assertEqual(self.state()["items"][MERGED]["session"], "w1")
+        self.assertEqual(self.sends(), [])
+
+    def test_a_late_send_clears_the_failure_note(self):
+        self.save({A: item(8, "feat/b", "w2", engine_error="rebase failed: x",
+                           last_note="rebase failed: x", engine_wait="waiting")},
+                  pending_sends=[{"key": A, "template": "rebase", "subs": {},
+                                  "at": 0, "tries": 1, "error": "send failed",
+                                  "reason": "rebase"}])
+        deliver_pending(self.ctx())
+        it = self.state()["items"][A]
+        for f in ("engine_error", "last_note", "engine_wait"):
+            self.assertNotIn(f, it)
+
+    def test_restack_prompt_goes_first_and_covers_the_merge_fan_out(self):
+        # MERGED #7 and RESTACK on B (session w2) in one tick: w2 gets the
+        # restack prompt with RESTACK_FROM, and no stale rebase-stack follows.
+        self.save({MERGED: item(7, "feat/a", "w1"),
+                   B: item(9, "feat/c", "w2", stack=[
+                       {"pr": 9, "branch": "feat/c"}, {"pr": 10, "branch": "feat/d"},
+                       {"pr": 11, "branch": "feat/e"}])})
+        self.prs = {9: {"state": "MERGED", "headRefOid": "top9sha"},
+                    10: {"state": "OPEN", "headRefOid": "h10"},
+                    11: {"state": "OPEN", "headRefOid": "h11"}}
+        rows = [("MERGED", MERGED, "branch=feat/a mode=fix"),
+                ("RESTACK", B, "mode=fix")]
+        lines = run_rows(rows, "on", 0, clock=lambda: 0)
+        self.assertEqual(self.addresses(), ["herdr:w2"], lines)
+        self.assertIn("top9sha", self.sends()[0][1])
+        state = self.state()
+        self.assertNotIn(MERGED, state["items"])
+        self.assertEqual(state["pending_sends"], [])
+
+    def test_a_raising_entry_frees_the_slot_and_is_dropped_after_five_tries(self):
+        self.save({A: item(8, "feat/b", "w2")},
+                  pending_sends=[{"key": A, "template": "rebase", "subs": {},
+                                  "at": 0, "tries": 0, "error": None,
+                                  "reason": "rebase"}])
+        ctx = self.ctx()
+        with mock.patch.object(scan, "render_for", side_effect=KeyError("X")):
+            for _ in range(5):
+                ctx = self.ctx()
+                deliver_pending(ctx)
+                self.assertNotIn("w2", ctx.sent_keys)
+        state = self.state()
+        self.assertEqual(state["pending_sends"], [])
+        self.assertIn("dropped", state["items"][A]["engine_error"])
+        self.assertEqual([k for k, _, _ in self.logs].count("engine-error"), 1)
+
+    def test_budget_also_stops_queued_sends(self):
+        self.save({A: item(8, "feat/b", "w2")},
+                  pending_sends=[{"key": A, "template": "rebase", "subs": {},
+                                  "at": 0, "tries": 0, "error": None,
+                                  "reason": "rebase"}])
+        ctx = self.ctx()
+        ctx.deadline, ctx.clock = 10, lambda: 10
+        self.assertIn("budget spent", deliver_pending(ctx)[0])
         self.assertEqual(self.sends(), [])
 
 

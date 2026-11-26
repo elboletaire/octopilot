@@ -63,6 +63,14 @@ class PlanRowsTest(unittest.TestCase):
         rows = [row("MERGED"), row("MERGED")]
         self.assertEqual(plan_rows(rows, state), [Action("cleanup", K, {})])
 
+    def test_restacks_are_planned_before_merges(self):
+        k2 = "o/r#10"
+        state = {"items": {K: {}, k2: {"stack": [{"pr": 11}]}},
+                 "handled_merges": []}
+        rows = [row("MERGED"), {"kind": "RESTACK", "key": k2, "fields": {}}]
+        self.assertEqual([a.kind for a in plan_rows(rows, state)],
+                         ["restack", "cleanup"])
+
     def test_stale_row_does_not_shadow_a_valid_one_for_its_key(self):
         state = {"items": {K: {"phase": "idle"}}, "handled_merges": []}
         rows = [row("BOOTING", template="review-fix"), row("REVIEW", head="abc1234")]
