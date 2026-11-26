@@ -9,6 +9,7 @@ import unittest
 from unittest import mock
 
 from tests import fake  # noqa: F401  (sets the scratch environment)
+import engine
 
 try:
     import dashboard
@@ -226,3 +227,10 @@ class DrainKickTest(unittest.TestCase):
                     fh.write(json.dumps({"kind": "request", "text": "go 3"}) + "\n")
                 model.poll_files()
                 self.assertTrue(model.drain_kick.is_set())
+
+
+@unittest.skipIf(dashboard is None, "dashboard needs rich")
+class HoldMarkerTest(unittest.TestCase):
+    def test_the_wind_down_hold_asks_for_the_engine_marker(self):
+        self.assertEqual(dashboard.HOLDS["wind-down"][0], engine.CONFIRMED_PAST)
+        self.assertEqual(dashboard.HOLDS["cap"][0], engine.CONFIRMED_OVER)

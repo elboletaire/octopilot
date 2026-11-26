@@ -92,8 +92,6 @@ CONFIRM_SECS = 4       # window for the second press of g / n / P
 KITCHEN_SECS = 15      # the held-start alert cancels itself after this
 KITCHEN_GRACE = 0.5    # a g this soon after the alert opened is a typed-ahead
                        # ggg, not a confirmation of something seen
-# Appended to a request the user already confirmed past WIND_DOWN_AT.
-CONFIRMED = "(confirmed past wind-down)"
 
 # The headless dashboard writes its view here; a `refresh` action touches
 # KICK_FILE to ask it for a forced GitHub refresh.
@@ -832,7 +830,7 @@ def kitchen_message():
 # it) -> the marker the request ends with, and the short reason the row prompt
 # gives.
 HOLDS = {
-    "wind-down": (CONFIRMED, "🍳 kitchen closed"),
+    "wind-down": (engine.CONFIRMED_PAST, "🍳 kitchen closed"),
     "cap": (engine.CONFIRMED_OVER, "⚠ at the cap"),
 }
 
