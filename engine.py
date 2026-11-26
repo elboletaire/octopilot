@@ -1340,10 +1340,24 @@ def _run_inbox(ctx):
             lines.append(line)
 
 
+def _verdict(req, state, snap):
+    """What a go or an investigation would do, from the state and the snapshot."""
+    if req.verb == "go":
+        key, err = resolve_target(req.args[0], state, snap.get("rows", []))
+        if err:
+            return f"refuse ({err})"
+        tracked = _tracked(state, key)
+        if tracked:
+            return f"refuse (already tracked as {tracked})"
+    held = _held(req, state, snap)
+    return f"hold ({held})" if held else "start"
+
+
 def _plan_inbox(ctx):
     """What a drain would do with each inbox message, changing nothing."""
     import scan
     state = scan.load()
+    snap = _snapshot()
     lines = []
     for m in state.get("inbox") or []:
         text = _request_text(m["text"])
@@ -1353,6 +1367,8 @@ def _plan_inbox(ctx):
             lines.append(f"would drop: {first}")
         elif state.get("paused") and req.verb in HELD_WHILE_PAUSED:
             lines.append(f"held while paused: {first}")
+        elif req.verb in ("go", "investigate", "investigate-read-only"):
+            lines.append(f"would {_verdict(req, state, snap)}: {first}")
         else:
             lines.append(f"would handle: {first}")
     return lines

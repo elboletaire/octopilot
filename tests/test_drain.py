@@ -122,6 +122,17 @@ class DrainTest(RequestCase):
         self.assertEqual(scan.load(), before)
         self.assertEqual(self.addresses(), [])
 
+    def test_plan_says_whether_a_start_would_be_refused_or_held(self):
+        self.save({PR: {"mode": "fix", "branch": "feat/b", "session": "w9",
+                        "phase": "working", "pr": 31}},
+                  inbox=inbox(f"REQUEST go {PR}", f"REQUEST go {ISSUE}"))
+        self.snapshot(active=scan.MAX_ACTIVE)
+        with mock.patch.object(scan, "wind_down", return_value=None):
+            lines = self.drain(mode="plan")
+        self.assertEqual(lines, [
+            f"would refuse (already tracked as {PR}): go {PR}",
+            f"would hold (cap): go {ISSUE}"])
+
     def test_plan_shows_a_paused_hold(self):
         self.save({}, paused=True, inbox=inbox(f"REQUEST go {ISSUE}"))
         self.assertEqual(self.drain(mode="plan"),
