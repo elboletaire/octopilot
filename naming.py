@@ -85,9 +85,8 @@ def title_from_branch(branch, strip_number=False):
 def issue_names(number, title, labels=()):
     """-> (branch, title) for an issue: <type>/<slug>-<number>.
 
-    Not deduplicated: an issue's branch is unique by its number, and after a
-    detach the same branch and worktree come back on purpose (add_worktree
-    reuses them). Do not pass it through unique_branch.
+    Not deduplicated: after a detach the same branch and worktree come back
+    on purpose (add_worktree reuses them), so never pass it to unique_branch.
     """
     kind = branch_type(title, labels)
     _, body = _split_prefix(title)
@@ -125,10 +124,8 @@ def _worktree_dir(repo_path, branch):
 
 
 def unique_branch(repo_path, branch, taken=(), ref_exists=_git_ref_exists):
-    """branch, or branch-2, branch-3... until no ref, worktree directory or name
-    in `taken` has it. ref_exists(repo_path, branch) -> bool; it reads local refs,
-    so origin refs are only current after a fetch. For investigations only: issue
-    branches are not deduplicated (see issue_names)."""
+    """branch, or branch-2, branch-3... until no ref, worktree or name in `taken`
+    has it. For investigations only (see issue_names)."""
     candidate, n = branch, 2
     while (candidate in taken or ref_exists(repo_path, candidate)
            or os.path.isdir(_worktree_dir(repo_path, candidate))):
@@ -139,12 +136,9 @@ def unique_branch(repo_path, branch, taken=(), ref_exists=_git_ref_exists):
 
 def pick_investigation(question, read_only, repo_path, repo_slug,
                        taken_keys=(), taken_branches=(), ref_exists=_git_ref_exists):
-    """-> (name, branch, title) for a question that is not yet an item.
-
-    The name is the branch's slug, so it moves with the branch when the branch
-    is taken (x -> x-2). It also moves past any key `<repo_slug>?<name>` already
-    in taken_keys: spawn_item overwrites an item with the same key.
-    """
+    """-> (name, branch, title); the name is the branch's slug, so both move together.
+    It also skips any `<repo_slug>?<name>` in taken_keys, since spawn_item
+    overwrites an item with the same key."""
     kind, base = _investigation_parts(question, read_only)
     branch = unique_branch(repo_path, f"{kind}/{base}", taken_branches, ref_exists)
     n = 2
