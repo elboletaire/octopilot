@@ -142,7 +142,7 @@ NOTE_ROWS = {"UNCLONED", "STALE", "UNKNOWN"}
 REPORT_NEEDS = {"blocked", "failed", "stalled", "capped"}
 # Events after which the GitHub view is worth refreshing early.
 KICK_EVENTS = {"report", "spawn", "sent", "cleanup", "track", "detach",
-               "park", "unpark", "untrack", "decline", "merged"}
+               "park", "unpark", "untrack", "decline", "merged", "tick-asked"}
 # Events that wake the engine's drain: a request queued, or an agent's report.
 DRAIN_EVENTS = {"request", "report"}
 # The drain runs at once on those, and at least this often otherwise.

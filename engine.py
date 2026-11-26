@@ -166,7 +166,6 @@ class Ctx:
     clock: Callable = time.monotonic
     merging: frozenset = frozenset()  # keys whose cleanup is planned this run
     restacked: set = field(default_factory=set)  # identities already covered
-    need_tick: bool = False  # a `tick` request: left to the next scheduled tick
 
 
 def _over_budget(ctx):
@@ -1235,10 +1234,10 @@ def do_code(req, ctx):
 
 
 def do_tick(req, ctx):
-    """tick: a full tick was asked for. A drain runs no scan of its own, so drain
-    reports that the next scheduled tick takes it."""
-    ctx.need_tick = True
-    return None
+    """tick: a full tick was asked for. A drain runs no scan of its own: the
+    dashboard's GitHub loop is kicked by the event, and that tick acts."""
+    ctx.log("tick-asked", None)
+    return "tick: the next tick acts, asked soon"
 
 
 def _unknown(req, ctx):
@@ -1351,6 +1350,4 @@ def drain(mode, started, clock=time.monotonic):
               rows=_snapshot().get("rows", []),
               deadline=started + ACT_BUDGET_SECS, clock=clock)
     lines = _plan_inbox(ctx) if ctx.dry_run else _run_inbox(ctx)
-    if ctx.need_tick:
-        lines.append("tick: left to the next scheduled tick")
     return lines + deliver_pending(ctx)

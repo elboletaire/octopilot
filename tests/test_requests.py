@@ -155,10 +155,11 @@ class MiscTest(RequestCase):
         self.assertIn("kept, still pending", out)
         self.assertEqual(len(scan.load()["code_pending"]), 1)
 
-    def test_tick_asks_for_a_tick_and_says_nothing(self):
+    def test_tick_is_logged_as_asked_and_answered_even_when_quiet(self):
         ctx = self.ctx()
-        self.assertIsNone(_handle(parse_request("tick"), ctx))
-        self.assertTrue(ctx.need_tick)
+        self.assertEqual(_handle(parse_request("tick"), ctx),
+                         "tick: the next tick acts, asked soon")
+        self.assertEqual([k for k, _, _ in self.logs], ["tick-asked"])
 
 
 if __name__ == "__main__":
