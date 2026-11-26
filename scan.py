@@ -3321,7 +3321,7 @@ def dispatch(cmd, args, state):
         pr = int(args[3]) if len(args) > 3 and args[3].isdigit() else None
         r = mark_feedback(state, k, when, pr)
         if not r["ok"]:
-            # An untracked key is a silent no-op, as it has always been.
+            # An untracked key is a silent no-op.
             if k in state["items"]:
                 print(r["error"], file=sys.stderr)
                 return 1
@@ -3333,7 +3333,7 @@ def dispatch(cmd, args, state):
         k, sha = args[1], args[2]
         r = mark_reviewed(state, k, sha)
         if not r["ok"]:
-            # An untracked key is a silent no-op, as it has always been.
+            # An untracked key is a silent no-op.
             return 0
         print(f"{k} reviewed={sha[:7]} round={r['round']}/{MAX_REVIEW_ROUNDS}")
         return 0
