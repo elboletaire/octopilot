@@ -2319,8 +2319,9 @@ def render(rows, active, nrepos, state, untracked=0):
     wd = wind_down()
     if wd:
         extra += f"   WIND_DOWN {wd} (from {WIND_DOWN_AT})"
-    if state.get("inbox"):
-        extra += f"   INBOX {len(state['inbox'])} (run inbox)"
+    shown = inbox_shown(state.get("inbox") or [])
+    if shown:
+        extra += f"   INBOX {len(shown)} (run inbox)"
     print(f"PAUSED {'yes' if state.get('paused') else 'no'}   "
           f"REPOS {nrepos}   ACTIVE {active}/{MAX_ACTIVE}{extra}")
     rows.sort(key=row_order)
@@ -2600,6 +2601,14 @@ def to_inbox(state, text):
     save(state)
 
 
+def inbox_shown(box):
+    """The messages `inbox` prints: with the engine on, its REQUEST lines are the
+    engine's (drain), so only the reports are the orchestrator's."""
+    if engine_mode() == "on":
+        return [m for m in box if not m["text"].startswith("REQUEST ")]
+    return list(box)
+
+
 def inbox(state):
     """Print and clear the orchestrator's pending messages, oldest first.
 
@@ -2608,8 +2617,7 @@ def inbox(state):
     lines are indented, so every message starts at column 0. With the engine
     on, the requests are the engine's (drain): they stay queued for it."""
     box = state.get("inbox") or []
-    engine_on = engine_mode() == "on"
-    shown = [m for m in box if not (engine_on and m["text"].startswith("REQUEST "))]
+    shown = inbox_shown(box)
     if not shown:
         print("(inbox empty)")
         return 0

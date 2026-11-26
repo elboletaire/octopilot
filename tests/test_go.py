@@ -96,6 +96,21 @@ class GoTest(RequestCase):
         self.assertIn("uncommitted", it["engine_error"])
         self.assertEqual(it["phase"], "booting")
 
+    def test_the_prompt_is_rendered_with_the_lock_released(self):
+        # The work prompt's issue context is a gh call: none may run under the lock.
+        free = []
+        real_gh = self.gh
+
+        def probe(args, cwd=None, default=None):
+            if args[:2] == ["issue", "view"]:
+                free.append(lock_is_free())
+            return real_gh(args, cwd, default)
+        with mock.patch.object(scan, "gh_json", side_effect=probe):
+            self.handle(f"go {ISSUE}")
+        # The go's own issue read and the prompt's issue context both run.
+        self.assertEqual(len(free), 2)
+        self.assertTrue(all(free))
+
     def test_a_failed_checkout_is_retried_by_the_executors_boot(self):
         self.mode, self.template = "comment", "review-comment"
         with mock.patch.object(scan, "sh", side_effect=lambda args, cwd=None, timeout=60:

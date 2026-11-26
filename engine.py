@@ -385,11 +385,12 @@ def _clear_notes(it):
     it.pop("engine_wait", None)
 
 
-def _send_in(state, ctx, key, template, subs, reason, mark=None):
+def _send_in(state, ctx, key, template, subs, reason, mark=None, rendered=None):
     """Send `template` to the item under `key`, or queue it when it cannot go
     out now: its agent is busy on an approval (exit 4, logged once as waiting),
     the send failed (logged as an error), or the item already got a prompt this
-    run. Caller holds the lock and passes the state it loaded."""
+    run. `rendered` is the prompt if the caller already rendered it. Caller holds
+    the lock and passes the state it loaded."""
     import scan
     k = scan.resolve_key(state, key)
     it = find_item(state, k)
@@ -402,7 +403,8 @@ def _send_in(state, ctx, key, template, subs, reason, mark=None):
         return f"{k}: {template} queued, sent next run"
     ctx.sent_keys.add(ident)
     try:
-        text = scan.render_for(state, template, dict(subs))
+        text = rendered if rendered is not None \
+            else scan.render_for(state, template, dict(subs))
         code = scan.send_item(state, k, text)
     except (Exception, SystemExit) as exc:
         # Nothing went out: queue it, free the item's slot, and let a fan-out
@@ -1075,8 +1077,15 @@ def do_go(req, ctx):
             mark = {"op": "reviewed", "sha": head}
         else:
             failure = note
+    # The prompt is rendered without the lock: its issue context is a gh call. A
+    # render that fails here is left to _send_in, which queues it under its guard.
+    try:
+        rendered = scan.render_for(scan.load(), tmpl, dict(subs))
+    except (Exception, SystemExit):
+        rendered = None
     with scan.locked():
-        return _send_first(scan.load(), ctx, start, r, title, tmpl, subs, mark, failure)
+        return _send_first(scan.load(), ctx, start, r, title, tmpl, subs, mark, failure,
+                           rendered)
 
 
 # Templates that review someone else's PR on its head, and mark that head reviewed.
@@ -1099,7 +1108,7 @@ def _first_prompt_for(r, start, branch, slug, num, layers, is_issue, path):
     return tmpl, subs
 
 
-def _send_first(state, ctx, start, r, title, tmpl, subs, mark, failure):
+def _send_first(state, ctx, start, r, title, tmpl, subs, mark, failure, rendered=None):
     """Send the first prompt, or queue it when the host warned. A checkout that
     failed leaves the item booting: the executor's BOOTING row retries it. Caller
     holds the lock."""
@@ -1120,7 +1129,7 @@ def _send_first(state, ctx, start, r, title, tmpl, subs, mark, failure):
         ctx.log("go", k, title=title, template=tmpl, queued=True, warning=r["warning"])
         return f"{k}: {tmpl} queued, the host warned: {r['warning']}"
     ctx.log("go", k, title=title, template=tmpl)
-    return _send_in(state, ctx, k, tmpl, subs, "go", mark)
+    return _send_in(state, ctx, k, tmpl, subs, "go", mark, rendered)
 
 
 def do_investigate(req, ctx):

@@ -43,5 +43,17 @@ class InboxTest(unittest.TestCase):
         self.assertEqual(state["inbox"], [{"at": 1, "text": "REQUEST pause"}])
 
 
+    def test_the_header_counts_only_what_inbox_would_show(self):
+        box = [{"at": 1, "text": "REQUEST pause"},
+               {"at": 2, "text": "OCTOPILOT a#1 ready abc all good"}]
+        for engine, want in (("on", "INBOX 1"), ("off", "INBOX 2")):
+            out = io.StringIO()
+            with fake.fake_world(), mock.patch.dict(os.environ,
+                                                    {"OCTOPILOT_ENGINE": engine}), \
+                    contextlib.redirect_stdout(out):
+                scan.render([], 0, 0, {"inbox": [dict(m) for m in box]})
+            self.assertIn(want, out.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

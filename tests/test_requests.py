@@ -47,6 +47,14 @@ class NoDetachAckTest(RequestCase):
         self.assertEqual(self.handle(f"ack {PR}"), f"{REPO}#30: acked")
         self.assertEqual(scan.load()["items"][f"{REPO}#30"]["push_acked"], HEAD)
 
+    def test_no_on_a_layer_declines_the_stack_item(self):
+        self.save({f"{REPO}#30": {"mode": "fix", "branch": "feat/a", "session": "w9",
+                                  "phase": "fixing", "pr": 30,
+                                  "stack": [{"pr": 30, "branch": "feat/a"},
+                                            {"pr": 31, "branch": "feat/b"}]}})
+        self.assertEqual(self.handle(f"no {PR}"), f"{REPO}#30: declined")
+        self.assertEqual(scan.load()["declined"], [f"{REPO}#30"])
+
     def test_pause_and_resume_set_the_flag(self):
         self.assertEqual(self.handle("pause"), "paused")
         self.assertTrue(scan.load()["paused"])
