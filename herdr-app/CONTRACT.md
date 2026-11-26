@@ -52,7 +52,12 @@ Mods treat a view whose `generated_at` is older than 15 s as stale (no headless 
     "active": 4, "max_active": 6, "untracked": 1,
     "github": {"state": "ok|stale|old|refreshing|none", "age_s": 42, "error": null},
     "last_tick_s": 120,                             // seconds ago, null = never
-    "orch_label": "octopilot",
+    "engine": {"mode": "on|plan|off", "state": "off|idle|scanning|acting|stale",
+               "since_s": 42, "last": Last},        // the engine (scan.py tick and drain). state: off = mode off;
+                                                    // idle; scanning = a GitHub pass; acting = running actions
+                                                    // (pan.busy); stale = one tick or drain running past 900 s.
+                                                    // since_s: seconds that state has held, null when idle or off.
+                                                    // last: the engine's last printed lines, null before its first run
     "paused": false,
     "wind_down": {"state": "yes|no|off", "at": "16:00"}
   },
@@ -71,6 +76,9 @@ Mods treat a view whose `generated_at` is older than 15 s as stale (no headless 
 }
 ```
 
+Last (the engine's last output, `header.engine.last`): `{"at": 1732530000.0, "verb": "tick|drain", "lines": ["…"]}`,
+the last 12 non-empty lines the engine command printed, `verb` being the command that printed them.
+
 Log (one kitchen line, takoyaki's feed.ts `react()`):
 ```jsonc
 {"at": 1732530000.0, "kind": "report", "mood": "happy", "text": "ready repo#12: …", "good": true,
@@ -83,7 +91,7 @@ Pan (takoyaki's pan and chef, from feed.ts `readKitchen()` and register.tsx `fra
 ```jsonc
 {
   "holes": 6,                                       // header max_active
-  "paused": false, "busy": false,                   // busy = the orchestrator's agent is running
+  "paused": false, "busy": false,                   // busy = the engine is acting (header.engine.state == "acting")
   "balls": [{"key": "owner/repo#12", "label": "repo#12",
              "state": "raw|cooking|ready|capped|burnt|stalled",
              "heat": 0.4,                           // cooking age / 25 min, capped at 1 (feed.ts browns them)
