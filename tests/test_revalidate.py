@@ -60,6 +60,23 @@ class RevalidateRowTest(unittest.TestCase):
         self.assertFalse(revalidate_row(row("PROPOSE"),
                                         {"items": {K: {"prev_keys": []}}}))
 
+    def test_restacked_item_drops_old_restack_row(self):
+        # restack re-keys K to a new key, keeps the stack and handles the old key
+        state = {"items": {"repo#8": {"stack": [{"pr": 8}, {"pr": 9}],
+                                      "prev_keys": [K]}},
+                 "handled_merges": [K]}
+        self.assertFalse(revalidate_row(row("RESTACK"), state))
+
+    def test_review_dropped_once_head_reviewed(self):
+        item = {K: {"phase": "fixing", "reviewed_sha": "abc1234def"}}
+        self.assertFalse(revalidate_row(row("REVIEW", head="abc1234"), {"items": item}))
+        self.assertTrue(revalidate_row(row("REVIEW", head="fff0000"), {"items": item}))
+
+    def test_propose_dropped_for_stack_layer(self):
+        state = {"items": {K: {"stack": [{"pr": 7}, {"pr": 8}]}}, "declined": []}
+        self.assertFalse(revalidate_row(row("PROPOSE", key="repo#8"), state))
+        self.assertTrue(revalidate_row(row("PROPOSE", key="repo#9"), state))
+
     def test_other_kinds_kept(self):
         self.assertTrue(revalidate_row(row("STALE"), {"items": {}}))
         self.assertTrue(revalidate_row(row("UNCLONED"), {"items": {}}))
