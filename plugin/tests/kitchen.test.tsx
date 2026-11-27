@@ -128,6 +128,57 @@ test('reports set the chef’s mood', () => {
   expect(react({ at: 1, kind: 'spawn', key: 'o/r#1', title: 'X' }).line?.text).toBe('new order r#1 X')
 })
 
+test('holds and wake-ups show in the log, park and unpark too', () => {
+  const hold = react({ at: 1, kind: 'hold', key: 'o/r#9', reason: 'waiting on review' })
+  expect(hold.line).toEqual({ at: 1, text: 'on hold r#9: waiting on review', tone: 'info' })
+  expect(hold.key).toBe('o/r#9')
+  expect(hold.burst).toBe('zzz')
+  expect(react({ at: 1, kind: 'hold', key: 'o/r#9' }).line?.text).toBe('on hold r#9')
+
+  // The events before hold / unhold still get their lines.
+  expect(react({ at: 1, kind: 'park', key: 'o/r#9' }).line?.text).toBe('on hold r#9')
+  expect(react({ at: 1, kind: 'unpark', key: 'o/r#9' }).line?.text).toBe('unhold r#9')
+
+  // An unhold with a reason is the engine waking the item.
+  const woke = react({ at: 1, kind: 'unhold', key: 'o/r#9', reason: 'approved' })
+  expect(woke.line).toEqual({ at: 1, text: 'back from hold r#9: approved', tone: 'good' })
+  expect(woke.mood).toBe('surprised')
+  expect(react({ at: 1, kind: 'unpark', key: 'o/r#9', reason: 'new commits' }).line?.text).toBe(
+    'back from hold r#9: new commits',
+  )
+  expect(react({ at: 1, kind: 'unhold', key: 'o/r#9' }).line?.text).toBe('unhold r#9')
+})
+
+test('a held report is resting, not a failure', () => {
+  const held = react({ at: 1, kind: 'report', key: 'o/r#1', state: 'held', msg: 'waiting on the API' })
+  expect(held.line).toEqual({ at: 1, text: 'held r#1: waiting on the API', tone: 'info' })
+  expect(held.burst).toBe('zzz')
+  expect(react({ at: 1, kind: 'report', key: 'o/r#1', state: 'blocked' }).line?.tone).toBe('bad')
+})
+
+test('a held item rests in the pan, not burnt, and blocked still burns', () => {
+  const state = JSON.stringify({
+    items: {
+      'o/r#1': { added: 1, session: 's1', last_report: { state: 'blocked' } },
+      'o/r#2': { added: 2, last_report: { state: 'failed' } },
+      'o/r#3': { added: 3, session: 's3', last_report: { state: 'held' } },
+    },
+  })
+  const snapshot = JSON.stringify({
+    rows: [
+      { kind: 'HOLD', key: 'o/r#1' },
+      { kind: 'BLOCKED', key: 'o/r#2' },
+    ],
+  })
+  const kitchen = readKitchen(state, 100, 6, snapshot)
+  expect(kitchen.balls.map(b => [b.key, b.state])).toEqual([
+    ['o/r#1', 'cooking'],
+    ['o/r#2', 'burnt'],
+    ['o/r#3', 'cooking'],
+  ])
+  expect(kitchen.boxed).toEqual([])
+})
+
 test('the engine’s decisions show in the kitchen’s log', () => {
   const skip = react({ at: 1, kind: 'engine-skip', key: 'budget', reason: 'act budget spent', left: 'go o/r#3' })
   expect(skip.line).toEqual({ at: 1, text: 'skipped: go o/r#3', tone: 'bad' })

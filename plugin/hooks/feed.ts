@@ -27,14 +27,15 @@ const str = (v: unknown) => (typeof v === 'string' ? v : '')
 
 // Scan rows (snapshot.json) that set a takoyaki's state. Only DONE (nothing
 // left for anyone, e.g. someone else's PR we approved) goes on the shelf;
-// READY and CAPPED wait for the user, so they stay in the pan, burning.
-const DONE_KINDS = new Set(['READY', 'CAPPED', 'DONE'])
+// READY and CAPPED wait for the user, so they stay in the pan, burning. HOLD
+// rests in the pan, not burnt, whatever report it last had.
+const STATE_KINDS = new Set(['READY', 'CAPPED', 'DONE', 'HOLD'])
 
-function doneKinds(snapshotText: string): Map<string, string> {
+function stateKinds(snapshotText: string): Map<string, string> {
   try {
     const rows = (JSON.parse(snapshotText) as { rows?: { kind?: string; key?: string }[] }).rows
     return new Map(
-      (rows ?? []).filter(r => r.key && DONE_KINDS.has(r.kind ?? '')).map(r => [r.key!, r.kind!]),
+      (rows ?? []).filter(r => r.key && STATE_KINDS.has(r.kind ?? '')).map(r => [r.key!, r.kind!]),
     )
   } catch {
     return new Map()
@@ -80,7 +81,7 @@ export function readKitchen(
   } catch {
     return { balls: [], boxed: [], paused: false, holes: maxActive }
   }
-  const done = doneKinds(snapshotText)
+  const done = stateKinds(snapshotText)
   const items = (state.items ?? {}) as Record<string, Record<string, unknown>>
   const all = Object.entries(items)
     .map(([key, item]) => ({ key, item, added: Number(item.added) || 0 }))
@@ -103,6 +104,7 @@ function ballState(item: Record<string, unknown>, doneKind?: string): BallState 
   if (doneKind === 'READY') return 'ready'
   if (doneKind === 'CAPPED') return 'capped'
   if (doneKind === 'DONE') return 'done'
+  if (doneKind === 'HOLD') return item.session ? 'cooking' : 'raw'
   const report = (item.last_report ?? {}) as Record<string, unknown>
   switch (str(report.state)) {
     case 'ready':
@@ -150,6 +152,9 @@ export function newEvents(
 }
 
 const short = (key?: string) => (key ? key.replace(/^[^/]+\//, '') : '')
+
+const withReason = (words: string[], reason: string) =>
+  `${words.filter(Boolean).join(' ')}${reason ? `: ${reason}` : ''}`
 
 export function react(ev: OctopilotEvent): Reaction {
   const key = ev.key
@@ -203,6 +208,7 @@ export function react(ev: OctopilotEvent): Reaction {
       const text = `${state} ${k}${msg ? `: ${msg}` : ''}`
       if (state === 'ready') return { mood: 'happy', ms: 4000, burst: 'sparkle', key, line: line(text, 'good') }
       if (state === 'capped') return { mood: 'happy', ms: 3000, burst: 'steam', key, line: line(text) }
+      if (state === 'held') return { mood: 'flip', ms: 2000, burst: 'zzz', key, line: line(text) }
       if (state === 'stalled') return { mood: 'worried', ms: 3000, burst: 'smoke', key, line: line(text, 'bad') }
       return { mood: 'sad', ms: 4500, burst: 'smoke', key, line: line(text, 'bad') }
     }
@@ -232,6 +238,31 @@ export function react(ev: OctopilotEvent): Reaction {
       return { mood: 'worried', ms: 1500, burst: 'ink', line: line(`${ev.kind} ${k}`) }
     case 'track':
       return { mood: 'pour', ms: 2000, burst: 'batter', key, line: line(`track ${k}`) }
+    // park / unpark are the events before hold / unhold: the same lines. An
+    // unhold with a reason is the engine waking the item (back from hold).
+    case 'hold':
+    case 'park':
+      return {
+        mood: 'flip',
+        ms: 1500,
+        burst: 'zzz',
+        key,
+        line: line(withReason(['on hold', k], str(ev.reason))),
+      }
+    case 'unhold':
+    case 'unpark': {
+      const reason = str(ev.reason)
+      if (reason) {
+        return {
+          mood: 'surprised',
+          ms: 2000,
+          burst: 'bang',
+          key,
+          line: line(withReason(['back from hold', k], reason), 'good'),
+        }
+      }
+      return { mood: 'flip', ms: 1500, key, line: line(`unhold ${k}`) }
+    }
     default:
       return { mood: 'idle', ms: 0, line: line(`${ev.kind} ${k}`.trim()) }
   }
