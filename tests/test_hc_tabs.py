@@ -231,19 +231,25 @@ class HcSessionsTest(unittest.TestCase):
 
 
 class HcSpawnTest(unittest.TestCase):
-    """HcBackend.spawn: a worker's tab in the Octopilot space, or a space of its own."""
+    """HcBackend.spawn: a worker's tab in the Octopilot space, or a space of its own,
+    started by hc run with the ids chosen here."""
     SPACE = "/home/u/src/repo/.worktrees/feat-x"
+    TAB = "tb" + SID.replace("-", "")  # uuid4().hex of the patched uuid
 
     def setUp(self):
-        self.env = mock.patch.dict(os.environ, {"WORKER_HOST": "tab"})
+        self.env = mock.patch.dict(os.environ, {"WORKER_HOST": "tab", "SHELL": "/bin/zsh"})
         self.env.start()
         self.addCleanup(self.env.stop)
-        self.replies = {}  # app_do command -> reply
+        self.window = True  # herdr-app answers
+        self.replies = {"tab.rename": (0, {}, ""), "tab.settle": (0, {}, ""),
+                        "space.rename": (0, {}, "")}
         self.app_calls = []
         self.labels = {}  # hc get: terminal -> labels
         self.hc_calls = []
+        self.run_reply = (0, {"address": "t7"}, "")
         self.status_of = "idle"
         self.space = "spOct"
+        mock.patch.object(scan, "window_open", side_effect=lambda: self.window).start()
         mock.patch.object(scan, "app_do", side_effect=self.fake_app).start()
         mock.patch.object(scan, "hc", side_effect=self.fake_hc).start()
         mock.patch.object(scan, "accept_trust", return_value=True).start()
@@ -258,11 +264,6 @@ class HcSpawnTest(unittest.TestCase):
         mock.patch.object(scan, "SETTLE_WORKER_TABS", True).start()
         mock.patch.object(scan.uuid, "uuid4", return_value=uuid.UUID(SID)).start()
         self.addCleanup(mock.patch.stopall)
-        self.replies = {
-            "tab.new": (0, {"terminal": "t7", "tab": "tb1"}, ""),
-            "space.new": (0, {"space": "sp7", "terminal": "t7"}, ""),
-            "tab.settle": (0, {}, ""),
-        }
 
     def fake_app(self, command, args, timeout=60):
         self.app_calls.append((command, args))
@@ -270,12 +271,20 @@ class HcSpawnTest(unittest.TestCase):
 
     def fake_hc(self, args, timeout=60):
         self.hc_calls.append(args)
+        if args[0] == "run":
+            return self.run_reply
         if args[0] == "get":
             return 0, {"labels": self.labels.get(args[1], {})}, ""
         return 0, {}, ""
 
     def argv(self, model=None):
-        return json.dumps(scan.HC.spawn_command(model, session=SID))
+        return scan.HC.spawn_command(model, session=SID)
+
+    def run_args(self):
+        """The argv of the one hc run."""
+        runs = [a for a in self.hc_calls if a[0] == "run"]
+        self.assertEqual(len(runs), 1, runs)
+        return runs[0]
 
     def spawn(self, title="Fix: x", model=None):
         out = io.StringIO()
@@ -286,67 +295,117 @@ class HcSpawnTest(unittest.TestCase):
     def calls(self, command):
         return [args for c, args in self.app_calls if c == command]
 
-    def test_a_worker_is_a_tab_of_the_octopilot_space(self):
+    def test_a_worker_is_a_tab_of_the_octopilot_space_started_with_no_parent(self):
         host, _ = self.spawn()
-        self.assertEqual(self.calls("tab.new"), [[
-            "--space", "spOct", "--name", "Fix: x", "--folder", self.SPACE,
-            "--argv", self.argv(), "--focus", "false"]])
-        self.assertEqual(self.calls("space.new"), [])
-        self.assertEqual(host, {"backend": "hc", "session": "tb1", "space": "spOct",
+        self.assertEqual(self.run_args(), [
+            "run", "--bg", "--json", "--no-parent", "--cwd", self.SPACE, "--keep",
+            "--label", "herdr.space=spOct", "--label", f"herdr.tab={self.TAB}",
+            "--label", "octopilot.agent=ap-x-1",
+            "--", "/bin/zsh", "-ic", 'exec "$@"', "/bin/zsh", *self.argv()])
+        self.assertEqual(host, {"backend": "hc", "session": self.TAB, "space": "spOct",
                                 "agent": "ap-x-1", "worktree": self.SPACE,
                                 "claude_session": SID})
-        self.assertIn(["label", "t7", "octopilot.agent=ap-x-1"], self.hc_calls)
+        self.assertEqual(self.app_calls[0][0], "tab.rename")
 
-    def test_the_tab_is_settled_and_the_tab_comes_from_the_reply(self):
+    def test_no_tab_is_created_by_herdr_app_or_labelled_after_the_start(self):
         self.spawn()
-        self.assertEqual(self.calls("tab.settle"), [["--id", "tb1"]])
+        self.assertEqual([c for c, _ in self.app_calls],
+                         ["tab.rename", "tab.settle"])
+        self.assertNotIn("label", [a[0] for a in self.hc_calls])
+
+    def test_the_tab_is_named_and_settled_when_a_window_shows_it(self):
+        self.spawn()
+        self.assertEqual(self.calls("tab.rename"), [[
+            "--id", self.TAB, "--name", "Fix: x"]])
+        self.assertEqual(self.calls("tab.settle"), [["--id", self.TAB]])
+
+    def test_no_window_means_no_herdr_app_call_at_all(self):
+        self.window = False
+        host, _ = self.spawn()
+        self.assertEqual(self.app_calls, [])
+        self.assertEqual(host["session"], self.TAB)
+        self.assertEqual(self.run_args()[:4], ["run", "--bg", "--json", "--no-parent"])
 
     def test_no_settle_when_settling_is_off(self):
         with mock.patch.object(scan, "SETTLE_WORKER_TABS", False):
             self.spawn()
         self.assertEqual(self.calls("tab.settle"), [])
+        self.assertEqual(len(self.calls("tab.rename")), 1)
 
-    def test_the_tab_label_is_read_when_the_reply_has_no_tab(self):
-        self.replies["tab.new"] = (0, {"terminal": "t7"}, "")
-        self.labels = {"t7": {"herdr.tab": "tb5"}}
-        host, _ = self.spawn()
-        self.assertEqual(host["session"], "tb5")
-        self.assertEqual(self.calls("tab.settle"), [["--id", "tb5"]])
+    def test_a_failed_rename_is_a_note_not_an_error(self):
+        self.replies["tab.rename"] = (1, None, "no such tab")
+        host, out = self.spawn()
+        self.assertEqual(host["session"], self.TAB)
+        self.assertIn(f"note: tab {self.TAB} not renamed: no such tab", out)
 
-    def test_a_tab_with_no_label_is_an_error_and_is_kept(self):
-        self.replies["tab.new"] = (0, {"terminal": "t7"}, "")
+    def test_a_failed_run_is_an_error(self):
+        self.run_reply = (1, {"error": {"kind": "spawn_failed"}}, "cannot start")
         with self.assertRaises(SystemExit) as ctx:
             self.spawn()
-        self.assertIn("t7 has no tab label (tab kept)", str(ctx.exception))
-        self.assertEqual(self.calls("tab.settle"), [])
+        self.assertEqual(str(ctx.exception), "hc run failed: cannot start")
+        self.assertEqual(self.app_calls, [])
 
     def test_a_reserved_tab_name_gets_the_agent_name(self):
         for title in ("OCTOPILOT", "engine", "Octopilot (code changes)"):
             self.app_calls.clear()
             self.spawn(title=title)
-            name = self.calls("tab.new")[0][3]
-            self.assertEqual(name, f"{title} (ap-x-1)")
+            self.assertEqual(self.calls("tab.rename")[0][3], f"{title} (ap-x-1)")
 
     def test_a_worker_title_is_the_tab_name(self):
         self.spawn(title="Octopilot fixes")
-        self.assertEqual(self.calls("tab.new")[0][3], "Octopilot fixes")
+        self.assertEqual(self.calls("tab.rename")[0][3], "Octopilot fixes")
 
-    def test_the_model_is_in_the_tab_argv(self):
+    def test_the_model_is_in_the_run_argv(self):
         self.spawn(model="claude-opus-5-5[1m]")
-        argv = json.loads(self.calls("tab.new")[0][7])
-        self.assertEqual(argv[-2:], ["--model", "claude-opus-5-5[1m]"])
+        self.assertEqual(self.run_args()[-2:], ["--model", "claude-opus-5-5[1m]"])
+
+    def test_the_claude_starts_under_the_session_id(self):
+        self.spawn(model="claude-opus-5-5")
+        argv = self.run_args()
+        self.assertEqual(argv[argv.index("--session-id") + 1], SID)
+        self.assertEqual(argv[-2:], ["--model", "claude-opus-5-5"])
 
     def test_a_blocked_agent_in_a_tab_warns_with_the_tab(self):
         self.status_of = "blocked"
         host, _ = self.spawn()
-        self.assertEqual(host["warning"], "agent ap-x-1 is blocked at startup; check "
-                         "tab tb1 before sending it a prompt")
+        self.assertEqual(host["warning"], f"agent ap-x-1 is blocked at startup; check "
+                         f"tab {self.TAB} before sending it a prompt")
 
-    def test_the_claude_starts_under_the_session_id(self):
-        self.spawn(model="claude-opus-5-5")
-        argv = json.loads(self.calls("tab.new")[0][7])
-        self.assertEqual(argv[argv.index("--session-id") + 1], SID)
-        self.assertEqual(argv[-2:], ["--model", "claude-opus-5-5"])
+    def test_worker_host_space_spawns_a_space_and_names_it(self):
+        os.environ["WORKER_HOST"] = "space"
+        host, _ = self.spawn()
+        self.assertEqual(self.run_args()[:4], ["run", "--bg", "--json", "--no-parent"])
+        self.assertIn(f"herdr.space={self.TAB.replace('tb', 'sp')}", self.run_args())
+        self.assertIn(f"herdr.tab={self.TAB}", self.run_args())
+        self.assertEqual(self.calls("space.rename"), [[
+            "--id", self.TAB.replace("tb", "sp"), "--name", "Fix: x"]])
+        self.assertEqual(self.calls("tab.new"), [])
+        self.assertEqual(host, {"backend": "hc", "session": self.TAB.replace("tb", "sp"),
+                                "agent": "ap-x-1", "worktree": self.SPACE,
+                                "claude_session": SID})
+
+    def test_a_space_with_no_window_makes_no_herdr_app_call(self):
+        os.environ["WORKER_HOST"] = "space"
+        self.window = False
+        self.spawn()
+        self.assertEqual(self.app_calls, [])
+
+    def test_no_octopilot_space_spawns_a_space_with_a_note(self):
+        self.space = None
+        host, _ = self.spawn()
+        self.assertEqual(self.calls("tab.new"), [])
+        self.assertEqual(host["note"], "no Octopilot space open; the worker gets "
+                                       "a space of its own")
+        self.assertNotIn("warning", host)
+        self.assertTrue(host["session"].startswith("sp"))
+        self.assertNotIn("space", host)
+
+    def test_a_blocked_agent_in_a_space_warns_with_the_space(self):
+        os.environ["WORKER_HOST"] = "space"
+        self.status_of = "blocked"
+        host, _ = self.spawn()
+        self.assertEqual(host["warning"], "agent ap-x-1 is blocked at startup; check "
+                         f"space {host['session']} before sending it a prompt")
 
     def test_a_restore_resumes_or_continues_a_session(self):
         self.assertEqual(scan.HC.spawn_command(None, resume="c-1")[-2:],
@@ -360,48 +419,69 @@ class HcSpawnTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             scan.HC.spawn_command(None, session=SID, cont=True)
 
-    def test_worker_host_space_spawns_a_space(self):
-        os.environ["WORKER_HOST"] = "space"
-        host, _ = self.spawn()
-        self.assertEqual([c for c, _ in self.app_calls], ["space.new"])
-        self.assertEqual(self.calls("space.new")[0][:4],
-                         ["--name", "Fix: x", "--folder", self.SPACE])
-        self.assertEqual(host, {"backend": "hc", "session": "sp7", "agent": "ap-x-1",
-                                "worktree": self.SPACE, "claude_session": SID})
 
-    def test_no_octopilot_space_spawns_a_space_with_a_note(self):
-        self.space = None
-        host, _ = self.spawn()
-        self.assertEqual([c for c, _ in self.app_calls], ["space.new"])
-        self.assertEqual(host["note"], "no Octopilot space open; the worker gets "
-                                       "a space of its own")
-        self.assertNotIn("warning", host)
-        self.assertEqual(host["session"], "sp7")
-        self.assertNotIn("space", host)
+class HcStartTest(unittest.TestCase):
+    """hc_start: a terminal with no parent, its argv in the login shell."""
 
-    def test_a_blocked_agent_in_a_space_warns_with_the_space(self):
-        os.environ["WORKER_HOST"] = "space"
-        self.status_of = "blocked"
-        host, _ = self.spawn()
-        self.assertEqual(host["warning"], "agent ap-x-1 is blocked at startup; check "
-                         "space sp7 before sending it a prompt")
+    def setUp(self):
+        self.hc_reply = (0, {"address": "t9"}, "")
+        self.hc_calls = []
+        mock.patch.object(scan, "hc", side_effect=self.fake_hc).start()
+        self.addCleanup(mock.patch.stopall)
 
-    def test_a_failed_tab_new_is_an_error(self):
-        self.replies["tab.new"] = (1, None, "no such space")
+    def fake_hc(self, args, timeout=60):
+        self.hc_calls.append((args, timeout))
+        return self.hc_reply
+
+    def test_the_terminal_has_no_parent_and_its_labels_and_cwd(self):
+        with mock.patch.dict(os.environ, {"SHELL": "/bin/zsh"}):
+            address = scan.hc_start(["env", "A=1", "claude"], "/wt",
+                                    {"herdr.space": "sp1", "octopilot.agent": "ap-x"},
+                                    keep=True)
+        self.assertEqual(address, "t9")
+        (args, timeout), = self.hc_calls
+        self.assertEqual(args, [
+            "run", "--bg", "--json", "--no-parent", "--cwd", "/wt", "--keep",
+            "--label", "herdr.space=sp1", "--label", "octopilot.agent=ap-x",
+            "--", "/bin/zsh", "-ic", 'exec "$@"', "/bin/zsh", "env", "A=1", "claude"])
+        self.assertEqual(timeout, 60)
+
+    def test_without_keep_there_is_no_keep_flag(self):
+        with mock.patch.dict(os.environ, {"SHELL": "/bin/zsh"}):
+            scan.hc_start(["claude"], "/wt", {}, keep=False)
+        self.assertNotIn("--keep", self.hc_calls[0][0])
+        self.assertNotIn("--label", self.hc_calls[0][0])
+
+    def test_the_login_shell_of_the_passwd_is_the_fallback(self):
+        passwd = mock.Mock(pw_shell="/usr/bin/fish")
+        with mock.patch.dict(os.environ, {"SHELL": ""}), \
+                mock.patch.object(scan.pwd, "getpwuid", return_value=passwd):
+            scan.hc_start(["claude"], "/wt", {}, keep=False)
+        self.assertEqual(self.hc_calls[0][0][-5:], ["/usr/bin/fish", "-ic",
+                                                     'exec "$@"', "/usr/bin/fish",
+                                                     "claude"])
+
+    def test_a_failed_start_is_an_error(self):
+        self.hc_reply = (1, {"error": {"kind": "spawn_failed"}}, "cannot start")
         with self.assertRaises(SystemExit) as ctx:
-            self.spawn()
-        self.assertEqual(str(ctx.exception), "herdr-app tab.new failed: no such space")
+            scan.hc_start(["claude"], "/wt", {}, keep=False)
+        self.assertEqual(str(ctx.exception), "hc run failed: cannot start")
 
-    def test_a_failed_label_keeps_the_tab(self):
-        def label_fails(args, timeout=60):
-            if args[0] == "label":
-                return 1, None, "no terminal"
-            return 0, {}, ""
-        with mock.patch.object(scan, "hc", side_effect=label_fails), \
-                self.assertRaises(SystemExit) as ctx:
-            self.spawn()
-        self.assertEqual(str(ctx.exception),
-                         "hc label failed (tab tb1 kept): no terminal")
+    def test_no_address_is_an_error(self):
+        self.hc_reply = (0, {}, "")
+        with self.assertRaises(SystemExit):
+            scan.hc_start(["claude"], "/wt", {}, keep=False)
+
+
+class WindowOpenTest(unittest.TestCase):
+    def test_a_window_is_open_when_herdr_app_status_answers(self):
+        with mock.patch.object(scan, "cli", return_value=(0, {}, "")) as cli:
+            self.assertTrue(scan.window_open())
+        cli.assert_called_once_with(["herdr-app", "status"], timeout=10)
+
+    def test_no_window_when_herdr_app_status_fails(self):
+        with mock.patch.object(scan, "cli", return_value=(1, None, "no window")):
+            self.assertFalse(scan.window_open())
 
 
 def tab_space(tab="tb1", space="spOct", terminal="t7"):
@@ -424,6 +504,9 @@ class HcTabLifecycleTest(unittest.TestCase):
             (self.WT, "/home/u/src/repo", "feat/x") if f.startswith(self.WT) else None
         )).start()
         self.cwds = {"t7": self.WT}
+        self.window = True
+        mock.patch.object(scan, "window_open", side_effect=lambda: self.window).start()
+        self.labelled = {}  # hc ls --label: "herdr.tab=tb1" -> terminal records
         mock.patch.object(scan.time, "sleep").start()
         self.git = mock.patch.object(scan, "sh", return_value=(0, "", "")).start()
         mock.patch.object(scan.os.path, "isdir", return_value=True).start()
@@ -437,11 +520,16 @@ class HcTabLifecycleTest(unittest.TestCase):
         return self.replies[command]
 
     def fake_hc(self, args, timeout=60):
+        if args[0] == "ls" and "--label" in args:
+            label = args[args.index("--label") + 1]
+            return 0, {"terminals": self.labelled.get(label, [])}, ""
         if args[0] == "ls":
             return 0, {"terminals": [{"address": a, "cwd": c}
                                      for a, c in self.cwds.items()]}, ""
         if args[0] == "get":
             return 0, {"labels": {}}, ""
+        if args[0] == "rm":
+            return 0, {}, ""
         raise AssertionError(f"unexpected hc call {args}")
 
     def steps(self):
@@ -551,6 +639,55 @@ class HcTabLifecycleTest(unittest.TestCase):
             self.assertEqual(scan.HC.discard("tb1", self.WT), (1, "busy"))
         self.git.assert_not_called()
 
+
+    def test_close_without_a_window_ends_and_removes_the_tabs_terminals(self):
+        self.window = False
+        self.labelled = {"herdr.tab=tb1": [
+            {"address": "t7", "finished_ms": None},
+            {"address": "t8", "finished_ms": 5}]}
+        with mock.patch.object(scan, "end_terminal", return_value=(0, "")) as end, \
+                mock.patch.object(scan, "hc", side_effect=self.fake_hc) as hc:
+            self.assertEqual(scan.HC.close("tb1"), (0, ""))
+        end.assert_called_once_with("t7")
+        hc.assert_any_call(["rm", "t8"])
+        self.assertEqual(self.app_calls, [])
+
+    def test_close_without_a_window_of_a_space_uses_its_herdr_space_label(self):
+        self.window = False
+        self.labelled = {"herdr.space=sp1": [{"address": "t7", "finished_ms": 5}]}
+        with mock.patch.object(scan, "end_terminal") as end, \
+                mock.patch.object(scan, "hc", side_effect=self.fake_hc) as hc:
+            self.assertEqual(scan.HC.close("sp1"), (0, ""))
+        end.assert_not_called()
+        hc.assert_any_call(["ls", "--all", "--json", "--label", "herdr.space=sp1"],
+                           timeout=10)
+        hc.assert_any_call(["rm", "t7"])
+
+    def test_close_without_a_window_with_no_terminals_is_done(self):
+        self.window = False
+        with mock.patch.object(scan, "end_terminal") as end:
+            self.assertEqual(scan.HC.close("tb1"), (0, ""))
+        end.assert_not_called()
+
+    def test_close_without_a_window_and_hc_unanswered_is_an_error(self):
+        self.window = False
+        with mock.patch.object(scan, "hc", return_value=(1, None, "no core")):
+            self.assertEqual(scan.HC.close("tb1"), (1, "hc did not answer"))
+
+    def test_discard_without_a_window_removes_the_worktree_once_unlabelled(self):
+        self.window = False
+        with mock.patch.object(scan.HcBackend, "spaces", return_value=None):
+            self.assertEqual(scan.HC.discard("tb1", self.WT), (0, ""))
+        self.git.assert_called_once_with(["git", "worktree", "remove", "--force",
+                                          self.WT], cwd=self.WT, timeout=180)
+
+    def test_discard_without_a_window_keeps_the_worktree_of_a_tab_still_running(self):
+        self.window = False
+        self.labelled = {"herdr.tab=tb1": [{"address": "t7", "finished_ms": None}]}
+        with mock.patch.object(scan.HcBackend, "spaces", return_value=None), \
+                mock.patch.object(scan, "end_terminal", return_value=(1, "busy")):
+            self.assertEqual(scan.HC.discard("tb1", self.WT), (1, "busy"))
+        self.git.assert_not_called()
 
     def test_discard_a_space_closes_it_then_removes_its_worktree(self):
         after = [{"id": "spOther", "folder": "/x", "tabs": []}]
