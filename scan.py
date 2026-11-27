@@ -2071,18 +2071,20 @@ def scan(state, refresh=False, info=None):
                     it["head_seen_at"] = int(time.time())
                 quiet_h = (int(time.time()) - int(it["head_seen_at"])) / 3600
                 if it.get("push_acked") == head:
-                    rows.append(("DONE", k, f"mode=comment {smeta} new commits "
-                                            "acknowledged -> waiting on re-request"))
+                    rows.append(("HOLD", k, f"mode=comment {smeta} hold=author -> "
+                                            "new commits acknowledged -> "
+                                            "waiting on re-request"))
                 elif quiet_h >= RE_REVIEW_QUIET_HOURS:
                     rows.append(("PUSHED", k, f"mode=comment {smeta} head={head[:7]} "
                                               f"reviewed={rv[:7]} quiet={quiet_h:.0f}h "
                                               "-> pushed since our review, never re-requested"))
                 else:
-                    rows.append(("DONE", k, f"mode=comment {smeta} new commits "
-                                            f"{quiet_h:.1f}h ago -> waiting on re-request"))
+                    rows.append(("HOLD", k, f"mode=comment {smeta} hold=author -> "
+                                            f"waiting on author (new commits "
+                                            f"{quiet_h:.1f}h ago)"))
                 continue
-            rows.append(("DONE", k, f"mode=comment {smeta} review posted "
-                                    "-> not yours to merge"))
+            rows.append(("HOLD", k, f"mode=comment {smeta} hold=author -> "
+                                    "waiting on author (not yours to merge)"))
             continue
 
         # the table prints head[:7] and mark-reviewed stores whatever it was
@@ -2109,8 +2111,8 @@ def scan(state, refresh=False, info=None):
                                            "reviewing, not posted yet"))
             else:
                 active -= 1
-                rows.append(("DONE", k, f"mode=comment {smeta} review posted "
-                                        "-> not yours to merge"))
+                rows.append(("HOLD", k, f"mode=comment {smeta} hold=author -> "
+                                        "waiting on author (not yours to merge)"))
         else:
             checks = worst_checks([layer_detail(k, it, layer["pr"])
                                    for layer in it["stack"]]) \
@@ -2133,7 +2135,17 @@ def scan(state, refresh=False, info=None):
                 overdue = rereview_hours(it, cmp_head, blocked)
             else:
                 it.pop("rereview_wait", None)
-            if overdue is not None:
+            # First match wins. A draft waits on its author; failing CI needs
+            # you; an overdue re-review needs a nudge; a review still owed waits
+            # on its reviewer (no slot); otherwise it is yours to merge.
+            if first.get("isDraft"):
+                active -= 1
+                rows.append(("HOLD", k, f"mode=fix {smeta} checks={checks} "
+                                        "hold=author -> draft"))
+            elif checks == "fail":
+                rows.append(("READY", k, f"mode=fix {smeta} checks=fail ci=red "
+                                         "-> CI is red; you or the agent must fix it"))
+            elif overdue is not None:
                 # Nothing re-requests a review by itself: once it has waited
                 # too long, the user is asked to nudge, dismiss or merge. The
                 # wait marker tells the dashboard to notify it on its own.
@@ -2143,8 +2155,8 @@ def scan(state, refresh=False, info=None):
                                          "dismiss the review or merge"))
             elif note:
                 active -= 1
-                rows.append(("DONE", k, f"mode=fix {smeta} checks={checks} "
-                                        f"-> {note}"))
+                rows.append(("HOLD", k, f"mode=fix {smeta} checks={checks} "
+                                        f"hold=reviewer -> {note}"))
             else:
                 rows.append(("READY", k, f"mode=fix {smeta} checks={checks} "
                                          "-> you merge"))

@@ -66,7 +66,7 @@ class RerequestTest(unittest.TestCase):
             self.assertEqual(rows(state), [("BOOTING", KEY)])
             with contextlib.redirect_stdout(io.StringIO()):
                 scan.dispatch("mark-reviewed", ["mark-reviewed", KEY, HEAD], state)
-            self.assertEqual(rows(state), [("DONE", KEY)])
+            self.assertEqual(rows(state), [("HOLD", KEY)])
 
     def test_a_request_withdrawn_before_reboot_drops_the_pending_head(self):
         state = new_state()
