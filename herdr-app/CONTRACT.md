@@ -66,7 +66,7 @@ Mods treat a view whose `generated_at` is older than 15 s as stale (no headless 
     {"id": "running", "title": "🟡 Running", "hint": "agents at work, their own CI waits and review loops included; ⏭ = the engine acts on it next", "entries": [Entry]},
     {"id": "needs",   "title": "🔴 Needs you", "hint": "waiting on you", "entries": [Entry]},
     {"id": "hold",    "title": "💤 On hold", "hint": "waiting on someone else, or held by you; holds no slot", "entries": [Entry]},
-    {"id": "done",    "title": "✔ Done",      "hint": "finished; holds no slot", "entries": [Entry], "hidden": 3}  // hidden = its entry count; shown only when the user toggles D
+    {"id": "done",    "title": "✔ Done",      "hint": "finished; holds no slot", "entries": [Entry], "hidden": 3}  // entries lists every Done entry; hidden = their count, shown as "+N hidden" until D toggles
   ],
   "pick": [ {"repo": "owner/repo", "entries": [Entry]} ],   // scan order, never re-sorted; Entry.index = the # shown
   "notes": [ {"kind": "UNCLONED|STALE|UNKNOWN", "key": "owner/repo#12"} ],
@@ -118,9 +118,9 @@ Pan (takoyaki's pan and chef, from feed.ts `readKitchen()` and register.tsx `fra
                                                     // focus walks along the pan, hole floor(t / 1.2 s) % balls
                                                     // (register.tsx), so the mod animates it itself
                                                     // one per tracked item in neither On hold nor Done, oldest first by added, at most holes
-  "shelf": [{"key": "owner/repo#7", "label": "repo#7"}],   // the Done column's tracked items, oldest 8 by added (scene.ts boxed.slice(0, 8))
+  "shelf": [{"key": "owner/repo#7", "label": "repo#7"}],   // the Done column's tracked items, oldest 8 by added, oldest first (scene.ts boxed.slice(0, 8))
   "shelf_total": 3,                                 // all the Done column's tracked items, for "N on the shelf" (register.tsx)
-  "hold": [{"key": "owner/repo#9", "label": "repo#9"}],   // the On hold column's tracked items, oldest 8 by added
+  "hold": [{"key": "owner/repo#9", "label": "repo#9"}],   // the On hold column's tracked items, oldest 8 by added, oldest first
   "hold_total": 1,                                  // all the On hold column's tracked items (header.hold counts every On hold entry)
   "chef": {"mood": "happy", "since": 1732530000.0,  // the transient mood, else the rest mood
            "ms": 4000,                              // the transient mood's duration; 0 when resting
@@ -139,16 +139,16 @@ Entry:
   "note": "…", "pick_kind": "issue|review only|adopt PR|your PR",
   "session": "tb…|w…:t…|sp…|w…|null", "space": "sp…|null", "backend": "hc|herdr|null", "pane": "t7|null", "path": "/…|null",
   "branch": "…", "pr": 12, "stack": 1, "open": true, "tracked": true,
-  "hold": {"by": "you", "reason": "waiting on the schema"} /* the item's hold whatever its section, or null; by: you (held by the user), reviewer or author; for reviewer and author, reason is the row's note */,
+  "hold": {"by": "you", "reason": "waiting on the schema"} /* the item's hold whatever its section, or null; by: you (held by the user), reviewer or author; reason is a string, "" when none was given (for reviewer and author, the row's note) */,
   "parked": true,                                   // alias: true when hold.by is "you"
   "engine": {"action": "cleanup", "label": "cleaning up", "paused": false} /* the ⏭ badge, see Engine badge; null when nothing is pending */,
   "cause": "report:failed:1732530000" /* opaque to mods: the reason string notifications key on, or null */,
-  "report": "blocked|failed|stalled|capped|held|ready|null" /* the agent's live report state (cause of a BLOCKED row, held of a HOLD row), else null */,
+  "report": "blocked|failed|stalled|held|null" /* the live report state behind a BLOCKED row (blocked, failed, stalled) or a HOLD row (held), else null; a capped report shows as CAPPED with null */,
   "actions": [Action]                               // exactly the TUI's allowed actions for this row
 }
 ```
-`kind` is one of the scan's row kinds: `BLOCKED` (the agent reported blocked, failed or stalled; `report` gives which),
-`HOLD` (held by you, or waiting on a reviewer or author) and `DONE` (finished only).
+`kind` is any of the scan's row kinds (WORKING, READY, CAPPED, …). The new ones are `BLOCKED` (the agent reported blocked,
+failed or stalled; `report` gives which) and `HOLD` (held by you, or waiting on a reviewer or author). `DONE` is finished only.
 
 Engine badge (`engine`), the engine's next action on the card:
 
@@ -163,7 +163,8 @@ Engine badge (`engine`), the engine's next action on the card:
 
 The mod renders "⏭ held: paused" when `paused` is true, else "⏭ <label>". `engine` stays set when a REVIEW, BOOTING or
 FEEDBACK card moves to Needs you, so the card can still show what is pending. An `engine_error` card keeps `engine`
-set to the failing action, and its note carries the error. It is null when nothing is pending.
+set to the failing action, and its note carries the error. When a card has both a row action and a queued send, the
+row action wins for `engine`. It is null when nothing is pending.
 
 A hold ends when its condition clears (approval, draft to ready, feedback, re-request, or a newer needs report). The
 card then says so in its note ("back from hold: <reason>"); `woke` is internal and not in the view.
@@ -179,7 +180,8 @@ Action:
 ```
 Row action ids (TUI key): `focus` (Enter), `peek` (v), `shell` (t), `browser` (o), `go` (g), `no` (n), `grant` (R),
 `rereview` (e), `ack` (x), `detach` (z), `hold` / `unhold` (d; `park` / `unpark` are accepted aliases for `--action`),
-`remove` (Del, or Shift+Backspace on a Mac). `ack` on a PUSHED row acknowledges the new commits: the row goes to On hold
+`remove` (Del, or Shift+Backspace on a Mac). `hold` is not the same as the start `holds` (wind-down/cap) below.
+`ack` on a PUSHED row acknowledges the new commits: the row goes to On hold
 (hold by author, "new commits acknowledged -> waiting on re-request"). `ack` on a read-only investigation's `ready`
 report marks it read: it then goes to Done.
 Global ids: `refresh` (r), `pause` / `resume` (P), `investigate` (i), `prompter` (a). `toggle_done` (D) and
