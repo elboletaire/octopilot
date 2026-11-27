@@ -32,6 +32,7 @@ EMPTY = {
     "sh": (0, "", ""),
     "send_to": (True, None),
     "backend_for": None,
+    "record_launcher_sessions": None,
 }
 
 
