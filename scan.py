@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import time
+import uuid
 import zlib
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -273,7 +274,7 @@ def live_map(agents, states, backend):
             if not ws or (ws in out and not mine):
                 continue
             out[ws] = {"session": ws, "agent": a.get("agent"), "pane": a.get("pane"),
-                       "backend": backend,
+                       "backend": backend, "claude_session": a.get("claude_session"),
                        "state": states.get(a.get("status"), "unknown")}
     return out
 
@@ -658,7 +659,8 @@ class HcBackend:
                         "ids": [labels[k] for k in ("herdr.space", "herdr.tab")
                                 if labels.get(k)],
                         "agent": labels.get("octopilot.agent") or info.get("name"),
-                        "pane": t["address"], "status": t.get("status")})
+                        "pane": t["address"], "status": t.get("status"),
+                        "claude_session": live_session_id(info)})
         return out
 
     def listing(self):
@@ -816,8 +818,9 @@ class HcBackend:
                 "no Octopilot space open; the worker gets a space of its own")
         return self.spawn_space(key_, path, wt, title, model)
 
-    def spawn_command(self, model):
-        """The argv of a worker's terminal: a named claude on this octopilot."""
+    def spawn_command(self, model, session=None, resume=None, cont=False):
+        """The argv of a worker's terminal: a named claude on this octopilot.
+        session starts claude under that id; resume or cont restores one."""
         # The terminal inherits herdr-core's login environment, not this one,
         # so the octopilot settings the worker needs travel in its argv.
         env = ["OCTOPILOT_BACKEND=hc", f"OCTOPILOT_DIR={OCTOPILOT_DIR}",
@@ -827,12 +830,16 @@ class HcBackend:
         # one wins.
         settings = plugin_settings()
         plugin = ["--settings", settings] if settings else []
-        return (["env"] + env + ["claude"] + plugin
+        ids = (["--session-id", session] if session else []) \
+            + (["--resume", resume] if resume else []) \
+            + (["--continue"] if cont else [])
+        return (["env"] + env + ["claude"] + plugin + ids
                 + (["--model", model] if model else []))
 
     def spawn_space(self, key_, path, wt, title, model):
         """A space on the worktree, its first terminal running a named claude."""
-        argv = json.dumps(self.spawn_command(model))
+        session = str(uuid.uuid4())
+        argv = json.dumps(self.spawn_command(model, session=session))
         code, data, raw = app_do("space.new", ["--name", title, "--folder", wt,
                                                "--argv", argv, "--focus", "false"],
                                  timeout=90)
@@ -841,13 +848,14 @@ class HcBackend:
         ws, term = data["space"], data["terminal"]
         name = agent_name(key_)
         warning = self.start_agent(term, wt, path, name, f"space {ws}")
-        return self.host_of(ws, name, wt, warning)
+        return self.host_of(ws, name, wt, warning, session)
 
     def spawn_tab(self, sp, key_, path, wt, title, model):
         """A tab of the Octopilot space on the worktree, its terminal running a
         named claude. A reserved tab name gets the agent's name after it."""
         name = agent_name(key_)
-        argv = json.dumps(self.spawn_command(model))
+        session = str(uuid.uuid4())
+        argv = json.dumps(self.spawn_command(model, session=session))
         code, data, raw = app_do("tab.new", ["--space", sp, "--name",
                                              tab_label(title, name),
                                              "--folder", wt, "--argv", argv,
@@ -863,7 +871,7 @@ class HcBackend:
             code, _, raw = app_do("tab.settle", ["--id", tab])
             if code != 0:
                 print(f"note: tab {tab} not settled: {raw}")
-        host = self.host_of(tab, name, wt, warning)
+        host = self.host_of(tab, name, wt, warning, session)
         host["space"] = sp
         return host
 
@@ -898,10 +906,13 @@ class HcBackend:
                     "before sending it a prompt")
         return None
 
-    def host_of(self, session, name, wt, warning):
-        """The host a spawn returns: the session, its agent and checkout."""
+    def host_of(self, session, name, wt, warning, claude_session=None):
+        """The host a spawn returns: the session, its agent, checkout and the
+        claude session id it was started under."""
         host = {"backend": self.name, "session": session, "agent": name,
                 "worktree": wt}
+        if claude_session:
+            host["claude_session"] = claude_session
         if warning:
             host["warning"] = warning
         return host
@@ -1720,6 +1731,13 @@ def scan(state, refresh=False, info=None):
                     it.pop("space", None)
                 smeta = f"session={sid(sess)}"
                 rehomed.append((k, sess))
+
+        # Its own agent's live claude session: it follows /clear, and an item
+        # tracked before claude_session was stored gets it here.
+        own = live.get(sess) if sess else None
+        if own and own.get("agent") == it.get("agent") and own.get("claude_session") \
+                and own["claude_session"] != it.get("claude_session"):
+            it["claude_session"] = own["claude_session"]
 
         if it.get("pr") and d and d.get("state") == "MERGED":
             # A fix stack whose bottom merged, with layers still open, is
@@ -2583,6 +2601,7 @@ def spawn_item(state, key_, branch, title, new_branch, question=None,
             "reviewed_sha": reviewed, "phase": "working", "added": int(time.time()),
             "driver": "agent" if mode == "fix" else "orchestrator"}
     item.update({k: v for k, v in host.items() if k not in ("warning", "note")})
+    item.update({"model": model, "title": title})
     if stack:
         item["stack"] = stack
     if question:

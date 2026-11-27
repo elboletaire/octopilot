@@ -5,10 +5,14 @@ import io
 import json
 import os
 import unittest
+import uuid
 from unittest import mock
 
 from tests import SCRATCH  # noqa: F401  (imports the scratch state before scan)
 import scan
+
+
+SID = "8f1c2a4e-5b6d-4e7f-8a9b-0c1d2e3f4a5b"  # the claude session id every spawn gets
 
 
 def stub_session_matches(agent, session):
@@ -46,6 +50,15 @@ class HcAgentsTest(unittest.TestCase):
         self.assertEqual(agents["t1"]["session"], "sp1")
         self.assertEqual(agents["t1"]["agent"], "ap-x-1")
         self.assertEqual(agents["t2"]["ids"], ["sp2"])
+
+    def test_agents_carry_the_live_claude_session(self):
+        self.terminals = [{"address": "t1", "agent": "claude-code", "status": "idle"}]
+        self.labels = {"t1": {"herdr.space": "sp1", "octopilot.agent": "ap-x-1"}}
+        with mock.patch.object(scan, "live_session_id", return_value="c-new"):
+            agents = scan.HC.agents()
+        self.assertEqual(agents[0]["claude_session"], "c-new")
+        live = scan.live_map(agents, {"idle": "idle"}, "hc")
+        self.assertEqual(live["sp1"]["claude_session"], "c-new")
 
     def test_target_finds_a_worker_by_its_tab(self):
         self.terminals = [{"address": "t1", "agent": "claude-code", "status": "idle"}]
@@ -243,6 +256,7 @@ class HcSpawnTest(unittest.TestCase):
                           create=True).start()
         mock.patch.object(scan.time, "sleep").start()
         mock.patch.object(scan, "SETTLE_WORKER_TABS", True).start()
+        mock.patch.object(scan.uuid, "uuid4", return_value=uuid.UUID(SID)).start()
         self.addCleanup(mock.patch.stopall)
         self.replies = {
             "tab.new": (0, {"terminal": "t7", "tab": "tb1"}, ""),
@@ -261,7 +275,7 @@ class HcSpawnTest(unittest.TestCase):
         return 0, {}, ""
 
     def argv(self, model=None):
-        return json.dumps(scan.HC.spawn_command(model))
+        return json.dumps(scan.HC.spawn_command(model, session=SID))
 
     def spawn(self, title="Fix: x", model=None):
         out = io.StringIO()
@@ -279,7 +293,8 @@ class HcSpawnTest(unittest.TestCase):
             "--argv", self.argv(), "--focus", "false"]])
         self.assertEqual(self.calls("space.new"), [])
         self.assertEqual(host, {"backend": "hc", "session": "tb1", "space": "spOct",
-                                "agent": "ap-x-1", "worktree": self.SPACE})
+                                "agent": "ap-x-1", "worktree": self.SPACE,
+                                "claude_session": SID})
         self.assertIn(["label", "t7", "octopilot.agent=ap-x-1"], self.hc_calls)
 
     def test_the_tab_is_settled_and_the_tab_comes_from_the_reply(self):
@@ -327,6 +342,18 @@ class HcSpawnTest(unittest.TestCase):
         self.assertEqual(host["warning"], "agent ap-x-1 is blocked at startup; check "
                          "tab tb1 before sending it a prompt")
 
+    def test_the_claude_starts_under_the_session_id(self):
+        self.spawn(model="claude-opus-5-5")
+        argv = json.loads(self.calls("tab.new")[0][7])
+        self.assertEqual(argv[argv.index("--session-id") + 1], SID)
+        self.assertEqual(argv[-2:], ["--model", "claude-opus-5-5"])
+
+    def test_a_restore_resumes_or_continues_a_session(self):
+        self.assertEqual(scan.HC.spawn_command(None, resume="c-1")[-2:],
+                         ["--resume", "c-1"])
+        self.assertEqual(scan.HC.spawn_command(None, cont=True)[-1], "--continue")
+        self.assertNotIn("--session-id", scan.HC.spawn_command(None, resume="c-1"))
+
     def test_worker_host_space_spawns_a_space(self):
         os.environ["WORKER_HOST"] = "space"
         host, _ = self.spawn()
@@ -334,7 +361,7 @@ class HcSpawnTest(unittest.TestCase):
         self.assertEqual(self.calls("space.new")[0][:4],
                          ["--name", "Fix: x", "--folder", self.SPACE])
         self.assertEqual(host, {"backend": "hc", "session": "sp7", "agent": "ap-x-1",
-                                "worktree": self.SPACE})
+                                "worktree": self.SPACE, "claude_session": SID})
 
     def test_no_octopilot_space_spawns_a_space_with_a_note(self):
         self.space = None

@@ -26,6 +26,51 @@ def run_tick(*args):
     return code, out.getvalue()
 
 
+TAB = "tb1"  # the worker's tab, its agent ap-app-5
+
+
+def agent_in(sess, name="ap-app-5"):
+    return {"session": sess, "agent": name, "pane": "t1", "backend": "hc",
+            "state": "idle"}
+
+
+def tab_item(**extra):
+    state = new_state()
+    state["items"][KEY].update(session=TAB, agent="ap-app-5", **extra)
+    return state
+
+
+def claude_session_of(live_entry):
+    """scan() with the tab's live entry as given: the item after."""
+    state = tab_item(claude_session="c-old")
+    with fake.fake_world(all_sessions=([], {"hc"}, {TAB}), all_live={TAB: live_entry},
+                         pr_detail=pr_detail, backend_for=scan.HC):
+        scan.scan(state)
+    return state["items"][KEY]
+
+
+class ClaudeSessionTest(unittest.TestCase):
+    def test_a_live_new_claude_session_updates_the_item(self):
+        live = dict(agent_in(TAB), claude_session="c-new")
+        self.assertEqual(claude_session_of(live)["claude_session"], "c-new")
+
+    def test_an_item_tracked_before_the_field_gets_it(self):
+        state = tab_item()
+        live = dict(agent_in(TAB), claude_session="c-new")
+        with fake.fake_world(all_sessions=([], {"hc"}, {TAB}), all_live={TAB: live},
+                             pr_detail=pr_detail, backend_for=scan.HC):
+            scan.scan(state)
+        self.assertEqual(state["items"][KEY]["claude_session"], "c-new")
+
+    def test_another_agent_in_the_tab_does_not_change_it(self):
+        live = dict(agent_in(TAB, name="ap-other-9"), claude_session="c-new")
+        self.assertEqual(claude_session_of(live)["claude_session"], "c-old")
+
+    def test_no_live_claude_session_keeps_the_stored_one(self):
+        live = dict(agent_in(TAB), claude_session=None)
+        self.assertEqual(claude_session_of(live)["claude_session"], "c-old")
+
+
 class TickTest(unittest.TestCase):
     def test_tick_saves_the_transitions_and_writes_the_snapshot(self):
         state = new_state()
