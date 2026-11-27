@@ -116,6 +116,20 @@ if [ -e "$LOG" ]; then mv -f "$LOG" "$LOG.1"; fi
 exec > >(trap '' HUP; exec tee "$LOG") 2>&1
 TEE_PID=$!
 
+# The engine's locks, held for the whole run, in the order the engine takes them (tick, then
+# exec): a tick or a drain finds them held and says so, so it acts on nothing while workers
+# are restored. Released when this process exits.
+exec 8>"$STATE_DIR/tick.lock"
+if ! flock -w 600 8; then
+  echo "open-gui.sh: $STATE_DIR/tick.lock is still held after 600 s; a tick is running" >&2
+  exit 1
+fi
+exec 9>"$STATE_DIR/exec.lock"
+if ! flock -w 600 9; then
+  echo "open-gui.sh: $STATE_DIR/exec.lock is still held after 600 s; a drain is running" >&2
+  exit 1
+fi
+
 # Every session and pane started here gets the hc backend, this octopilot's
 # directory (the skills' scan.sh, see OCTOPILOT_DIR in plugin/skills), and the
 # state dir and scope knobs a test sets.
@@ -149,6 +163,28 @@ app() {
     exit 1
   fi
   printf '%s\n' "$out"
+}
+
+# Makes sure herdr-app has a window to answer on, before anything reads or changes a
+# space: after a reboot there is none. With a graphical session the window is opened
+# with systemd-run (it outlives this run), else the run stops here, before any step.
+ensure_window() {
+  local i app_home="${HERDR_APP_HOME:-$HOME/.config/herdr-app}" session
+  if timeout 5 "$APP" status >/dev/null 2>&1; then return 0; fi
+  session=$(systemctl --user show-environment 2>/dev/null || true)
+  if grep -qE '^(WAYLAND_DISPLAY|DISPLAY)=' <<<"$session"; then
+    local run=(systemd-run --user --collect --quiet)
+    if [ -n "${HERDR_APP_HOME:-}" ]; then run+=("--setenv=HERDR_APP_HOME=$HERDR_APP_HOME"); fi
+    "${run[@]}" "$APP" >/dev/null 2>&1 || true
+    for i in $(seq 30); do
+      if timeout 5 "$APP" status >/dev/null 2>&1; then return 0; fi
+      sleep 1
+    done
+  fi
+  echo "open-gui.sh: herdr-app has no window on $(uname -n) ($app_home/herdr-app.sock does not answer)" \
+    "and no graphical session to open one in: log in on $(uname -n)'s screen (or enable autologin)," \
+    "or run herdr-app there, then run Open Octopilot again." >&2
+  exit 1
 }
 
 # A JSON argv array from its arguments, as herdr-app takes it.
@@ -840,6 +876,7 @@ focus_main() {
   app do tab.select --id "$(tab_named "$1" "$MAIN_TAB" "$(recorded_main_tab)")" >/dev/null
 }
 
+ensure_window
 # The space is found before the retirement and the reap, which may end the terminals that prove it.
 known_space=$(existing_space)
 # Dead shells go first: the pre-checks and the records holder must not see them.
