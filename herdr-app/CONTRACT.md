@@ -214,8 +214,8 @@ Focus/peek/shell on hc rows may be done by the mod directly with `run()` using `
 
 ## Speech and chat (scan.py)
 
-The prompter and the code agent are started by open-gui.sh with `claude --session-id <uuid>` and labelled
-`octopilot.session=<uuid>`. The transcript is found from the claude running in the
+The prompter and the code agent are started by open-gui.sh with `claude --session-id <uuid>` (or
+`claude --resume <uuid>` for a recorded session) and labelled `octopilot.session=<uuid>`. The transcript is found from the claude running in the
 terminal: `hc get <t> --json` gives `foreground.pid` (when `foreground.name` is
 `claude`), `~/.claude/sessions/<pid>.json` gives its `sessionId` (used only when its
 `pid` matches, and its `procStart` when it matches /proc), and the transcript is

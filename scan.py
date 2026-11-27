@@ -3518,15 +3518,36 @@ def record_launcher_sessions(state):
         state.setdefault("launcher_sessions", {})[agent] = {"session": session, "cwd": cwd}
 
 
+def session_live(session):
+    """True when a claude of this machine runs the session now: its sessions/<pid>.json
+    names it, the pid is alive, and procStart matches /proc as live_session_id checks."""
+    for path in glob.glob(os.path.join(SESSIONS_DIR, "*.json")):
+        try:
+            with open(path) as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict) or data.get("sessionId") != session:
+            continue
+        pid = data.get("pid")
+        now = proc_start(pid) if isinstance(pid, int) else None
+        if now is None:
+            continue  # no such process: the file is left over
+        if data.get("procStart") is not None and str(data["procStart"]) != now:
+            continue  # a recycled pid: the file is an earlier process's
+        return True
+    return False
+
+
 def launcher_session(args, state):
     """launcher-session <agent>: print "<session>\\t<cwd>" of a launcher's recorded
-    claude, only when its transcript exists; print nothing otherwise."""
+    claude, only when its transcript exists and no live claude runs it; print nothing otherwise."""
     if len(args) < 2:
         print("usage: scan.sh launcher-session <agent>", file=sys.stderr)
         return 1
     record = (state.get("launcher_sessions") or {}).get(args[1]) or {}
     session = record.get("session") or ""
-    if transcript_file(session):
+    if transcript_file(session) and not session_live(session):
         print(f"{session}\t{record.get('cwd') or ''}")
     return 0
 

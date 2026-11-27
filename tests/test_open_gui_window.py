@@ -17,10 +17,9 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LAUNCHER = os.path.join(REPO, "herdr", "open-gui.sh")
 
 # A shim logs its argv, and a line in $SHIM/fds when fd 8 or 9 (the engine's locks) is open.
-# herdr-app status exits 2 with no window until systemd-run (the window opener) creates
-# $SHIM/window; $SHIM/hang makes it time out (124) instead, and $SHIM/on_status runs first.
-# With $SHIM/space, herdr-app answers `ls` from $SHIM/app-ls.json and the pane.split and
-# tab.new that start a claude (terminals tp and tc); other commands succeed with {}.
+# herdr-app status exits 2 with no window until systemd-run creates $SHIM/window ($SHIM/hang: 124,
+# $SHIM/on_status runs first). With $SHIM/space, ls reads $SHIM/app-ls.json, pane.split and tab.new
+# answer tp and tc, and other commands succeed with {}.
 SHIMS = {
     "herdr-app": '''#!/bin/sh
 echo "herdr-app $*" >> "$SHIM/trace"
@@ -236,6 +235,8 @@ class OpenGuiWindowTest(unittest.TestCase):
         home = os.path.join(self.root, "home")
         prompter, code = str(uuid.uuid4()), str(uuid.uuid4())
         prompter_dir, code_dir = os.path.join(self.root, "prompter-dir"), os.path.join(self.root, "code-dir")
+        os.makedirs(prompter_dir)
+        os.makedirs(code_dir)
         self.record_sessions({"octopilot-prompter": (prompter, prompter_dir),
                               "octopilot-code": (code, code_dir)}, home)
         self.launch(home=home)
@@ -273,6 +274,7 @@ class OpenGuiWindowTest(unittest.TestCase):
         self.running_app()
         home = os.path.join(self.root, "home")
         code, code_dir = str(uuid.uuid4()), os.path.join(self.root, "code-dir")
+        os.makedirs(code_dir)
         self.record_sessions({"octopilot-code": (code, code_dir)}, home)
         self.launch("--terminals", home=home)
         argv = self.argv_of("tab.new")
@@ -292,6 +294,22 @@ class OpenGuiWindowTest(unittest.TestCase):
         self.assertNotIn("--resume", argv)
         self.assertNotIn("--session-id", argv)
         self.assertNotIn("-C", argv)
+
+    def test_a_recorded_folder_that_is_gone_starts_fresh(self):
+        self.shown_host()
+        home = os.path.join(self.root, "home")
+        gone = os.path.join(self.root, "removed-folder")
+        self.record_sessions({"octopilot-prompter": (str(uuid.uuid4()), gone),
+                              "octopilot-code": (str(uuid.uuid4()), gone)}, home)
+        res = self.launch(home=home)
+        self.assertNotIn("Traceback", res.stdout + res.stderr)
+        self.assertIn(f"folder {gone} is gone", res.stdout + res.stderr)
+        argv = self.argv_of("pane.split")
+        self.assertIn("/octopilot:prompter", argv)
+        self.assertNotIn("--resume", argv)
+        argv = self.argv_of("tab.new")
+        self.assertIn("--session-id", argv)
+        self.assertNotIn("--resume", argv)
 
     def test_bare_shell_code_terminal_is_reaped_but_not_a_running_claude(self):
         self.write("window", "")

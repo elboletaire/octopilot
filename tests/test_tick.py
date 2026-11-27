@@ -264,7 +264,7 @@ class LauncherSessionsTest(unittest.TestCase):
         self.assertEqual(state["launcher_sessions"], before)
 
     def test_the_launcher_session_prints_id_and_cwd_when_the_transcript_exists(self):
-        self.run_claude(scan.PROMPTER_AGENT)
+        self.run_claude(scan.PROMPTER_AGENT, pid=999999999)  # no live process on it
         self.write_transcript()
         state = {}
         scan.record_launcher_sessions(state)
@@ -279,6 +279,34 @@ class LauncherSessionsTest(unittest.TestCase):
         with contextlib.redirect_stdout(out):
             code = scan.launcher_session(["launcher-session", scan.PROMPTER_AGENT], state)
         self.assertEqual((code, out.getvalue()), (0, ""))
+
+    def write_session_file(self, pid, session, proc_start=None):
+        """claude's sessions/<pid>.json for a process, with its procStart when given."""
+        doc = {"pid": pid, "sessionId": session}
+        if proc_start is not None:
+            doc["procStart"] = proc_start
+        with open(os.path.join(self.sessions, f"{pid}.json"), "w") as fh:
+            json.dump(doc, fh)
+
+    def test_the_launcher_session_prints_nothing_while_a_live_claude_runs_it(self):
+        self.write_transcript()
+        # This test process is alive, and its procStart matches /proc.
+        self.write_session_file(os.getpid(), SESSION, scan.proc_start(os.getpid()))
+        state = {"launcher_sessions": {scan.PROMPTER_AGENT: {"session": SESSION, "cwd": "/work/repo"}}}
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = scan.launcher_session(["launcher-session", scan.PROMPTER_AGENT], state)
+        self.assertEqual((code, out.getvalue()), (0, ""))
+
+    def test_the_launcher_session_ignores_a_dead_or_recycled_claude_on_it(self):
+        self.write_transcript()
+        self.write_session_file(999999999, SESSION)  # no such process
+        self.write_session_file(os.getpid(), SESSION, "0")  # procStart of another process
+        state = {"launcher_sessions": {scan.PROMPTER_AGENT: {"session": SESSION, "cwd": "/work/repo"}}}
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = scan.launcher_session(["launcher-session", scan.PROMPTER_AGENT], state)
+        self.assertEqual((code, out.getvalue()), (0, f"{SESSION}\t/work/repo\n"))
 
     def test_the_launcher_session_prints_nothing_for_an_agent_never_recorded(self):
         out = io.StringIO()

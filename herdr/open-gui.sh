@@ -244,10 +244,9 @@ new_session() {
 # installed one (empty on the live checkout), for every claude started here.
 SETTINGS="$(OCTOPILOT_DIR="$DIR" "$DIR/scan.sh" plugin-settings)"
 
-# argv for a claude session: its session id (empty: none), optionally started
-# with a prompt, in a folder (empty: the pane's own, `env -C` otherwise), on a model
-# (empty: the global default). A 5th argument of "resume" resumes the session $1
-# (--resume, no prompt: the conversation has the skill loaded already).
+# argv for a claude session: its session id (empty: none), an optional prompt, a folder (empty:
+# the pane's own, `env -C` otherwise) and a model (empty: the default). A 5th argument "resume"
+# resumes session $1 (--resume, no prompt: the skill is already in the conversation).
 session_argv() {
   local args=(env)
   if [ -n "${3:-}" ]; then args+=(-C "$3"); fi
@@ -263,10 +262,17 @@ session_argv() {
   argv_json "${args[@]}"
 }
 
-# "<session>\t<cwd>" of a launcher's claude as its last run recorded it, when the transcript
-# exists (scan.sh launcher-session); nothing otherwise, so the claude starts fresh.
+# "<session>\t<cwd>" of a launcher's claude as its last run recorded it, when its transcript
+# exists and its folder still does (scan.sh launcher-session); nothing otherwise: a fresh start.
 recorded_session() {
-  env "${envs[@]}" "$DIR/scan.sh" launcher-session "$1" 2>/dev/null || true
+  local out
+  out=$(env "${envs[@]}" "$DIR/scan.sh" launcher-session "$1" 2>/dev/null) || out=""
+  if [ -z "$out" ]; then return 0; fi
+  if [ ! -d "${out#*$'\t'}" ]; then
+    echo "open-gui.sh: the $1 claude's folder ${out#*$'\t'} is gone; it starts fresh" >&2
+    return 0
+  fi
+  echo "$out"
 }
 
 # True when the terminal is labelled as run from this checkout. An unlabelled

@@ -255,8 +255,9 @@ Each claude starts with `claude --session-id <uuid>` and is labelled
 after a reboot or a closed space: the launcher asks `scan.sh launcher-session <agent>`, which
 answers with the session the last tick recorded (state `launcher_sessions`) when its transcript
 exists, and starts `claude --resume <uuid>` in its recorded folder (`env -C`), without the
-`/octopilot:prompter` prompt (the conversation has it). Without a recorded session it starts
-fresh, as before. There is no `--continue` fallback: `~/src` is shared with your other sessions.
+`/octopilot:prompter` prompt (the conversation has it). Without a recorded session, when its
+folder is gone, or when a live claude already runs it (`scan.py` checks `~/.claude/sessions`),
+it starts fresh, as before. There is no `--continue` fallback: `~/src` is shared with your other sessions.
 Its transcript (`~/.claude/projects/*/<uuid>.jsonl`)
 is found from the claude in the terminal's foreground, through its
 `~/.claude/sessions/<pid>.json` (which follows `/clear`); the label is only the
