@@ -112,10 +112,40 @@ class RehomeTest(unittest.TestCase):
         state = tab_item()
         info = {}
         live = {SPACE: agent_in(SPACE), MOVED: agent_in(MOVED)}
-        with fake.fake_world(all_sessions=([tab_row(MOVED)], {"hc"}, {SPACE, MOVED}),
+        rows = [tab_row(MOVED), tab_row(SPACE, space=None)]
+        with fake.fake_world(all_sessions=(rows, {"hc"}, {SPACE, MOVED}),
                              all_live=live, pr_detail=pr_detail, backend_for=scan.HC):
             scan.scan(state, info=info)
         self.assertEqual(info["rehomed"], [(KEY, MOVED)])
+
+    def test_a_session_another_item_holds_is_not_taken(self):
+        state = tab_item()
+        state["items"]["octo/app#6"] = {"mode": "comment", "pr": 6, "branch": "feat/y",
+                                        "session": MOVED, "agent": "ap-app-6",
+                                        "phase": "working"}
+        live = {MOVED: agent_in(MOVED)}
+        info = {}
+        with fake.fake_world(all_sessions=([tab_row(MOVED)], {"hc"}, {SPACE, MOVED}),
+                             all_live=live, pr_detail=pr_detail, backend_for=scan.HC):
+            rows = scan.scan(state, info=info)[0]
+        self.assertEqual([r[0] for r in rows if r[1] == KEY], ["GONE"])
+        self.assertNotIn(KEY, state["items"])
+        self.assertEqual(state["items"]["octo/app#6"]["session"], MOVED)
+        self.assertEqual(info["rehomed"], [])
+
+    def test_two_items_with_the_same_agent_take_one_home(self):
+        state = tab_item()
+        state["items"]["octo/app#6"] = {"mode": "comment", "pr": 6, "branch": "feat/y",
+                                        "session": "tb3", "agent": "ap-app-5",
+                                        "phase": "working"}
+        live = {MOVED: agent_in(MOVED)}
+        info = {}
+        with fake.fake_world(all_sessions=([tab_row(MOVED)], {"hc"}, {SPACE, MOVED}),
+                             all_live=live, pr_detail=pr_detail, backend_for=scan.HC):
+            rows = scan.scan(state, info=info)[0]
+        self.assertEqual(info["rehomed"], [(KEY, MOVED)])
+        self.assertEqual([r[0] for r in rows if r[0] == "GONE"], ["GONE"])
+        self.assertNotIn("octo/app#6", state["items"])
 
     def test_another_agent_does_not_rehome_the_item(self):
         state = tab_item()

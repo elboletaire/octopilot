@@ -1420,14 +1420,14 @@ def boot_template(it, d, me):
     return "review-fix", None
 
 
-def rehome_of(it, sessions, live, open_ws):
+def rehome_of(it, sessions, live, open_ws, held):
     """-> (session, space) of the open tab or space the item's agent is live in,
-    or None. A worker moved by hand to another tab keeps its item."""
+    or None. A session in held is another item's: it is never taken."""
     name = it.get("agent")
     rows = {s["id"]: s for s in sessions}
     homes = [sess for sess, a in live.items()
              if name and a.get("agent") == name and sess in open_ws
-             and sess in rows and sess != it.get("session")]
+             and sess in rows and sess not in held and sess != it.get("session")]
     if not homes:
         return None
     home = next((h for h in homes if is_tab(h)), homes[0])
@@ -1514,20 +1514,22 @@ def scan(state, refresh=False, info=None):
     active = 0
 
     # ---- tracked items
+    # Every item's session: a re-home never takes one of them.
+    held = {it.get("session") for it in items.values()}
     for k, it in list(items.items()):
         slug = k.split("#")[0].split("!")[0].split("?")[0]
         d = details.get(k)
         sess = it.get("session")
         smeta = f"session={sid(sess)}"
 
-        # The user closed the session's workspace by hand. Stop tracking it
-        # so it frees its slot; a merged PR still goes through MERGED below
-        # so its cleanup and fan-out happen. Only when its backend answered:
+        # A session closed by hand: an item whose agent is live elsewhere follows
+        # it (rehome_of); otherwise it is untracked and frees its slot. A merged
+        # PR still goes through MERGED below. Only when its backend answered:
         # silence is not removal.
         if sess and sess not in open_ws \
                 and listed(answered, sess) and not (
                 it.get("pr") and d and d.get("state") == "MERGED"):
-            home = rehome_of(it, sessions, live, open_ws)
+            home = rehome_of(it, sessions, live, open_ws, held)
             if home is None:
                 items.pop(k)
                 rows.append(("GONE", k, f"{smeta} removed outside octopilot "
@@ -1535,6 +1537,7 @@ def scan(state, refresh=False, info=None):
                 continue
             # Its agent is live in another tab or space: the item follows it.
             sess, space = home
+            held.add(sess)
             it["session"], it["backend"] = sess, backend_for(sess).name
             if space:
                 it["space"] = space
@@ -3669,7 +3672,8 @@ def dispatch(cmd, args, state):
         # Name its agent so it can be addressed.
         it = state["items"][k]
         it["backend"] = backend.name
-        space = next((s.get("space") for s in sessions if s["id"] == session), None)
+        space = next((s.get("space") for s in sessions if s["id"] == session), None) \
+            if is_tab(session) else None
         if space:
             it["space"] = space
         occupant = backend.live().get(session) or {}
