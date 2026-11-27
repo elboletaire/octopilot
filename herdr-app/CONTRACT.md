@@ -49,7 +49,7 @@ Mods treat a view whose `generated_at` is older than 15 s as stale (no headless 
 {
   "v": 1, "generated_at": 1732530000.0,           // epoch seconds
   "header": {
-    "needs": 2, "running": 3, "hold": 1, "pick": 14, // running counts the Running column only; hold = On hold
+    "needs": 2, "running": 3, "hold": 1, "pick": 14, // running counts the Running column only; hold counts every On hold entry
     "active": 4, "max_active": 6, "untracked": 1,
     "github": {"state": "ok|stale|old|refreshing|none", "age_s": 42, "error": null},
     "last_tick_s": 120,                             // seconds ago, null = never
@@ -77,10 +77,22 @@ Mods treat a view whose `generated_at` is older than 15 s as stale (no headless 
 }
 ```
 
-A card the engine is about to act on (MERGED, RESTACK, REVIEW, BOOTING, FEEDBACK) stays in Running with an `engine`
-badge, unless its agent waits for the user (then Needs you). A card whose engine action failed is in Needs you.
-Held by you or waiting on a reviewer or author is On hold; a finished card is Done. Each column's entries are the
-ones whose `section` is that column's id.
+Placement (first match wins; a card is in one column):
+1. MERGED, RESTACK: Running, with the `engine` badge.
+2. GONE: Done. CLOSED: Needs you.
+3. `engine_error`, or a queued send that failed: Needs you.
+4. Agent waiting for the user: Needs you (asking). This covers REVIEW, BOOTING and FEEDBACK too.
+5. REVIEW, BOOTING, FEEDBACK: Running, with the `engine` badge.
+6. Agent running: Running.
+7. Held by you, with no newer needs report: On hold.
+8. Live report blocked, failed, stalled or capped: Needs you. Held: On hold. Read-only `ready`: Needs you until
+   acked, then Done.
+9. CAPPED, PUSHED, STALLED, READY, BLOCKED: Needs you. HOLD: On hold. DONE: Done.
+10. Stalled on the dashboard's live check: Needs you. Otherwise Running.
+
+A queued send without error gets the `engine` badge wherever the card sits. A read-only `ready` report in Needs you
+holds no slot (header.active does not count it). `section` is the column the card is in: `running`, `needs`,
+`hold`, `done`, or `pick` for a pick row.
 
 Last (the engine's last output, `header.engine.last`): `{"at": 1732530000.0, "verb": "tick|drain", "lines": ["…"]}`,
 the last 12 non-empty lines the engine command printed, `verb` being the command that printed them.
@@ -105,11 +117,11 @@ Pan (takoyaki's pan and chef, from feed.ts `readKitchen()` and register.tsx `fra
                                                     // No ball focused: the mod uses hole 0. While pan.busy the
                                                     // focus walks along the pan, hole floor(t / 1.2 s) % balls
                                                     // (register.tsx), so the mod animates it itself
-                                                    // one per tracked item not DONE, oldest first, at most holes
-  "shelf": [{"key": "owner/repo#7", "label": "repo#7"}],   // the oldest 8 DONE items (scene.ts boxed.slice(0, 8)), oldest first
-  "shelf_total": 3,                                 // all DONE items, for "N on the shelf" (register.tsx)
-  "hold": [{"key": "owner/repo#9", "label": "repo#9"}],   // the On hold items, oldest first, capped like shelf (8)
-  "hold_total": 1,                                  // all On hold items
+                                                    // one per tracked item in neither On hold nor Done, oldest first by added, at most holes
+  "shelf": [{"key": "owner/repo#7", "label": "repo#7"}],   // the Done column's tracked items, oldest 8 by added (scene.ts boxed.slice(0, 8))
+  "shelf_total": 3,                                 // all the Done column's tracked items, for "N on the shelf" (register.tsx)
+  "hold": [{"key": "owner/repo#9", "label": "repo#9"}],   // the On hold column's tracked items, oldest 8 by added
+  "hold_total": 1,                                  // all the On hold column's tracked items (header.hold counts every On hold entry)
   "chef": {"mood": "happy", "since": 1732530000.0,  // the transient mood, else the rest mood
            "ms": 4000,                              // the transient mood's duration; 0 when resting
            "resting": "sleep|busy|doze|idle"}       // paused, busy, idle for 10 min (doze), else idle
@@ -127,16 +139,33 @@ Entry:
   "note": "…", "pick_kind": "issue|review only|adopt PR|your PR",
   "session": "tb…|w…:t…|sp…|w…|null", "space": "sp…|null", "backend": "hc|herdr|null", "pane": "t7|null", "path": "/…|null",
   "branch": "…", "pr": 12, "stack": 1, "open": true, "tracked": true,
-  "hold": {"by": "you", "reason": "waiting on the schema"} /* or null; by: you (held by the user), reviewer, author */,
+  "hold": {"by": "you", "reason": "waiting on the schema"} /* the item's hold whatever its section, or null; by: you (held by the user), reviewer or author; for reviewer and author, reason is the row's note */,
   "parked": true,                                   // alias: true when hold.by is "you"
-  "engine": {"action": "cleanup", "label": "cleaning up", "held": false} /* the ⏭ badge: the engine's next action on this card, or null; held = true while the engine is paused */,
-  "cause": "report:failed:1732530000" /* the reason string notifications key on, or null */,
+  "engine": {"action": "cleanup", "label": "cleaning up", "paused": false} /* the ⏭ badge, see Engine badge; null when nothing is pending */,
+  "cause": "report:failed:1732530000" /* opaque to mods: the reason string notifications key on, or null */,
   "report": "blocked|failed|stalled|capped|held|ready|null" /* the agent's live report state (cause of a BLOCKED row, held of a HOLD row), else null */,
   "actions": [Action]                               // exactly the TUI's allowed actions for this row
 }
 ```
-`kind` is one of the scan's row kinds, now including `BLOCKED` (the agent reported blocked, failed or stalled; `report` gives which) and
-`HOLD` (held by you, or waiting on a reviewer or author). `DONE` is finished only.
+`kind` is one of the scan's row kinds: `BLOCKED` (the agent reported blocked, failed or stalled; `report` gives which),
+`HOLD` (held by you, or waiting on a reviewer or author) and `DONE` (finished only).
+
+Engine badge (`engine`), the engine's next action on the card:
+
+| action | label |
+|---|---|
+| `cleanup` | cleaning up |
+| `restack` | restacking |
+| `review` | starting review |
+| `boot` | sending review |
+| `feedback` | sending feedback |
+| `send` | the queued send's reason, e.g. rebasing |
+
+The mod renders "⏭ held: paused" when `paused` is true, else "⏭ <label>". `engine` stays set when a REVIEW, BOOTING or
+FEEDBACK card moves to Needs you, so the card can still show what is pending. It is null when nothing is pending.
+
+A hold ends when its condition clears (approval, draft to ready, feedback, re-request, or a newer needs report). The
+card then says so in its note ("back from hold: <reason>"); `woke` is internal and not in the view.
 `space` is the herdr-app space holding an hc row's session: the Octopilot space for a worker tab (session `tb…`),
 or the session itself for an old-style session in its own space. Null for a herdr TUI row (its `w…:t…` tabs included). A remote focus selects the
 space, then the tab.
@@ -149,8 +178,9 @@ Action:
 ```
 Row action ids (TUI key): `focus` (Enter), `peek` (v), `shell` (t), `browser` (o), `go` (g), `no` (n), `grant` (R),
 `rereview` (e), `ack` (x), `detach` (z), `hold` / `unhold` (d; `park` / `unpark` are accepted aliases for `--action`),
-`remove` (Del, or Shift+Backspace on a Mac). `ack` marks a PUSHED row, or a read-only investigation's `ready` report,
-as read: it then goes to Done.
+`remove` (Del, or Shift+Backspace on a Mac). `ack` on a PUSHED row acknowledges the new commits: the row goes to On hold
+(hold by author, "new commits acknowledged -> waiting on re-request"). `ack` on a read-only investigation's `ready`
+report marks it read: it then goes to Done.
 Global ids: `refresh` (r), `pause` / `resume` (P), `investigate` (i), `prompter` (a). `toggle_done` (D) and
 `fold_all` (C), folding and selection are mod-side only. The Done column shows none of its entries unless the user
 toggles D (the mod shows "+N hidden" from `hidden`).
