@@ -211,7 +211,9 @@ and it is built again. After a core restart the parked engine is gone, but the
 space and its code agent are back: the engine's terminals start in the space named
 `Octopilot` (or the code agent's), in a new tab that the run parks. An engine
 terminal not running its claude (or the headless's uv) is ended and started again.
-The launcher never ends the code agent: it is your own claude session.
+The launcher never ends a running claude: the code agent's is your own session too. A code
+agent terminal left as a bare shell (a reboot, a closed space) is ended once the shell has
+run for more than 30 s, the same rule as the engine's, and the code agent starts again.
 
 An `octopilot` agent from before the engine (the old messenger) in this checkout is
 retired by the next `open-gui.sh` run: its chat and kitchen labels move to the prompter
@@ -259,7 +261,14 @@ take its id (`herdr-app status` `focused_pane`) and the OCTOPILOT tab's id
 rerun `open-gui.sh`.
 
 Each claude starts with `claude --session-id <uuid>` and is labelled
-`octopilot.session=<uuid>`. Its transcript (`~/.claude/projects/*/<uuid>.jsonl`)
+`octopilot.session=<uuid>`. The prompter and the code agent resume their last conversation
+after a reboot or a closed space: the launcher asks `scan.sh launcher-session <agent>`, which
+answers with the session the last tick recorded (state `launcher_sessions`) when its transcript
+exists, and starts `claude --resume <uuid>` in its recorded folder (`env -C`), without the
+`/octopilot:prompter` prompt (the conversation has it). Without a recorded session, when its
+folder is gone, or when a live claude already runs it (`scan.py` checks `~/.claude/sessions`),
+it starts fresh, as before. There is no `--continue` fallback: `~/src` is shared with your other sessions.
+Its transcript (`~/.claude/projects/*/<uuid>.jsonl`)
 is found from the claude in the terminal's foreground, through its
 `~/.claude/sessions/<pid>.json` (which follows `/clear`); the label is only the
 fallback when no claude runs there. `scan.sh speech --json` reads the

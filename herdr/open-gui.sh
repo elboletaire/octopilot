@@ -244,18 +244,35 @@ new_session() {
 # installed one (empty on the live checkout), for every claude started here.
 SETTINGS="$(OCTOPILOT_DIR="$DIR" "$DIR/scan.sh" plugin-settings)"
 
-# argv for a claude session: its session id (empty: none), optionally started
-# with a prompt, in a folder (empty: the pane's own, `env -C` otherwise), on a model
-# (empty: the global default).
+# argv for a claude session: its session id (empty: none), an optional prompt, a folder (empty:
+# the pane's own, `env -C` otherwise) and a model (empty: the default). A 5th argument "resume"
+# resumes session $1 (--resume, no prompt: the skill is already in the conversation).
 session_argv() {
   local args=(env)
   if [ -n "${3:-}" ]; then args+=(-C "$3"); fi
   args+=("${envs[@]}" claude)
   if [ -n "$SETTINGS" ]; then args+=(--settings "$SETTINGS"); fi
   if [ -n "${4:-}" ]; then args+=(--model "$4"); fi
-  if [ -n "${1:-}" ]; then args+=(--session-id "$1"); fi
+  if [ "${5:-}" = resume ]; then
+    args+=(--resume "$1")
+  elif [ -n "${1:-}" ]; then
+    args+=(--session-id "$1")
+  fi
   if [ -n "${2:-}" ]; then args+=("$2"); fi
   argv_json "${args[@]}"
+}
+
+# "<session>\t<cwd>" of a launcher's claude as its last run recorded it, when its transcript
+# exists and its folder still does (scan.sh launcher-session); nothing otherwise: a fresh start.
+recorded_session() {
+  local out
+  out=$(env "${envs[@]}" "$DIR/scan.sh" launcher-session "$1" 2>/dev/null) || out=""
+  if [ -z "$out" ]; then return 0; fi
+  if [ ! -d "${out#*$'\t'}" ]; then
+    echo "open-gui.sh: the $1 claude's folder ${out#*$'\t'} is gone; it starts fresh" >&2
+    return 0
+  fi
+  echo "$out"
 }
 
 # True when the terminal is labelled as run from this checkout. An unlabelled
@@ -313,6 +330,9 @@ reap_dead() {
     case "$fg" in
       zsh|bash|sh|fish)
         if [ $(( $(date +%s%3N) - created )) -lt 30000 ]; then continue; fi ;;
+      *)
+        # The code agent's terminal is the person's own: only a shell is reaped there.
+        if [ "$1" = "$CODE_AGENT" ]; then continue; fi ;;
     esac
     end_terminal "$t"
   done
@@ -401,11 +421,18 @@ name_mod_pane() {
   fi
 }
 
-# Starts the prompter, labelled with its claude's session.
+# Starts the prompter, labelled with its claude's session: the recorded one resumed, else fresh.
 add_prompter() {
-  local session term
-  session=$(new_session)
-  term=$(start_engine_term "$1" "$2" "$3" "$(session_argv "$session" "/octopilot:prompter" "" "$MODEL_PROMPTER")" prompter)
+  local session term recorded cwd argv
+  recorded=$(recorded_session "$PROMPTER_AGENT")
+  if [ -n "$recorded" ]; then
+    IFS=$'\t' read -r session cwd <<<"$recorded"
+    argv=$(session_argv "$session" "" "$cwd" "$MODEL_PROMPTER" resume)
+  else
+    session=$(new_session)
+    argv=$(session_argv "$session" "/octopilot:prompter" "" "$MODEL_PROMPTER")
+  fi
+  term=$(start_engine_term "$1" "$2" "$3" "$argv" prompter)
   name_agent "$term" "$PROMPTER_AGENT" "$session"
 }
 
@@ -535,13 +562,19 @@ add_kitchen() {
   record_label "$host" octopilot.kitchen "$main:$kitchen"
 }
 
-# The code agent's claude in a tab of its own, named CODE_TAB, started in this checkout.
-# Prints its terminal.
+# The code agent's claude in a tab of its own, named CODE_TAB: its recorded session resumed in
+# its folder, else a fresh one started in this checkout. Prints its terminal.
 start_code_tab() {
-  local session created term
-  session=$(new_session)
-  created=$(app do tab.new --space "$1" --name "$CODE_TAB" \
-    --argv "$(session_argv "$session" "" "$CODE_CWD" "$MODEL_CODE")" --focus false)
+  local session created term recorded cwd argv
+  recorded=$(recorded_session "$CODE_AGENT")
+  if [ -n "$recorded" ]; then
+    IFS=$'\t' read -r session cwd <<<"$recorded"
+    argv=$(session_argv "$session" "" "$cwd" "$MODEL_CODE" resume)
+  else
+    session=$(new_session)
+    argv=$(session_argv "$session" "" "$CODE_CWD" "$MODEL_CODE")
+  fi
+  created=$(app do tab.new --space "$1" --name "$CODE_TAB" --argv "$argv" --focus false)
   term=$(jq -r '.terminal // empty' <<<"$created")
   if [ -z "$term" ]; then
     echo "open-gui.sh: the $CODE_TAB tab has no terminal for the $CODE_AGENT agent" >&2
@@ -633,14 +666,22 @@ add_code_tab() {
   drop_side_panel "$code" "$t" "$(cut -f3 <<<"$located")"
 }
 
-# The --terminals code tab: a terminal tab with its claude started in this checkout,
-# unless this checkout's code agent runs already (another checkout's is left alone).
+# The --terminals code tab: a terminal tab with its claude, resumed when the launcher recorded
+# one, else started in this checkout, unless this checkout's code agent runs already (another
+# checkout's is left alone).
 add_code_terminal_tab() {
-  local created
+  local created recorded session="" cwd="" argv
   if [ -n "$(find_agent "$CODE_AGENT")" ]; then return 0; fi
+  recorded=$(recorded_session "$CODE_AGENT")
+  if [ -n "$recorded" ]; then
+    IFS=$'\t' read -r session cwd <<<"$recorded"
+    argv=$(session_argv "$session" "" "$cwd" "$MODEL_CODE" resume)
+  else
+    argv=$(session_argv "" "" "" "$MODEL_CODE")
+  fi
   created=$(app do tab.new --space "$1" --name "$CODE_TAB" --folder "$CODE_CWD" \
-    --argv "$(session_argv "" "" "" "$MODEL_CODE")" --focus false)
-  name_agent "$(jq -r '.terminal' <<<"$created")" "$CODE_AGENT"
+    --argv "$argv" --focus false)
+  name_agent "$(jq -r '.terminal' <<<"$created")" "$CODE_AGENT" "$session"
 }
 
 # The terminal of a dashboard.sh run as the TUI layout's curses dashboard, if
@@ -909,7 +950,7 @@ ensure_window
 # The space is found before the retirement and the reap, which may end the terminals that prove it.
 known_space=$(existing_space)
 # Dead shells go first: the pre-checks and the records holder must not see them.
-for a in "$HEADLESS_AGENT" "$PROMPTER_AGENT"; do reap_dead "$a"; done
+for a in "$HEADLESS_AGENT" "$PROMPTER_AGENT" "$CODE_AGENT"; do reap_dead "$a"; done
 # Layouts this run cannot build over are refused before anything is ended.
 if [ -n "$known_space" ] && [ "$TERMINALS" = 0 ]; then
   old=$(legacy_dashboard "$known_space")
