@@ -51,6 +51,8 @@ export const SHELF_SLOTS = SHELF.rows.length * SHELF.perRow;
 // The On hold tray: half-size boats in the gap under the shelf, one row, the chef's pan below.
 export const HOLD = { x: SHELF.x - 8, y: 102, pitch: 19, scale: 0.5 };
 export const HOLD_SLOTS = 8;
+// The "+N" chip hangs from the scene's right edge, so a wide "+NN" stays in the scene.
+export const HOLD_MORE_INSET = 4;
 export function holdBox(i) {
   return [HOLD.x + i * HOLD.pitch, HOLD.y, SHELF.boat.w * HOLD.scale, SHELF.boat.h * HOLD.scale];
 }
@@ -199,7 +201,7 @@ export function derive(view, nowMs, walk = 0, logMax = LOG_LINES) {
       onPan: pan ? balls.length : Number(header.active) || 0,
       holes,
       shelf: Number(pan?.shelf_total) || list(pan?.shelf).length,
-      hold: Number(header.hold) || 0,
+      hold: pan ? Number(pan.hold_total) || list(pan.hold).length : Number(header.hold) || 0,
       paused,
       offline,
     }),

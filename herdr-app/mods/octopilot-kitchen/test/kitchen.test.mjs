@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, existsSync } from "node:fs";
-import { derive, ballSprite, chefMood, focusIndex, armPiece, armReach, holeAt, spriteBox, boatBox, holdBox, HOLD_SLOTS, toneOf, logLines, headerLine, offlineReason, MOODS, BURSTS } from "../kitchen.js";
+import { derive, ballSprite, chefMood, focusIndex, armPiece, armReach, holeAt, spriteBox, boatBox, holdBox, HOLD_SLOTS, HOLD_MORE_INSET, toneOf, logLines, headerLine, offlineReason, MOODS, BURSTS } from "../kitchen.js";
 import { PAN, SCENE, BOX, ARM_POSES, COOK_STEPS } from "../atlas.js";
 
 const here = new URL(".", import.meta.url);
@@ -127,6 +127,10 @@ test("the On hold tray: up to 8 faded boats under the shelf, then a +N for the r
     assert.ok(y >= lowerShelfBottom && y + h <= BOX.pan[1], `slot ${i} y`);
     if (i) assert.ok(x >= holdBox(i - 1)[0] + w, `slot ${i} overlaps the one before`);
   }
+  // The "+N" chip hangs from the right edge by HOLD_MORE_INSET; node can't measure its width, so
+  // this only keeps the eighth boat clear of that edge (herdr-app check covers the render).
+  const [lastX, , lastW] = holdBox(HOLD_SLOTS - 1);
+  assert.ok(lastX + lastW <= SCENE.w - HOLD_MORE_INSET, "the eighth boat ends before the +N chip's edge");
 });
 
 test("a tray of fewer than 8 holds has no +N; the older view.json has an empty tray", () => {
@@ -136,7 +140,7 @@ test("a tray of fewer than 8 holds has no +N; the older view.json has an empty t
   const m = derive(view, view.generated_at * 1000);
   assert.equal(m.held, 1);
   assert.equal(m.heldMore, 0);
-  assert.equal(m.header, "🐙 takoyaki kitchen · 6/6 on the pan · 3 on the shelf");
+  assert.equal(m.header, "🐙 takoyaki kitchen · 6/6 on the pan · 3 on the shelf · 1 on hold");
   // view.json before On hold: no `hold`, no `hold_total`, no `header.hold`.
   const old = derive(fixture("kitchen-view.json"), fixture("kitchen-view.json").generated_at * 1000);
   assert.equal(old.held, 0);

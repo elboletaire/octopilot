@@ -7,7 +7,7 @@ import { v_flex, h_flex, TextView } from "gpui-base";
 import { exec, readTextFile, watchFolder, run, theme, props, shared, home, window, placement, openOverlay, closeOverlay, checking, panes, spaces } from "herdr";
 import { clip } from "./clip.js";
 import { SCENE, BOX, SPRITE } from "./atlas.js";
-import { derive, holeAt, spriteBox, boatBox, holdBox, HOLD, HOLD_SLOTS, offlineReason, WALK_MS, LOG_LINES } from "./kitchen.js";
+import { derive, holeAt, spriteBox, boatBox, holdBox, HOLD, HOLD_SLOTS, HOLD_MORE_INSET, offlineReason, WALK_MS, LOG_LINES } from "./kitchen.js";
 import { paneLayout, bubbleRows, PANE, PANE_DEFAULT } from "./layout.js";
 import { machineCache, addressOn } from "./machine.js";
 
@@ -378,7 +378,7 @@ export default class Kitchen extends View {
       ...Array.from({ length: m.boats }, (_v, i) => piece("boat", boatBox(i))),
       ...Array.from({ length: m.held }, (_v, i) => piece("boat", holdBox(i)).opacity(HELD_OPACITY)),
       m.heldMore > 0
-        ? div().absolute().left((HOLD.x + HOLD_SLOTS * HOLD.pitch) * K).top(HOLD.y * K).child(this.chip(`+${m.heldMore}`))
+        ? div().absolute().right(HOLD_MORE_INSET).top(HOLD.y * K).child(this.chip(`+${m.heldMore}`))
         : null,
       this.chef(m),
       piece("counter", BOX.counter),
