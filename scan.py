@@ -841,26 +841,32 @@ class HcBackend:
         return (["env"] + env + ["claude"] + plugin + ids
                 + (["--model", model] if model else []))
 
-    def spawn_space(self, key_, path, wt, title, model):
-        """A space on the worktree, its first terminal running a named claude."""
-        session = str(uuid.uuid4())
-        argv = json.dumps(self.spawn_command(model, session=session))
+    def spawn_space(self, key_, path, wt, title, model, name=None, resume=None,
+                    cont=False):
+        """A space on the worktree, its first terminal running a named claude.
+        resume or cont restores a conversation instead of starting a new one."""
+        session = None if resume or cont else str(uuid.uuid4())
+        argv = json.dumps(self.spawn_command(model, session=session, resume=resume,
+                                             cont=cont))
         code, data, raw = app_do("space.new", ["--name", title, "--folder", wt,
                                                "--argv", argv, "--focus", "false"],
                                  timeout=90)
         if code != 0 or not data or "terminal" not in data:
             raise SystemExit(f"herdr-app space.new failed: {raw}")
         ws, term = data["space"], data["terminal"]
-        name = agent_name(key_)
+        name = name or agent_name(key_)
         warning = self.start_agent(term, wt, path, name, f"space {ws}")
-        return self.host_of(ws, name, wt, warning, session)
+        return self.host_of(ws, name, wt, warning, session or resume)
 
-    def spawn_tab(self, sp, key_, path, wt, title, model):
+    def spawn_tab(self, sp, key_, path, wt, title, model, name=None, resume=None,
+                  cont=False):
         """A tab of the Octopilot space on the worktree, its terminal running a
-        named claude. A reserved tab name gets the agent's name after it."""
-        name = agent_name(key_)
-        session = str(uuid.uuid4())
-        argv = json.dumps(self.spawn_command(model, session=session))
+        named claude. A reserved tab name gets the agent's name after it.
+        resume or cont restores a conversation instead of starting a new one."""
+        name = name or agent_name(key_)
+        session = None if resume or cont else str(uuid.uuid4())
+        argv = json.dumps(self.spawn_command(model, session=session, resume=resume,
+                                             cont=cont))
         code, data, raw = app_do("tab.new", ["--space", sp, "--name",
                                              tab_label(title, name),
                                              "--folder", wt, "--argv", argv,
@@ -876,7 +882,7 @@ class HcBackend:
             code, _, raw = app_do("tab.settle", ["--id", tab])
             if code != 0:
                 print(f"note: tab {tab} not settled: {raw}")
-        host = self.host_of(tab, name, wt, warning, session)
+        host = self.host_of(tab, name, wt, warning, session or resume)
         host["space"] = sp
         return host
 
@@ -3531,6 +3537,194 @@ def launcher_session(args, state):
     return 0
 
 
+# A shell in the foreground this long after its start is bare: the same wait as
+# open-gui.sh's reap_dead.
+BARE_SHELL_MS = 30000
+SHELLS = ("zsh", "bash", "sh", "fish")
+
+
+def terminal_state(term, now_ms):
+    """Whether a terminal is a bare shell: "bare" for a shell started more than
+    BARE_SHELL_MS ago, "young" for one still starting, else "busy" (anything
+    else in the foreground, or a terminal hc cannot read)."""
+    code, info, _ = hc(["get", term, "--json"], timeout=10)
+    if code != 0 or not isinstance(info, dict):
+        return "busy"
+    if (info.get("foreground") or {}).get("name") not in SHELLS:
+        return "busy"
+    if now_ms - (info.get("created_ms") or 0) > BARE_SHELL_MS:
+        return "bare"
+    return "young"
+
+
+def end_terminal(term):
+    """hc kill, then hc rm, of a bare shell -> (code, raw) of the first failure."""
+    for args in (["kill", term], ["rm", term]):
+        code, _, raw = hc(args)
+        if code != 0:
+            return code, raw
+    return 0, ""
+
+
+def session_terminals(spaces, session):
+    """The terminal addresses herdr-app lists in a tab, or in every tab of a space."""
+    addresses = []
+    for sp in spaces:
+        for tab in sp.get("tabs", []):
+            if session in (sp.get("id"), tab.get("id")):
+                addresses += [t.get("terminal") for t in tab.get("terminals", [])]
+    return addresses
+
+
+def worktree_has_transcript(wt):
+    """Whether claude has a transcript for the worktree's folder, which --continue
+    resumes. claude names the project folder after the path, non-alphanumerics as -."""
+    folder = re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(wt))
+    return bool(glob.glob(os.path.join(PROJECTS_DIR, folder, "*.jsonl")))
+
+
+def labelled_terminals(tab):
+    """The addresses of the hc terminals labelled herdr.tab=<tab>: a claude still
+    starting may carry it before it shows as an agent."""
+    code, data, _ = hc(["ls", "--json", "--label", f"herdr.tab={tab}"], timeout=10)
+    if code != 0:
+        return []
+    return [t["address"] for t in (data or {}).get("terminals", [])]
+
+
+def restore_model(k, it):
+    """The model an item's session was spawned on: its own, else the one its
+    template pins (see spawn_item and boot_template)."""
+    if it.get("model"):
+        return it["model"]
+    _, _, kind = split_key(k)
+    if kind == "issue":
+        tmpl = "work"
+    elif kind == "investigate":
+        tmpl = "investigate"
+    elif it.get("stack"):
+        tmpl = "adopt-stack" if it.get("mode") == "fix" else "review-stack"
+    elif it.get("mode") == "fix":
+        tmpl = "review-fix"
+    else:
+        tmpl = "review-comment"
+    return MODEL_FOR.get(tmpl, "")
+
+
+def restore_item(state, k, it, ctx):
+    """Reopen one herdr-app item's session and resume its claude -> (the line to
+    print, whether the item changed). ctx: what restore_sessions read once."""
+    sess = it.get("session")
+    if backend_for(sess) is HERDR:
+        return (f"{k}: herdr TUI worker, restore not supported: see the prompter "
+                "skill's manual steps"), False
+    if backend_for(sess) is not HC:
+        return f"{k}: not on herdr-app, left alone", False
+    wt = it.get("worktree")
+    if not wt or not os.path.isdir(wt):
+        return f"{k}: worktree {wt or '(none)'} is missing, skipped", False
+    slug = split_key(k)[0]
+    repo = state.get("registry", {}).get(slug, {}).get("path")
+    if not repo:
+        return f"{k}: {slug} is not in the registry, skipped", False
+    # An agent live or parked elsewhere is never closed or resumed a second time.
+    home = rehome_of(it, ctx["sessions"], ctx["live"], ctx["open"], ctx["held"])
+    if home:
+        return f"{k}: its agent is live in {home[0]}, left alone", False
+    parked = parked_agent(it, sess, ctx["open"], HC.agents)
+    if parked:
+        return (f"{k}: its agent is parked in terminal {parked['pane']}, "
+                "left alone"), False
+    if sess in ctx["open"]:
+        # Open with a live agent, the session is fine. Only bare shells are restored.
+        if sess in ctx["live"]:
+            return f"{k}: its agent is live in {sess}, left alone", False
+        terms = session_terminals(ctx["spaces"], sess)
+        if not terms and labelled_terminals(sess):
+            return (f"{k}: a terminal is labelled for {sess}, still starting: "
+                    "left alone"), False
+        now_ms = int(time.time() * 1000)
+        states = {t: terminal_state(t, now_ms) for t in terms}
+        busy = [t for t, st in states.items() if st == "busy"]
+        if busy:
+            return (f"{k}: terminal {busy[0]} in {sess} runs something other than "
+                    "a shell: left alone"), False
+        if "young" in states.values():
+            return f"{k}: a shell in {sess} is still starting, left alone", False
+        for t in terms:
+            code, raw = end_terminal(t)
+            if code != 0:
+                return f"{k}: could not end terminal {t}: {raw}, left as it is", False
+        code, raw = HC.close(sess)
+        if code != 0:
+            return f"{k}: closing {sess} failed: {raw}, left as it is", False
+    name = it.get("agent") or agent_name(k)
+    claude = it.get("claude_session")
+    resume = claude if transcript_file(claude) else None
+    # Without a transcript in the worktree's folder, --continue has nothing to
+    # resume: neither flag starts a fresh session.
+    cont = resume is None and worktree_has_transcript(wt)
+    title = it.get("title") or name
+    model = restore_model(k, it)
+    try:
+        if worker_host() == "space":
+            host = HC.spawn_space(k, repo, wt, title, model, name=name,
+                                  resume=resume, cont=cont)
+        else:
+            host = HC.spawn_tab(ctx["space"], k, repo, wt, title, model, name=name,
+                                resume=resume, cont=cont)
+    except SystemExit as err:
+        return f"{k}: reopening failed: {err}", False
+    it["session"] = host["session"]
+    it["backend"] = host["backend"]
+    if host.get("space"):
+        it["space"] = host["space"]
+    else:
+        it.pop("space", None)
+    if host.get("claude_session"):
+        it["claude_session"] = host["claude_session"]
+    else:
+        it.pop("claude_session", None)
+    log_event("restore", k, session=host["session"])
+    how = (f"resumed {resume}" if resume else "continued the last conversation"
+           if cont else "started fresh, no transcript to resume")
+    line = f"{k}: restored in {host['session']} ({how})"
+    if host.get("warning"):
+        line += f"; WARNING: {host['warning']}"
+    return line, True
+
+
+def restore_sessions(args):
+    """Reopen each tracked herdr-app worker and resume its claude; README has the flow.
+    The launcher holds tick.lock and exec.lock, never taken here; the state is per item.
+    Refused (exit 1) without herdr-app or an Octopilot space."""
+    sessions, answered, open_ws = all_sessions()
+    spaces = HC.spaces() if HC.name in answered else None
+    if spaces is None:
+        print("herdr-app did not answer: nothing restored", file=sys.stderr)
+        return 1
+    space = octopilot_space()
+    if space is None:
+        print("no Octopilot space open in herdr-app: open it, then run again",
+              file=sys.stderr)
+        return 1
+    state = load()
+    ctx = {"sessions": sessions, "spaces": spaces, "open": open_ws,
+           "live": all_live(), "space": space,
+           "held": {it.get("session") for it in state["items"].values()}}
+    for k in list(state["items"]):
+        with locked():
+            state = load()
+            it = state["items"].get(k)
+            if it is None:
+                continue
+            line, changed = restore_item(state, k, it, ctx)
+            if changed:
+                save(state)
+        print(line)
+    return 0
+
+
 def parse_line(raw):
     try:
         entry = json.loads(raw)
@@ -3775,7 +3969,7 @@ def chat_keys(args):
     return result_code
 
 
-SELF_LOCKING = {"tick", "drain"}
+SELF_LOCKING = {"tick", "drain", "restore-sessions"}
 READ_ONLY = {"render", "status", "siblings", "snapshot", "wind-down", "plugin-settings",
              "inbox", "installed-dir", "speech", "chat", "chat-send", "chat-keys",
              "launcher-session", "host-space"}
@@ -4065,6 +4259,8 @@ def dispatch(cmd, args, state):
         return launcher_session(args, state)
     if cmd == "reboot":
         return reboot(state, args[1])
+    if cmd == "restore-sessions":
+        return restore_sessions(args)
     if cmd in ("read", "focus") and len(args) < 2:
         print(f"usage: scan.sh {cmd} <item>", file=sys.stderr)
         return 1
@@ -4317,7 +4513,7 @@ def dispatch(cmd, args, state):
           "reset-rounds|review-base|"
           "mark-merged|restack|"
           "render|spawn|"
-          "investigate|snapshot|report|inbox|request|send|send-code|reboot|read|focus|wind-down|"
+          "investigate|snapshot|report|inbox|request|send|send-code|reboot|restore-sessions|read|focus|wind-down|"
           "speech|chat|chat-send|chat-keys|launcher-session]", file=sys.stderr)
     return 1
 

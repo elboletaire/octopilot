@@ -35,6 +35,9 @@ EMPTY = {
     "record_launcher_sessions": None,
     "octopilot_closed": False,
     "octopilot_reopened": False,
+    "terminal_state": "busy",
+    "end_terminal": (0, ""),
+    "labelled_terminals": [],
 }
 
 

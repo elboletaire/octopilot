@@ -54,6 +54,16 @@ terminal's address and the `terminal.keep` command to show it, and no prompt is 
 `CLOSED`. Cleanup and detach (`z`) end the parked terminal (`hc kill`) first, and cleanup keeps the item
 tracked when the kill fails. Only an agent that is gone shows `GONE`.
 
+**After a reboot or a closed space.** `scan.sh restore-sessions` reopens each tracked herdr-app
+worker: a tab of the Octopilot space (a space of its own with `WORKER_HOST=space`) on its
+worktree, resuming its claude conversation (`--resume` when its transcript exists, else
+`--continue` in the worktree). An item whose agent is live or parked elsewhere is skipped, as is a
+TUI item (restore it by hand, see the prompter skill) and one whose worktree is missing. A tab
+whose terminals are all bare shells, up for 30 s or more, is ended and reopened; one running
+anything else is left alone. Only `session`, `space`, `backend` and `claude_session` change on an
+item. It is refused when herdr-app does not answer or no Octopilot space is open. It takes the
+state lock per item and never `tick.lock` or `exec.lock`: the launcher holds those while it runs it.
+
 **Upgrading.** Sessions already in their own spaces or workspaces keep working; there is
 nothing to migrate. Both id shapes are read: tabs as `tb…` (GUI) or `w…:t…` (TUI), spaces
 and workspaces as `sp…` or `w…`.
