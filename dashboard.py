@@ -111,12 +111,14 @@ ROW_ACTIONS = (
     ("focus", "\r", "open"), ("peek", "v", "agent"), ("shell", "t", "shell"),
     ("browser", "o", "browser"), ("go", "g", "go"), ("no", "n", "no"),
     ("grant", "R", "another round"), ("rereview", "e", "re-review"),
-    ("ack", "x", "ack"), ("detach", "z", "detach"), ("park", "d", "done"),
-    ("unpark", "d", "undone"), ("remove", "\x1b[3~", "remove"),
+    ("ack", "x", "ack"), ("detach", "z", "detach"), ("hold", "d", "hold"),
+    ("unhold", "d", "resume"), ("remove", "\x1b[3~", "remove"),
 )
 ROW_KEYS = {aid: key for aid, key, _ in ROW_ACTIONS}
-ROW_IDS = set(ROW_KEYS)
-# The TUI keys that map straight to a row action (d picks park or unpark).
+# The older names of hold and unhold, still accepted by --action.
+ROW_ALIASES = {"park": "hold", "unpark": "unhold"}
+ROW_IDS = set(ROW_KEYS) | set(ROW_ALIASES)
+# The TUI keys that map straight to a row action (d picks hold or unhold).
 KEY_ROW = {"\r": "focus", "\n": "focus", "v": "peek", "t": "shell",
            "o": "browser", "g": "go", "n": "no", "R": "grant", "e": "rereview",
            "x": "ack", "z": "detach", "\x1b[3~": "remove"}
@@ -144,7 +146,8 @@ NOTE_ROWS = {"UNCLONED", "STALE", "UNKNOWN"}
 REPORT_NEEDS = {"blocked", "failed", "stalled", "capped"}
 # Events after which the GitHub view is worth refreshing early.
 KICK_EVENTS = {"report", "spawn", "sent", "cleanup", "track", "detach",
-               "park", "unpark", "untrack", "decline", "merged", "tick-asked"}
+               "hold", "unhold", "park", "unpark", "untrack", "decline",
+               "merged", "tick-asked"}
 # Events that wake the engine's drain: a request queued.
 DRAIN_EVENTS = {"request"}
 # The drain runs at once on those, and at least this often otherwise.
@@ -741,7 +744,8 @@ class Model:
         elif stalled:
             note = "agent not reporting"
         elif hold.get("by") == "you":
-            note = "parked"
+            note = (f"held: {hold['reason']}" if hold.get("reason")
+                    else "held by you")
         elif it.get("engine_error"):
             note = it["engine_error"]
         elif kind in ORCH_ROWS:
@@ -1116,6 +1120,17 @@ def browse_row(e):
     return Result(True, f"opening {short(e['key'])} in the browser")
 
 
+def unread_report(model, it):
+    """Whether a read-only investigation's ready report is still to be read:
+    the report `x` acknowledges."""
+    if not (it or {}).get("read_only"):
+        return False
+    with model.lock:
+        live = dict(model.live)
+    rep = scan.live_report(it, live)
+    return rep.get("state") == "ready" and it.get("report_acked") != rep.get("at")
+
+
 def row_refusal(model, aid, e):
     """Why the TUI refuses aid on this row, as its message; None when it runs."""
     kind = e["kind"]
@@ -1133,23 +1148,28 @@ def row_refusal(model, aid, e):
             "go/no only applies to Pick next rows"
     if aid == "grant":
         return None if kind == "CAPPED" else "R only applies to CAPPED rows"
-    if aid in ("rereview", "ack"):
+    if aid == "rereview":
         return None if kind == "PUSHED" else \
-            "e/x only apply to PUSHED (stale) rows"
+            "e only applies to PUSHED (stale) rows"
+    if aid == "ack":
+        if kind == "PUSHED" or unread_report(model, it):
+            return None
+        return "x only applies to PUSHED (stale) rows and reports to read"
     if aid == "detach":
         return None if it is not None else \
             "detach only applies to tracked items"
-    if aid in ("park", "unpark"):
+    if aid in ("hold", "unhold"):
         if it is None:
             return "d only applies to tracked items"
-        if kind in ("MERGED", "RESTACK", "CLOSED", "GONE", "BOOTING"):
-            return f"{kind} rows can't be parked now"
+        if aid == "unhold":
+            return None if held_by_you(it) else f"{e['key']} is not on hold"
+        if kind in ("MERGED", "RESTACK", "CLOSED", "GONE", "DONE", "BOOTING"):
+            return f"{kind} rows can't be held now"
         # Its pending feedback would revive the card on the next tick.
         if kind == "FEEDBACK":
-            return "FEEDBACK rows can't be parked: the feedback is pending"
-        if (aid == "unpark") != held_by_you(it):
-            return (f"{e['key']} is {'not in' if aid == 'unpark' else 'already in'}"
-                    " Done")
+            return "FEEDBACK rows can't be held: the feedback is pending"
+        if held_by_you(it):
+            return f"{e['key']} is already on hold"
         return None
     if aid == "peek":
         if scan.backend_for(e["session"]) is scan.HC:
@@ -1188,13 +1208,13 @@ def row_confirm(model, aid, e):
     if aid == "rereview":
         return f"press e again to ask for a re-review of {key}"
     if aid == "ack":
-        return f"press x again to ack the new commits on {key}"
+        return f"press x again to ack {key}"
     if aid == "detach":
         return f"press z again to detach {key} (worktree kept, untracked)"
-    if aid == "park":
-        return f"press d again to move {key} to Done (session kept, slot freed)"
-    if aid == "unpark":
-        return f"press d again to move {key} out of Done"
+    if aid == "hold":
+        return f"press d again to put {key} on hold (session kept, slot freed)"
+    if aid == "unhold":
+        return f"press d again to take {key} off hold"
     if aid == "remove":
         busy = ("⚠ its agent is working -- " if e["kind"] in
                 ("WORKING", "BOOTING", "REVIEW", "FEEDBACK") else "")
@@ -1231,7 +1251,7 @@ def perform(model, aid, e, confirmed=False, suspend=None):
         return scan_run(["ack-push", key])
     if aid == "detach":
         return scan_run(["detach", key])
-    if aid in ("park", "unpark"):
+    if aid in ("hold", "unhold"):
         return scan_run([aid, key])
     if aid == "remove":
         return scan_run(["cleanup", key], timeout=400)
@@ -1578,6 +1598,7 @@ def run_action(model, aid, key, args):
     code path. The mod asks the second press (`confirm`), so this runs at
     once; confirmed=1 with holds=<the shown names> is the kitchen alert's
     second press."""
+    aid = ROW_ALIASES.get(aid, aid)
     if aid == "refresh":
         # Only a running headless dashboard rewrites view.json; it watches the
         # kick file's mtime (see headless()).
@@ -1971,8 +1992,8 @@ class Dashboard:
         kind = sel["kind"] if sel else None
         items = (self.m.state or {}).get("items") or {}
         tracked = sel and sel["key"] in items
-        parked = tracked and held_by_you(items[sel["key"]])
         repo = self.sel_repo()
+        acts = {a["id"] for a in row_actions(self.m, sel)} if sel else set()
         keys = []
         if repo:
             keys.append(("spc", "fold" if repo in self.expanded else "open"))
@@ -1981,13 +2002,16 @@ class Dashboard:
         keys += [("g/n", "go/no")] if kind == "PROPOSE" else []
         if kind == "CAPPED":
             keys.append(("R", "another round"))
-        if kind == "PUSHED":
-            keys += [("e", "re-review"), ("x", "ack")]
+        if "rereview" in acts:
+            keys.append(("e", "re-review"))
+        if "ack" in acts:
+            keys.append(("x", "ack"))
         if tracked:
             keys.append(("z", "detach"))
             if kind not in ("MERGED", "RESTACK"):
                 keys.append(("del/⌫", "remove"))
-            keys.append(("d", "undone" if parked else "done"))
+        if acts & {"hold", "unhold"}:
+            keys.append(("d", "resume" if "unhold" in acts else "hold"))
         if not repo:
             keys += [("v", "agent"), ("t", "shell"), ("o", "browser")]
         keys += [("i", "investigate"), ("a", "prompter"),
@@ -2182,7 +2206,7 @@ class Dashboard:
             return True
         elif key == "d":
             it = tracked_item(self.m, e["key"])
-            self.row_action("unpark" if held_by_you(it) else "park",
+            self.row_action("unhold" if held_by_you(it) else "hold",
                             e, live, term)
         elif key in KEY_ROW:
             self.row_action(KEY_ROW[key], e, live, term)
