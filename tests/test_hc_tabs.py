@@ -27,7 +27,7 @@ class HcAgentsTest(unittest.TestCase):
         self.addCleanup(mock.patch.stopall)
 
     def fake_hc(self, args, timeout=60):
-        if args[:2] == ["ls", "--json"]:
+        if args[0] == "ls":
             return 0, {"terminals": self.terminals}, ""
         if args[0] == "get":
             return 0, {"name": None, "labels": self.labels.get(args[1], {})}, ""
@@ -94,7 +94,7 @@ class HcSessionsTest(unittest.TestCase):
         return None
 
     def fake_hc(self, args, timeout=60):
-        if args[:2] == ["ls", "--json"]:
+        if args[0] == "ls":
             return 0, {"terminals": [{"address": a, "cwd": c}
                                      for a, c in self.cwds.items()]}, ""
         if args[0] == "get":
@@ -119,6 +119,12 @@ class HcSessionsTest(unittest.TestCase):
                              "terminals": [{"terminal": "t1"}]}]}]
         self.assertEqual(self.sessions(spaces),
                          [wt_row("tb1", "Fix: x", space="spOct")])
+
+    def test_terminal_cwds_lists_finished_terminals_too(self):
+        listed = {"terminals": [{"address": "t1", "cwd": WT}]}
+        with mock.patch.object(scan, "hc", return_value=(0, listed, "")) as hc:
+            self.assertEqual(scan.HC.terminal_cwds(), {"t1": WT})
+        hc.assert_called_once_with(["ls", "--all", "--json"], timeout=10)
 
     def test_a_settled_tab_is_still_a_row(self):
         self.cwds = {"t1": WT}
@@ -383,6 +389,7 @@ class HcTabLifecycleTest(unittest.TestCase):
             (self.WT, "/home/u/src/repo", "feat/x") if f.startswith(self.WT) else None
         )).start()
         self.cwds = {"t7": self.WT}
+        mock.patch.object(scan.time, "sleep").start()
         self.git = mock.patch.object(scan, "sh", return_value=(0, "", "")).start()
         mock.patch.object(scan.os.path, "isdir", return_value=True).start()
         self.addCleanup(mock.patch.stopall)
@@ -395,7 +402,7 @@ class HcTabLifecycleTest(unittest.TestCase):
         return self.replies[command]
 
     def fake_hc(self, args, timeout=60):
-        if args[:2] == ["ls", "--json"]:
+        if args[0] == "ls":
             return 0, {"terminals": [{"address": a, "cwd": c}
                                      for a, c in self.cwds.items()]}, ""
         if args[0] == "get":
@@ -472,10 +479,27 @@ class HcTabLifecycleTest(unittest.TestCase):
 
     def test_discard_a_tab_still_listed_keeps_the_worktree(self):
         spaces = [tab_space()]
-        with mock.patch.object(scan.HC, "spaces", side_effect=[spaces, spaces]):
+        with mock.patch.object(scan.HC, "spaces", side_effect=[spaces] + [spaces] * 5):
             code, raw = scan.HC.discard("tb1", self.WT)
         self.assertEqual(code, 1)
         self.assertEqual(raw, "still open: its worktree is kept")
+        self.git.assert_not_called()
+
+    def test_discard_a_tab_that_lingers_a_moment_is_removed(self):
+        spaces = [tab_space()]
+        gone = [{"id": "spOct", "folder": "/home/u/src", "tabs": []}]
+        with mock.patch.object(scan.HC, "spaces",
+                               side_effect=[spaces, spaces, spaces, gone]):
+            self.assertEqual(scan.HC.discard("tb1", self.WT), (0, ""))
+        self.git.assert_called_once()
+        self.assertEqual(scan.time.sleep.call_count, 2)
+
+    def test_discard_a_tab_with_an_unreadable_list_says_so_and_keeps_it(self):
+        spaces = [tab_space()]
+        with mock.patch.object(scan.HC, "spaces", side_effect=[spaces, None]):
+            code, raw = scan.HC.discard("tb1", self.WT)
+        self.assertEqual(code, 1)
+        self.assertEqual(raw, "herdr-app did not answer: its worktree is kept")
         self.git.assert_not_called()
 
     def test_discard_a_tab_whose_close_failed_but_is_gone_removes_the_worktree(self):
@@ -488,15 +512,10 @@ class HcTabLifecycleTest(unittest.TestCase):
     def test_discard_a_tab_whose_close_failed_and_is_listed_reports_it(self):
         self.replies["tab.close"] = (1, None, "busy")
         spaces = [tab_space()]
-        with mock.patch.object(scan.HC, "spaces", side_effect=[spaces, spaces]):
+        with mock.patch.object(scan.HC, "spaces", side_effect=[spaces] * 6):
             self.assertEqual(scan.HC.discard("tb1", self.WT), (1, "busy"))
         self.git.assert_not_called()
 
-    def test_discard_a_tab_with_no_answer_from_herdr_app_keeps_the_worktree(self):
-        with mock.patch.object(scan.HC, "spaces", side_effect=[[tab_space()], None]):
-            code, raw = scan.HC.discard("tb1", self.WT)
-        self.assertEqual(code, 1)
-        self.git.assert_not_called()
 
     def test_discard_a_space_closes_it_then_removes_its_worktree(self):
         after = [{"id": "spOther", "folder": "/x", "tabs": []}]

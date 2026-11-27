@@ -500,8 +500,9 @@ class HcBackend:
                 "worktree": {"branch": branch or None, "main_repo_path": repo}}
 
     def terminal_cwds(self):
-        """{terminal: cwd} for the terminals hc lists, {} when it cannot say."""
-        code, data, _ = hc(["ls", "--json"], timeout=10)
+        """{terminal: cwd} for the terminals hc lists, finished ones too (a tab
+        whose claude exited keeps its session), {} when it cannot say."""
+        code, data, _ = hc(["ls", "--all", "--json"], timeout=10)
         if code != 0 or not data:
             return {}
         return {t["address"]: t.get("cwd") for t in data.get("terminals", [])}
@@ -645,9 +646,11 @@ class HcBackend:
         code, raw = self.close(session)
         # A closed tab is checked against the list too, whatever close said.
         if code != 0 or is_tab(session):
-            remaining = self.spaces()
-            if remaining is None or session in open_ids(remaining):
-                # Still open, or unknown: its worktree is still in use.
+            gone = self.gone(session, TAB_GONE_TRIES if is_tab(session) else 1)
+            if gone is None:
+                return code or 1, "herdr-app did not answer: its worktree is kept"
+            if not gone:
+                # Still open: its worktree is still in use.
                 return code or 1, raw or "still open: its worktree is kept"
             code, raw = 0, ""
         if not wt and spaces is None:
@@ -660,6 +663,20 @@ class HcBackend:
                                 cwd=wt, timeout=180)
             raw = err or out
         return code, raw
+
+    def gone(self, session, tries):
+        """True once herdr-app no longer lists the session, False while it still
+        does after `tries` looks, None when the list cannot be read. A closed tab
+        can linger in the list a moment."""
+        for attempt in range(tries):
+            spaces = self.spaces()
+            if spaces is None:
+                return None
+            if session not in open_ids(spaces):
+                return True
+            if attempt < tries - 1:
+                time.sleep(0.5)
+        return False
 
     def checkout_of(self, spaces, session):
         """The worktree path of a space, or None."""
@@ -766,6 +783,10 @@ class HcBackend:
         if warning:
             host["warning"] = warning
         return host
+
+
+# Looks at herdr-app's list for a closed tab, half a second apart.
+TAB_GONE_TRIES = 5
 
 
 def open_ids(spaces):
