@@ -3464,6 +3464,8 @@ def live_session_id(info):
 
 def transcript_file(session):
     """The transcript file of a claude session id, or None when none is written."""
+    if not session:
+        return None
     hits = glob.glob(os.path.join(PROJECTS_DIR, "*", f"{session}.jsonl"))
     return hits[0] if hits else None
 
@@ -3475,13 +3477,6 @@ def transcript_path(info):
     not written yet gives None, never the stale label. No guess from the folder:
     other claude sessions, the user's own included, may run in the prompter's folder."""
     session = live_session_id(info) or (info.get("labels") or {}).get("octopilot.session") or ""
-    return transcript_file(session)
-
-
-def transcript_file(session):
-    """The transcript file of a claude session id, or None when none is written."""
-    if not UUID_RE.match(session):
-        return None
     return transcript_file(session)
 
 
