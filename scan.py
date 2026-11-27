@@ -324,18 +324,19 @@ class HerdrBackend:
             return None
         return (data.get("result") or {}).get("workspaces", [])
 
-    def sessions(self, workspaces, tabs, panes):
+    def sessions(self, workspaces, tabs, panes, launcher_panes):
         """Linked-worktree workspaces as [{id,title,path,backend,worktree}], then
-        the tabs on a worktree outside them, with their workspace as "space"."""
+        the worker tabs on a worktree, with their workspace as "space". The panes
+        of launcher_panes (the launcher's agents) are no worker."""
         if workspaces is None or tabs is None or panes is None:
             return None
         by_repo = {}
-        linked = set()
+        linked = {}  # workspace id -> its checkout
         for w in workspaces:
             wt = w.get("worktree") or {}
             if wt.get("is_linked_worktree") and wt.get("repo_root"):
                 by_repo.setdefault(wt["repo_root"], []).append((w, wt))
-                linked.add(w["workspace_id"])
+                linked[w["workspace_id"]] = wt.get("checkout_path")
         out = []
         for repo, rows in by_repo.items():
             code, d, _ = herdr(["worktree", "list", "--cwd", repo])
@@ -348,19 +349,20 @@ class HerdrBackend:
                             "worktree": {"branch": branch.get(w["workspace_id"]),
                                          "main_repo_path": repo}})
         labels = {t.get("tab_id"): t.get("label") for t in tabs}
-        # The launcher's terminals run in this checkout, which may be a worktree too.
-        launchers = (HEADLESS_AGENT, CODE_AGENT, PROMPTER_AGENT)
         checked, seen = {}, set()
         for p in panes:
-            tab, cwd = p.get("tab_id"), p.get("cwd")
-            if (tab in seen or not cwd or p.get("workspace_id") in linked
-                    or p.get("agent") in launchers):
+            tab, cwd, ws = p.get("tab_id"), p.get("cwd"), p.get("workspace_id")
+            if tab in seen or not cwd or p.get("pane_id") in launcher_panes:
                 continue
             if cwd not in checked:
                 checked[cwd] = worktree_of(cwd)
             if not checked[cwd]:
                 continue
             path, repo, branch = checked[cwd]
+            # A linked workspace's own checkout is already its row.
+            own = linked.get(ws)
+            if own and os.path.realpath(own) == os.path.realpath(path):
+                continue
             seen.add(tab)
             out.append({"id": tab, "title": labels.get(tab), "path": path,
                         "backend": self.name, "space": p.get("workspace_id"),
@@ -400,7 +402,9 @@ class HerdrBackend:
     def listing(self):
         """-> (worktree sessions, answered, open session ids)."""
         workspaces, tabs, panes = self.workspaces(), self.tabs(), self.panes()
-        rows = self.sessions(workspaces, tabs, panes)
+        launchers = {a["pane"] for a in self.agents()
+                     if a["agent"] in (HEADLESS_AGENT, CODE_AGENT, PROMPTER_AGENT)}
+        rows = self.sessions(workspaces, tabs, panes, launchers)
         ids = {w.get("workspace_id") for w in workspaces or []} \
             | {t.get("tab_id") for t in tabs or []}
         return rows or [], rows is not None, ids
@@ -461,9 +465,11 @@ class HerdrBackend:
         if is_tab(session):
             # herdr's worktree remove takes only a workspace: git removes the checkout.
             wt = wt or self.checkout_of(session)
-            code, _, raw = herdr(["tab", "close", session])
-            if code != 0:
+            code, data, raw = herdr(["tab", "close", session])
+            # A tab already gone leaves its checkout behind: remove that.
+            if code != 0 and error_code(data) != "tab_not_found":
                 return code, raw
+            code, raw = 0, ""
             if wt and os.path.isdir(wt):
                 code, out, err = sh(["git", "worktree", "remove", "--force", wt],
                                     cwd=wt, timeout=180)
@@ -480,7 +486,7 @@ class HerdrBackend:
 
     def checkout_of(self, session):
         """The worktree path of a worker tab, or None."""
-        rows = self.sessions(self.workspaces(), self.tabs(), self.panes()) or []
+        rows, _, _ = self.listing()
         return next((r["path"] for r in rows if r["id"] == session), None)
 
     def spawn(self, key_, path, wt, title, model):
@@ -490,8 +496,8 @@ class HerdrBackend:
         ws = octopilot_workspace() if tab else None
         if ws:
             return self.spawn_tab(ws, key_, path, wt, title, model)
-        if tab:
-            print("no Octopilot workspace: the worker opens as its own workspace")
+        note = "no Octopilot workspace: the worker opens as its own workspace" \
+            if tab else None
         code, data, raw = herdr(["worktree", "open", "--cwd", path, "--path", wt,
                                  "--label", title, "--no-focus"])
         if code != 0:
@@ -503,17 +509,16 @@ class HerdrBackend:
         warning = self.start_agent(pane, name, path, wt, model, f"workspace {ws}")
         if warning:
             host["warning"] = warning
-        return host
+        return add_warning(host, note) if note else host
 
     def spawn_tab(self, ws, key_, path, wt, title, model):
         """A tab of workspace ws on the worktree, its root pane running claude."""
         name = agent_name(key_)
+        # The tab inherits herdr's environment, not this one: pass the octopilot settings.
         argv = ["tab", "create", "--workspace", ws, "--cwd", wt,
-                "--label", tab_label(title, name), "--no-focus"]
-        # The tab inherits herdr's environment, not this one: pass on what is set.
-        for var in ("OCTOPILOT_DIR", "OCTOPILOT_STATE_DIR"):
-            if os.environ.get(var):
-                argv += ["--env", f"{var}={os.environ[var]}"]
+                "--label", tab_label(title, name), "--no-focus",
+                "--env", f"OCTOPILOT_DIR={OCTOPILOT_DIR}",
+                "--env", f"OCTOPILOT_STATE_DIR={os.path.dirname(STATE_FILE)}"]
         code, data, raw = herdr(argv, timeout=90)
         if code != 0:
             raise SystemExit(f"herdr tab create failed: {raw}")
@@ -557,9 +562,6 @@ class HcBackend:
     prefix = "hc:"
     noun = "herdr-app space"
     remove_label = "herdr-app space remove"
-    # Tab names the Octopilot space already uses: a worker's tab named one of them
-    # gets its agent's name after it.
-    RESERVED_TABS = ("octopilot", "engine", "octopilot (code changes)")
 
     def spaces(self):
         """Every space herdr-app shows, on any machine; None when herdr-app is
@@ -797,7 +799,9 @@ class HcBackend:
             sp = octopilot_space()
             if sp:
                 return self.spawn_tab(sp, key_, path, wt, title, model)
-            print("note: no Octopilot space open; the worker gets a space of its own")
+            return add_warning(
+                self.spawn_space(key_, path, wt, title, model),
+                "no Octopilot space open; the worker gets a space of its own")
         return self.spawn_space(key_, path, wt, title, model)
 
     def spawn_command(self, model):
@@ -831,11 +835,9 @@ class HcBackend:
         """A tab of the Octopilot space on the worktree, its terminal running a
         named claude. A reserved tab name gets the agent's name after it."""
         name = agent_name(key_)
-        tab_name = title
-        if title.lower() in self.RESERVED_TABS:
-            tab_name = f"{title} ({name})"
         argv = json.dumps(self.spawn_command(model))
-        code, data, raw = app_do("tab.new", ["--space", sp, "--name", tab_name,
+        code, data, raw = app_do("tab.new", ["--space", sp, "--name",
+                                             tab_label(title, name),
                                              "--folder", wt, "--argv", argv,
                                              "--focus", "false"], timeout=90)
         if code != 0 or not data or "terminal" not in data:
@@ -1001,13 +1003,22 @@ def worker_host():
     return host
 
 
-# The launcher's tab titles: a worker tab with one of these gets its agent's name too.
+# The launcher's tab titles: keep in step with MAIN_TAB, CODE_TAB, ENGINE_TAB in herdr/open*.sh.
 LAUNCHER_TAB_TITLES = ("OCTOPILOT", "engine", "Octopilot (code changes)")
 
 
 def tab_label(title, name):
-    """A worker tab's label: its spawn title, told apart from the launcher's tabs."""
-    return f"{title} ({name})" if title in LAUNCHER_TAB_TITLES else title
+    """A worker tab's label: its spawn title, with the agent's name after it when
+    the title is a launcher tab's (case-insensitively)."""
+    if title.lower() in {t.lower() for t in LAUNCHER_TAB_TITLES}:
+        return f"{title} ({name})"
+    return title
+
+
+def add_warning(host, note):
+    """The host with note as its warning, ahead of any startup warning."""
+    host["warning"] = f"{note}; {host['warning']}" if host.get("warning") else note
+    return host
 
 
 def split_address(address):

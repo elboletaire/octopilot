@@ -1,7 +1,5 @@
 """The TUI backend's worker tabs: listing, target, focus, close, discard and spawn,
 each beside the legacy workspace path. herdr's CLI is faked, never called."""
-import contextlib
-import io
 import os
 import shutil
 import tempfile
@@ -122,30 +120,42 @@ class ListingTest(BackendCase):
     def setUp(self):
         super().setUp()
         self.tabs = [{"tab_id": "w1:t1", "workspace_id": "w1", "label": "ws"},
+                     {"tab_id": "w1:t2", "workspace_id": "w1", "label": "other"},
                      {"tab_id": "w96:t1", "workspace_id": "w96", "label": "OCTOPILOT"},
                      {"tab_id": "w96:t2", "workspace_id": "w96", "label": "fix"},
                      {"tab_id": "w96:t3", "workspace_id": "w96", "label": "code"},
                      {"tab_id": "w97:t1", "workspace_id": "w97", "label": "work"}]
+        # Panes carry the agent's kind ("claude"), not its name.
         self.panes = [
             # A linked workspace's own pane: its workspace row covers it.
             {"pane_id": "w1:p1", "tab_id": "w1:t1", "workspace_id": "w1",
-             "cwd": "/wt/ws"},
+             "cwd": "/wt/ws", "agent": "claude"},
+            # Another worktree's tab in that linked workspace is a worker of its own.
+            {"pane_id": "w1:p2", "tab_id": "w1:t2", "workspace_id": "w1",
+             "cwd": "/wt/ws2", "agent": "claude"},
             # A plain checkout: not a worktree, so no row.
             {"pane_id": "w96:p1", "tab_id": "w96:t1", "workspace_id": "w96",
-             "cwd": "/home/x"},
+             "cwd": "/home/x", "agent": None},
             # A worker tab on a worktree in the Octopilot workspace.
             {"pane_id": "w96:p2", "tab_id": "w96:t2", "workspace_id": "w96",
-             "cwd": "/wt/a", "agent": "ap-x-1"},
+             "cwd": "/wt/a", "agent": "claude"},
             # The code tab runs in the checkout, which may be a worktree itself.
             {"pane_id": "w96:p3", "tab_id": "w96:t3", "workspace_id": "w96",
-             "cwd": "/wt/code", "agent": "octopilot-code"},
+             "cwd": "/wt/code", "agent": "claude"},
             # A worker tab in another workspace; its second pane adds nothing.
             {"pane_id": "w97:p1", "tab_id": "w97:t1", "workspace_id": "w97",
-             "cwd": "/wt/b"},
+             "cwd": "/wt/b", "agent": "claude"},
             {"pane_id": "w97:p2", "tab_id": "w97:t1", "workspace_id": "w97",
-             "cwd": "/wt/b"},
+             "cwd": "/wt/b", "agent": "claude"},
+        ]
+        self.agents = [
+            {"name": "ap-x-1", "pane_id": "w96:p2", "workspace_id": "w96",
+             "tab_id": "w96:t2", "agent_status": "idle"},
+            {"name": "octopilot-code", "pane_id": "w96:p3", "workspace_id": "w96",
+             "tab_id": "w96:t3", "agent_status": "idle"},
         ]
         self.checkouts = {"/wt/ws": ("/wt/ws", "/repo", "feat/ws"),
+                          "/wt/ws2": ("/wt/ws2", "/repo", "fix/ws2"),
                           "/wt/a": ("/wt/a", "/repo", "fix/a"),
                           "/wt/code": ("/wt/code", "/repo", "main"),
                           "/wt/b": ("/wt/b", "/repo", "feat/b"),
@@ -164,6 +174,7 @@ class ListingTest(BackendCase):
             ("workspace", "list"): (0, {"result": {"workspaces": self.workspaces}}, ""),
             ("tab", "list"): (0, {"result": {"tabs": self.tabs}}, ""),
             ("pane", "list"): (0, {"result": {"panes": self.panes}}, ""),
+            ("agent", "list"): (0, {"result": {"agents": self.agents}}, ""),
             ("worktree", "list"): (0, {"result": {"worktrees": [
                 {"open_workspace_id": "w1", "branch": "feat/ws"}]}}, ""),
         })
@@ -175,6 +186,9 @@ class ListingTest(BackendCase):
         self.assertEqual(rows, [
             {"id": "w1", "title": "ws", "path": "/wt/ws", "backend": "herdr",
              "worktree": {"branch": "feat/ws", "main_repo_path": "/repo"}},
+            {"id": "w1:t2", "title": "other", "path": "/wt/ws2", "backend": "herdr",
+             "space": "w1",
+             "worktree": {"branch": "fix/ws2", "main_repo_path": "/repo"}},
             {"id": "w96:t2", "title": "fix", "path": "/wt/a", "backend": "herdr",
              "space": "w96",
              "worktree": {"branch": "fix/a", "main_repo_path": "/repo"}},
@@ -182,8 +196,27 @@ class ListingTest(BackendCase):
              "space": "w97",
              "worktree": {"branch": "feat/b", "main_repo_path": "/repo"}},
         ])
-        self.assertEqual(ids, {"w1", "w96", "w97", "w1:t1", "w96:t1", "w96:t2",
-                               "w96:t3", "w97:t1"})
+        self.assertEqual(ids, {"w1", "w96", "w97", "w1:t1", "w1:t2", "w96:t1",
+                               "w96:t2", "w96:t3", "w97:t1"})
+
+    def test_a_launcher_is_skipped_by_its_pane_not_its_kind(self):
+        # Every pane is a "claude"; only the code agent's pane is the launcher's.
+        self.answer()
+        rows, _, _ = scan.HERDR.listing()
+        self.assertNotIn("w96:t3", [r["id"] for r in rows])
+        self.assertIn("w96:t2", [r["id"] for r in rows])
+
+    def test_a_failed_agent_list_leaves_the_launcher_unrecognised(self):
+        self.herdr({
+            ("workspace", "list"): (0, {"result": {"workspaces": self.workspaces}}, ""),
+            ("tab", "list"): (0, {"result": {"tabs": self.tabs}}, ""),
+            ("pane", "list"): (0, {"result": {"panes": self.panes}}, ""),
+            ("agent", "list"): (1, None, "boom"),
+            ("worktree", "list"): (0, {"result": {"worktrees": []}}, ""),
+        })
+        rows, answered, _ = scan.HERDR.listing()
+        self.assertTrue(answered)
+        self.assertIn("w96:t3", [r["id"] for r in rows])
 
     def test_a_failed_tab_list_leaves_the_listing_unanswered(self):
         fake = self.herdr({
@@ -237,6 +270,17 @@ class FocusCloseDiscardTest(BackendCase):
         self.assertEqual(scan.HERDR.discard("w96:t2", self.wt), (1, "still open"))
         scan.sh.assert_not_called()
 
+    def test_discard_removes_the_checkout_of_a_tab_already_closed(self):
+        self.herdr({("tab", "close"): refused("tab_not_found")})
+        self.assertEqual(scan.HERDR.discard("w96:t2", self.wt), (0, ""))
+        scan.sh.assert_called_once_with(["git", "worktree", "remove", "--force",
+                                         self.wt], cwd=self.wt, timeout=180)
+
+    def test_discard_of_a_tab_already_closed_with_no_checkout_is_done(self):
+        self.herdr({("tab", "close"): refused("tab_not_found")})
+        self.assertEqual(scan.HERDR.discard("w96:t2", "/no/such/dir"), (0, ""))
+        scan.sh.assert_not_called()
+
     def test_discard_of_a_tracked_tab_looks_up_its_checkout(self):
         self.herdr({("tab", "close"): OK})
         with mock.patch.object(scan.HERDR, "checkout_of", return_value=self.wt) as look:
@@ -264,7 +308,10 @@ class SpawnTabTest(BackendCase):
         fake, host = self.spawn()
         self.assertEqual(fake.calls[0], ["tab", "create", "--workspace", "w96",
                                          "--cwd", self.wt, "--label", "fix title",
-                                         "--no-focus"])
+                                         "--no-focus",
+                                         "--env", f"OCTOPILOT_DIR={scan.OCTOPILOT_DIR}",
+                                         "--env", "OCTOPILOT_STATE_DIR="
+                                         + os.path.dirname(scan.STATE_FILE)])
         self.assertEqual(host, {"backend": "herdr", "session": "w96:t9",
                                 "space": "w96", "agent": "ap-x-1",
                                 "worktree": self.wt})
@@ -272,16 +319,13 @@ class SpawnTabTest(BackendCase):
                          ["agent", "start", "ap-x-1", "--kind", "claude", "--pane"])
         self.assertIn("w96:p9", fake.argvs("agent", "start")[0])
 
-    def test_passes_the_octopilot_env_that_is_set(self):
-        self.env["OCTOPILOT_DIR"] = "/live/octopilot"
-        self.env["OCTOPILOT_STATE_DIR"] = "/state"
+    def test_passes_the_octopilot_env_whether_or_not_it_is_set_here(self):
+        self.env.pop("OCTOPILOT_DIR", None)
+        self.env.pop("OCTOPILOT_STATE_DIR", None)
         fake, _ = self.spawn()
-        self.assertEqual(fake.calls[0][-4:], ["--env", "OCTOPILOT_DIR=/live/octopilot",
-                                              "--env", "OCTOPILOT_STATE_DIR=/state"])
-
-    def test_passes_no_env_that_is_unset(self):
-        fake, _ = self.spawn()
-        self.assertNotIn("--env", fake.calls[0])
+        self.assertIn(f"OCTOPILOT_DIR={scan.OCTOPILOT_DIR}", fake.calls[0])
+        self.assertIn("OCTOPILOT_STATE_DIR=" + os.path.dirname(scan.STATE_FILE),
+                      fake.calls[0])
 
     def test_a_reserved_title_gets_the_agent_name(self):
         for title in ("engine", "OCTOPILOT", "Octopilot (code changes)"):
@@ -355,11 +399,9 @@ class SpawnWorkspaceTest(BackendCase):
     def test_no_octopilot_workspace_opens_a_workspace_with_a_note(self):
         scan.octopilot_workspace.return_value = None
         fake = self.herdr(self.open_answers())
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            host = scan.HERDR.spawn("fix#1", "/repo", self.wt, "t", None)
-        self.assertEqual(out.getvalue(), "no Octopilot workspace: "
-                                         "the worker opens as its own workspace\n")
+        host = scan.HERDR.spawn("fix#1", "/repo", self.wt, "t", None)
+        self.assertEqual(host["warning"], "no Octopilot workspace: the worker opens "
+                                          "as its own workspace")
         self.assertEqual(host["session"], "w12")
         self.assertEqual(fake.argvs("tab", "create"), [])
 
@@ -391,8 +433,16 @@ class SpawnWorkspaceTest(BackendCase):
 class TabLabelTest(unittest.TestCase):
     def test_only_the_launchers_titles_take_the_agent_name(self):
         self.assertEqual(scan.tab_label("engine", "ap-x-1"), "engine (ap-x-1)")
+        self.assertEqual(scan.tab_label("octopilot", "ap-x-1"), "octopilot (ap-x-1)")
         self.assertEqual(scan.tab_label("vocdoni-app#4 fix", "ap-x-1"),
                          "vocdoni-app#4 fix")
+
+
+class AddWarningTest(unittest.TestCase):
+    def test_the_note_leads_any_startup_warning(self):
+        self.assertEqual(scan.add_warning({"session": "w1"}, "a")["warning"], "a")
+        host = scan.add_warning({"warning": "blocked"}, "a")
+        self.assertEqual(host["warning"], "a; blocked")
 
 
 if __name__ == "__main__":
