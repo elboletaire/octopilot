@@ -1,6 +1,7 @@
 """open-gui.sh before its first step: the engine's locks, and ensure_window's herdr-app
 window check. Runs the real launcher with herdr-app, systemd-run, systemctl and hc
 shimmed on PATH; each shim appends its argv to a trace. No window is ever opened."""
+import json
 import os
 import shutil
 import stat
@@ -8,6 +9,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+import uuid
 
 from tests import SCRATCH
 
@@ -17,6 +19,8 @@ LAUNCHER = os.path.join(REPO, "herdr", "open-gui.sh")
 # A shim logs its argv, and a line in $SHIM/fds when fd 8 or 9 (the engine's locks) is open.
 # herdr-app status exits 2 with no window until systemd-run (the window opener) creates
 # $SHIM/window; $SHIM/hang makes it time out (124) instead, and $SHIM/on_status runs first.
+# With $SHIM/space, herdr-app answers `ls` from $SHIM/app-ls.json and the pane.split and
+# tab.new that start a claude (terminals tp and tc); other commands succeed with {}.
 SHIMS = {
     "herdr-app": '''#!/bin/sh
 echo "herdr-app $*" >> "$SHIM/trace"
@@ -28,6 +32,15 @@ if [ "$1" = status ]; then
   [ -f "$SHIM/window" ] && exit 0
   echo "herdr-app: no Herdr window at $SHIM/herdr-app.sock: No such file or directory" >&2
   exit 2
+fi
+if [ -f "$SHIM/space" ]; then
+  if [ "$1" = ls ]; then cat "$SHIM/app-ls.json"; exit 0; fi
+  case "$2" in
+    pane.split) echo '{"terminal":"tp","pane":"p2"}' ;;
+    tab.new) echo '{"terminal":"tc","pane":"p4"}' ;;
+    *) echo '{}' ;;
+  esac
+  exit 0
 fi
 exit 1
 ''',
@@ -44,10 +57,26 @@ echo "systemctl $*" >> "$SHIM/trace"
 echo "hc $*" >> "$SHIM/trace"
 [ -e /proc/self/fd/8 ] && echo "hc 8" >> "$SHIM/fds"
 case "$1 $2" in
-  "ls --json") echo '{"terminals": []}' ;;
+  "ls --json")
+    # ls --label <label> reads ls-<label>.json, a plain ls reads ls.json; none means no terminals.
+    if [ "$3" = --label ]; then f="$SHIM/ls-$4.json"; else f="$SHIM/ls.json"; fi
+    if [ -f "$f" ]; then cat "$f"; else echo '{"terminals": []}'; fi ;;
+  "get "*) cat "$SHIM/get-$2.json" 2>/dev/null || echo '{}' ;;
 esac
 ''',
 }
+
+# A terminal's `hc get --json` as the labels, foreground and creation time the launcher reads.
+def terminal_json(dir_, labels=None, fg="zsh", created_ms=0, argv=None):
+    doc = {"labels": {"octopilot.dir": dir_, **(labels or {})},
+           "foreground": {"name": fg}, "created_ms": created_ms}
+    if argv is not None:
+        doc["argv"] = argv
+    return doc
+
+
+def now_ms():
+    return int(time.time() * 1000)
 
 
 class OpenGuiWindowTest(unittest.TestCase):
@@ -68,7 +97,7 @@ class OpenGuiWindowTest(unittest.TestCase):
         with open(os.path.join(self.shim, name), "w") as fh:
             fh.write(text)
 
-    def launch(self, *args):
+    def launch(self, *args, home=None):
         env = {
             **os.environ,
             "SHIM": self.shim,
@@ -79,6 +108,8 @@ class OpenGuiWindowTest(unittest.TestCase):
             "ISSUE_ORGS": "none-org",
             "CLONE_ROOTS": os.path.join(self.root, "no-clones"),
         }
+        if home:
+            env["HOME"] = home  # where scan.py finds the claude transcripts
         return subprocess.run(["bash", LAUNCHER, *args], env=env, cwd=self.root,
                               capture_output=True, text=True, timeout=120)
 
@@ -88,6 +119,41 @@ class OpenGuiWindowTest(unittest.TestCase):
             return []
         with open(path) as fh:
             return fh.read().splitlines()
+
+    def argv_of(self, verb):
+        """The argv (a JSON array) that the first `herdr-app do <verb>` call was given."""
+        for line in self.trace():
+            if line.startswith(f"herdr-app do {verb} "):
+                argv, _ = json.JSONDecoder().raw_decode(line.split(" --argv ", 1)[1])
+                return argv
+        self.fail(f"no herdr-app do {verb} with an argv in {self.trace()}")
+
+    def record_sessions(self, sessions, home, transcripts=True):
+        """The state's launcher_sessions ({agent: (session, cwd)}), and each session's transcript."""
+        with open(os.path.join(self.state, "state.json"), "w") as fh:
+            json.dump({"launcher_sessions": {
+                agent: {"session": sid, "cwd": cwd} for agent, (sid, cwd) in sessions.items()}}, fh)
+        if not transcripts:
+            return
+        folder = os.path.join(home, ".claude", "projects", "scratch")
+        os.makedirs(folder, exist_ok=True)
+        for sid, _ in sessions.values():
+            open(os.path.join(folder, sid + ".jsonl"), "w").close()
+
+    def shown_host(self):
+        """This checkout's headless, shown in space s1 (tab OCTOPILOT, pane p1) of a running herdr-app."""
+        self.write("window", "")
+        self.write("space", "")
+        self.write("app-ls.json", json.dumps({"spaces": [{"id": "s1", "name": "Octopilot", "tabs": [
+            {"id": "t1", "name": "OCTOPILOT", "terminals": [{"terminal": "th", "pane": "p1"}]},
+            {"id": "t3", "name": "engine", "terminals": [{"terminal": "tp", "pane": "p2"}]},
+            {"id": "t5", "name": "scratch", "terminals": [{"terminal": "tc", "pane": "p4"}]},
+        ]}]}))
+        self.write("ls-octopilot.agent=octopilot-headless.json",
+                   json.dumps({"terminals": [{"address": "th"}]}))
+        self.write("get-th.json", json.dumps(terminal_json(
+            os.path.realpath(REPO), {"herdr.space": "s1", "octopilot.agent": "octopilot-headless"},
+            fg="uv")))
 
     def test_no_window_and_no_session_stops_before_anything(self):
         self.write("env", "HOME=/nowhere\nLANG=C\n")
@@ -159,6 +225,62 @@ class OpenGuiWindowTest(unittest.TestCase):
         self.assertEqual(held.returncode, 0)
         held = subprocess.run(["flock", "-n", os.path.join(self.state, "exec.lock"), "true"])
         self.assertEqual(held.returncode, 0)
+
+    def test_recorded_sessions_are_resumed_in_their_folders(self):
+        self.shown_host()
+        home = os.path.join(self.root, "home")
+        prompter, code = str(uuid.uuid4()), str(uuid.uuid4())
+        prompter_dir, code_dir = os.path.join(self.root, "prompter-dir"), os.path.join(self.root, "code-dir")
+        self.record_sessions({"octopilot-prompter": (prompter, prompter_dir),
+                              "octopilot-code": (code, code_dir)}, home)
+        self.launch(home=home)
+        argv = self.argv_of("pane.split")
+        self.assertEqual(argv[argv.index("--resume") + 1], prompter)
+        self.assertEqual(argv[argv.index("-C") + 1], prompter_dir)
+        self.assertNotIn("/octopilot:prompter", argv)
+        self.assertNotIn("--session-id", argv)
+        argv = self.argv_of("tab.new")
+        self.assertEqual(argv[argv.index("--resume") + 1], code)
+        self.assertEqual(argv[argv.index("-C") + 1], code_dir)
+        self.assertNotIn("--session-id", argv)
+        trace = self.trace()
+        self.assertTrue(any(t.startswith("hc label tp ") and f"octopilot.session={prompter}" in t
+                            for t in trace), trace)
+        self.assertTrue(any(t.startswith("hc label tc ") and f"octopilot.session={code}" in t
+                            for t in trace), trace)
+
+    def test_no_transcript_means_a_fresh_start(self):
+        self.shown_host()
+        home = os.path.join(self.root, "home")
+        self.record_sessions({"octopilot-prompter": (str(uuid.uuid4()), self.root),
+                              "octopilot-code": (str(uuid.uuid4()), self.root)},
+                             home, transcripts=False)
+        self.launch(home=home)
+        argv = self.argv_of("pane.split")
+        self.assertIn("/octopilot:prompter", argv)
+        self.assertIn("--session-id", argv)
+        self.assertNotIn("--resume", argv)
+        argv = self.argv_of("tab.new")
+        self.assertIn("--session-id", argv)
+        self.assertNotIn("--resume", argv)
+
+    def test_bare_shell_code_terminal_is_reaped_but_not_a_running_claude(self):
+        self.write("window", "")
+        real = os.path.realpath(REPO)
+        old = now_ms() - 60000
+        self.write("ls-octopilot.agent=octopilot-code.json", json.dumps({"terminals": [
+            {"address": "t-shell"}, {"address": "t-young"}, {"address": "t-claude"}]}))
+        code = {"octopilot.agent": "octopilot-code"}
+        self.write("get-t-shell.json", json.dumps(terminal_json(real, code, "zsh", old)))
+        self.write("get-t-young.json", json.dumps(terminal_json(real, code, "zsh", now_ms())))
+        self.write("get-t-claude.json", json.dumps(terminal_json(real, code, "claude", old)))
+        self.launch()
+        trace = self.trace()
+        self.assertIn("hc kill t-shell", trace)
+        self.assertIn("hc rm t-shell", trace)
+        for t in ("t-young", "t-claude"):
+            self.assertFalse([line for line in trace if line.startswith((f"hc kill {t}", f"hc rm {t}"))],
+                             trace)
 
 
 if __name__ == "__main__":
