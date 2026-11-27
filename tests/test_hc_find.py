@@ -22,6 +22,7 @@ class HcFindTest(unittest.TestCase):
         self.link = os.path.join(folder, "link")
         os.symlink(self.this, self.link)
         self.labels = {}
+        self.foreground = {}   # terminal -> the program in its foreground (claude)
         self.listed = []
         mock.patch.object(scan, "OCTOPILOT_DIR", self.this).start()
         mock.patch.object(scan, "hc", side_effect=self.fake_hc).start()
@@ -34,7 +35,8 @@ class HcFindTest(unittest.TestCase):
             info = self.labels.get(args[1])
             if info is None:
                 return 1, {"error": {"kind": "not_found"}}, "terminal not found"
-            return 0, {"labels": info}, ""
+            name = self.foreground.get(args[1], "claude")
+            return 0, {"labels": info, "foreground": {"name": name}}, ""
         raise AssertionError(f"unexpected hc call {args}")
 
     def test_prefers_this_checkouts_terminal_over_an_unlabelled_one(self):
@@ -69,6 +71,27 @@ class HcFindTest(unittest.TestCase):
     def test_none_when_every_get_fails(self):
         self.listed = ["t1"]
         self.assertIsNone(scan.HC.find("octopilot"))
+
+    def test_an_agent_beats_a_bare_shell_with_the_same_label(self):
+        # A shell left by a failed end keeps the label: the agent is the worker.
+        self.listed = ["t1", "t2"]
+        self.labels = {"t1": {"octopilot.dir": self.this},
+                       "t2": {"octopilot.dir": self.this}}
+        self.foreground = {"t1": "zsh"}
+        self.assertEqual(scan.HC.find("octopilot"), "hc:t2")
+
+    def test_an_unlabelled_agent_beats_this_checkouts_bare_shell(self):
+        self.listed = ["t1", "t2"]
+        self.labels = {"t1": {"octopilot.dir": self.this}, "t2": {}}
+        self.foreground = {"t1": "bash"}
+        self.assertEqual(scan.HC.find("octopilot"), "hc:t2")
+
+    def test_a_bare_shell_is_found_when_nothing_else_is(self):
+        self.listed = ["t1", "t2"]
+        self.labels = {"t1": {"octopilot.dir": self.other},
+                       "t2": {"octopilot.dir": self.this}}
+        self.foreground = {"t1": "zsh", "t2": "zsh"}
+        self.assertEqual(scan.HC.find("octopilot"), "hc:t2")
 
     def test_none_when_nothing_is_listed(self):
         self.assertIsNone(scan.HC.find("octopilot"))

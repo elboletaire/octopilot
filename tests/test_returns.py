@@ -185,6 +185,7 @@ class SpawnItemTest(unittest.TestCase):
                              "note": None, "model": scan.MODEL_FOR.get("work", "")})
         item = state["items"]["octo/app!40"]
         self.assertEqual((item["mode"], item["branch"], item["session"]), ("fix", "feat/x", "w7"))
+        self.assertEqual((item["model"], item["title"]), (scan.MODEL_FOR.get("work", ""), "Title"))
 
     def test_note_comes_back_and_is_not_saved_on_the_item(self):
         state = self.registry_state()

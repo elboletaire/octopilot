@@ -200,6 +200,17 @@ class DrainTest(RequestCase):
             scan.drain(["drain", "--quiet"])
         self.assertEqual(out.getvalue(), "")
 
+    def test_drain_does_nothing_while_the_octopilot_space_is_closed(self):
+        self.save({}, inbox=inbox(f"REQUEST go {ISSUE}"))
+        out = io.StringIO()
+        with mock.patch.object(scan, "octopilot_closed", return_value=True), \
+                mock.patch.dict(os.environ, {"OCTOPILOT_ENGINE": "on"}), \
+                contextlib.redirect_stdout(out):
+            self.assertEqual(scan.drain(["drain"]), 0)
+        self.assertIn("octopilot closed: nothing drained", out.getvalue())
+        self.assertEqual(self.inbox_texts(), [f"REQUEST go {ISSUE}"])
+        self.assertEqual(self.spawns(), [])
+
     def test_drain_plan_mode_prints_and_changes_nothing(self):
         self.save({}, inbox=inbox(f"REQUEST no {PR}"))
         out = io.StringIO()

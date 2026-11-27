@@ -21,20 +21,21 @@ class HostSpaceTest(unittest.TestCase):
         self.this = os.path.join(folder, "this")
         os.makedirs(self.this)
         self.terms = {}      # address -> (agent name, labels)
-        self.spaces = []     # herdr-app ls rows
+        self.spaces = []     # the herdr-app document's spaces
         self.workspaces = []
         self.agent_ws = {}   # agent name -> workspace id
         mock.patch.object(scan, "OCTOPILOT_DIR", self.this).start()
         mock.patch.object(scan, "hc", side_effect=self.fake_hc).start()
-        mock.patch.object(scan, "cli", side_effect=self.fake_cli).start()
+        mock.patch.object(scan, "hc_rpc", side_effect=self.fake_rpc).start()
         mock.patch.object(scan, "herdr", side_effect=self.fake_herdr).start()
-        mock.patch.object(scan.shutil, "which", return_value="/usr/bin/fake").start()
         self.addCleanup(mock.patch.stopall)
 
     def terminal(self, address, agent, **labels):
         self.terms[address] = (agent, {"octopilot.dir": self.this, **labels})
 
     def fake_hc(self, args, timeout=60):
+        if args == ["ls", "--json"]:
+            return 0, {"terminals": [{"address": a} for a in self.terms]}, ""
         if args[:2] == ["ls", "--json"]:
             name = args[-1].split("=", 1)[1]
             return 0, {"terminals": [{"address": a} for a, (agent, _)
@@ -45,10 +46,10 @@ class HostSpaceTest(unittest.TestCase):
             return 0, {"labels": self.terms[args[1]][1]}, ""
         raise AssertionError(f"unexpected hc call {args}")
 
-    def fake_cli(self, args, timeout=60):
-        if args[:2] == ["herdr-app", "ls"]:
-            return 0, {"spaces": self.spaces}, ""
-        raise AssertionError(f"unexpected cli call {args}")
+    def fake_rpc(self, method, params, timeout=10):
+        if method == "doc.get":
+            return {"value": {"spaces": self.spaces}}
+        raise AssertionError(f"unexpected hc_rpc call {method}")
 
     def fake_herdr(self, args, timeout=60):
         if args == ["workspace", "list"]:
@@ -61,11 +62,12 @@ class HostSpaceTest(unittest.TestCase):
             return 1, {"error": {"code": "agent_not_found"}}, "no such agent"
         raise AssertionError(f"unexpected herdr call {args}")
 
-    def space(self, sid, machine=None):
-        row = {"id": sid, "name": sid, "folder": self.this}
-        if machine:
-            row["machine"] = machine
-        self.spaces.append(row)
+    def space(self, sid):
+        """A space of the document with one tab holding a mod pane, so it is open."""
+        self.spaces.append({"id": sid, "name": sid, "folder": self.this, "tabs": [{
+            "id": f"tb-{sid}", "name": "OCTOPILOT", "root": {"type": "row", "children": [
+                {"type": "block", "id": f"p-{sid}",
+                 "content": {"mod": "octopilot-kitchen", "props": {}}}]}}]})
 
 
 class OctopilotSpaceTest(HostSpaceTest):
@@ -95,11 +97,6 @@ class OctopilotSpaceTest(HostSpaceTest):
     def test_none_when_no_listed_space_is_found(self):
         self.space("sp1")
         self.terminal("t1", HEADLESS, **{"herdr.space": "sp9"})
-        self.assertIsNone(scan.octopilot_space())
-
-    def test_a_remote_space_is_not_taken(self):
-        self.space("sp1", machine="laptop")
-        self.terminal("t1", HEADLESS, **{"herdr.space": "sp1"})
         self.assertIsNone(scan.octopilot_space())
 
     def test_an_unlabelled_terminal_is_not_taken(self):

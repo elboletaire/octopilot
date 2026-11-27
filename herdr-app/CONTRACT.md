@@ -11,11 +11,11 @@ actions. `$DIR` is the octopilot code dir (`props().dir`, else
 
 | piece | where | role |
 |---|---|---|
-| headless dashboard | `dashboard.sh --headless` in an hc terminal (parked engine terminal, no pane, see herdr/README.md) | runs every dashboard loop (the GitHub refresh with `scan.py tick`, the engine's `drain`, notifications, desktop notify, sidebar tokens) and writes `$STATE_DIR/view.json` |
+| headless dashboard | `dashboard.sh --headless` in an hc terminal (hidden engine terminal, in no tab, see herdr/README.md) | runs every dashboard loop (the GitHub refresh with `scan.py tick`, the engine's `drain`, notifications, desktop notify, sidebar tokens) and writes `$STATE_DIR/view.json` |
 | `octopilot-dashboard` mod | pane in the Octopilot tab | renders view.json, keyboard + mouse, sends actions |
 | `octopilot-chat` mod | pane in the Octopilot tab | the prompter as a chat over its hc terminal |
 | `octopilot-kitchen` mod | pane above the `octopilot-chat` mod, in the Octopilot tab, 300 px tall (split down from the chat, then swapped above it by open-gui.sh) | the takoyaki kitchen chef: reads view.json `pan` and `kitchen`, and `scan.sh speech` for the engine's last lines. Props: `dir`, `state_dir`, `pane_name`. Its pane is named (role and checkout hash) by open-gui.sh with `pane.rename`, and the mod finds its pane by `pane_name` (its machine, see Remote spaces) |
-| `herdr/open-gui.sh` | launcher | builds the space, starts terminals with `--session-id` (through the user's shell, so the gateway env reaches claude), parks the engine terminals (the default; `--show-engine` shows them in a third tab), gives the code agent its own tab (its claude, never parked), opens the mods: the OCTOPILOT tab is the kitchen over the chat on the left, the dashboard on the right |
+| `herdr/open-gui.sh` | launcher | builds the space, starts terminals through hc with `--session-id` (through the user's shell, so the gateway env reaches claude), hides the engine terminals in no tab (the default; `--show-engine` shows them in a third tab, a window step), reads the layout from herdr-core, gives the code agent its own tab (its claude, never parked), opens the mods: the OCTOPILOT tab is the kitchen over the chat on the left, the dashboard on the right |
 | `octopilot-launcher` mod | palette entry "Open Octopilot" (no view) | runs `herdr/open-gui.sh --close-launcher` in a new tab |
 | `herdr-app/install.sh` | installer | symlinks mods into `~/.config/herdr-app/mods/`, removes links of ours that point into this checkout's mods but whose mod (folder without `mod.json`) is gone, and deletes that folder when it holds only herdr's generated files (`gpui-kit.d.ts`, `jsconfig.json`; never a foreign link, a real folder, or a folder with any other file), adds the `octopilot` program to `programs.json`, removes a `layouts/octopilot.json` of ours (older versions wrote one; no layout is written now); `--key` also binds ctrl-alt-o |
 
@@ -40,6 +40,11 @@ shell and prompter rows run in this viewer's herdr-app with the machine's ids
 `dashboard.sh --action`, which would drive that machine's window. Rows whose
 backend is the herdr TUI say so. The `o` key opens a row's https link on this
 computer.
+The launcher (`open-gui.sh`) reads the layout from herdr-core (`scan.sh core-layout`) and never
+starts a herdr-app window: with no space and no window on the machine it runs on, it stops, and
+with the space in herdr-core it completes without one (see herdr/README.md). To recover a remote
+space, run Open Octopilot from a space on that machine, so the run is that machine's. Keep one
+herdr-app window per machine's layout: with two, the newest document wins.
 
 ## view.json (written atomically by `dashboard.sh --headless`, on change and at least every 5 s)
 
@@ -211,8 +216,8 @@ Focus/peek/shell on hc rows may be done by the mod directly with `run()` using `
 
 ## Speech and chat (scan.py)
 
-The prompter and the code agent are started by open-gui.sh with `claude --session-id <uuid>` and labelled
-`octopilot.session=<uuid>`. The transcript is found from the claude running in the
+The prompter and the code agent are started by open-gui.sh with `claude --session-id <uuid>` (or
+`claude --resume <uuid>` for a recorded session) and labelled `octopilot.session=<uuid>`. The transcript is found from the claude running in the
 terminal: `hc get <t> --json` gives `foreground.pid` (when `foreground.name` is
 `claude`), `~/.claude/sessions/<pid>.json` gives its `sessionId` (used only when its
 `pid` matches, and its `procStart` when it matches /proc), and the transcript is
