@@ -129,11 +129,6 @@ KEY_ALIASES = {"\x7f": "\x1b[3~", "\x08": "\x1b[3~"}
 # Rows by who has the next move: column_of() places them. A live report is
 # read by scan.live_report(), the rule the scan itself uses.
 NEEDS_ROWS = {"CAPPED", "READY", "PUSHED", "STALLED", "BLOCKED", "CLOSED"}
-# Rows the engine acts on at its next tick, not the user (the note says what).
-ORCH_ROWS = {"MERGED": "cleanup + rebase fan-out",
-             "RESTACK": "restack + rebase-stack",
-             "REVIEW": "reboot for review",
-             "FEEDBACK": "send address-feedback", "BOOTING": "send review prompt"}
 RUN_ROWS = {"WORKING"}
 # The engine's next action on a card: the ⏭ badge (herdr-app/CONTRACT.md).
 ENGINE_ACTIONS = {"MERGED": ("cleanup", "cleaning up"),
@@ -656,7 +651,7 @@ class Model:
             # report says, and the note says what it was.
             kind = row.get("kind")
             if section == "running" and e["agent"] == "running" and \
-                    kind not in RUN_ROWS | {"NEW", "GONE"} | set(ORCH_ROWS):
+                    kind not in RUN_ROWS | {"NEW", "GONE"} | set(ENGINE_ACTIONS):
                 e["note"] = f"working again · was {kind.lower()}"
             return section, e
 
@@ -751,8 +746,6 @@ class Model:
                     else "held by you")
         elif it.get("engine_error"):
             note = it["engine_error"]
-        elif kind in ORCH_ROWS:
-            note = f"next tick: {ORCH_ROWS[kind]}"
         elif kind == "NEW":
             note = "spawned, waiting for the next GitHub refresh"
         else:
@@ -1353,6 +1346,16 @@ def kitchen_reaction(ev):
         return rx("sad", 4500, "smoke", True, line, bad=True)
     if kind == "request":
         return rx("surprised", 2000, "bang", line=f"asked: {text('text')}")
+    if kind in ("hold", "park"):
+        reason = text("reason")
+        return rx("flip", 1500, "zzz", True,
+                  f"on hold {k}" + (f": {reason}" if reason else ""))
+    if kind in ("unhold", "unpark"):
+        reason = text("reason")
+        if reason:
+            return rx("surprised", 2000, "bang", True,
+                      f"back from hold {k}: {reason}", True)
+        return rx("flip", 1500, None, True, f"unhold {k}")
     if kind in ("cleanup", "merged"):
         return rx("serve", 3500, "heart", True, f"served {k} (merged)", True)
     if kind == "pause":
@@ -1404,31 +1407,39 @@ def ball_state(item, done_kind):
     return "cooking" if item.get("session") else "raw"
 
 
-def kitchen_pan(model, hdr, evs, now, busy):
+def kitchen_pan(model, hdr, evs, now, busy, data):
     """The pan and the chef: readKitchen() over the tracked items, the focus
     of the newest event on the pan, and the chef's mood (register.tsx's
-    frame() and resting())."""
+    frame() and resting()). The board decides where an item sits: the pan
+    holds the items in neither On hold nor Done, the shelf is Done's, and
+    On hold has its own list (feed.ts's readKitchen agrees)."""
     state = model.state or {}
     items = state.get("items") or {}
     snap_kinds = {r.get("key"): r.get("kind")
                   for r in (model.snap or {}).get("rows") or []
                   if isinstance(r, dict)}
+    section = {e["key"]: sec for sec in ("hold", "done") for e in data[sec]}
 
     def added_of(item):
         v = item.get("added")
         return float(v) if isinstance(v, (int, float)) else 0.0
 
     holes = hdr["max_active"] or 6
+    ordered = sorted(items.items(), key=lambda kv: added_of(kv[1]))
     balls = []
-    for key, item in sorted(items.items(), key=lambda kv: added_of(kv[1])):
+    for key, item in ordered:
+        if section.get(key) in ("hold", "done"):
+            continue
         added = added_of(item)
         age = max(0.0, (now - added) / 60) if added else 0.0
         balls.append({"key": key, "label": short(key),
                       "state": ball_state(item, snap_kinds.get(key)),
                       "heat": round(min(1.0, age / 25), 2)})
-    served = [{"key": b["key"], "label": b["label"]}
-              for b in balls if b["state"] == "done"]
-    on_pan = [b for b in balls if b["state"] != "done"][:holes]
+    on_hold = [{"key": k, "label": short(k)} for k, _ in ordered
+               if section.get(k) == "hold"]
+    served = [{"key": k, "label": short(k)} for k, _ in ordered
+              if section.get(k) == "done"]
+    on_pan = balls[:holes]
     on_pan_keys = {b["key"] for b in on_pan}
     focus = next((r["key"] for r in map(kitchen_reaction, reversed(evs))
                   if r["key"] in on_pan_keys), None)
@@ -1456,7 +1467,8 @@ def kitchen_pan(model, hdr, evs, now, busy):
                         "resting": rest}
             break
     return {"holes": holes, "paused": paused, "busy": busy, "balls": on_pan,
-            "shelf": served[:8], "shelf_total": len(served), "chef": chef}
+            "shelf": served[:8], "shelf_total": len(served),
+            "hold": on_hold[:8], "hold_total": len(on_hold), "chef": chef}
 
 
 def row_actions(model, e):
@@ -1582,7 +1594,7 @@ def view_for(model):
         "notes": [{"kind": e["kind"], "key": e["key"]} for e in data["notes"]],
         "activity": activity_rows(model),
         "kitchen": kitchen_view(evs),
-        "pan": kitchen_pan(model, hdr, evs, now, busy),
+        "pan": kitchen_pan(model, hdr, evs, now, busy, data),
         "global_actions": global_actions(model),
     }
 
@@ -1691,7 +1703,7 @@ class Dashboard:
         columns = [("🟡 Running", data["running"], "yellow"),
                    ("🔴 Needs you", data["needs"], "red"),
                    ("💤 On hold", data["hold"], "blue"),
-                   ("💤 Done", data["done"] if self.show_done else still_open,
+                   ("✔ Done", data["done"] if self.show_done else still_open,
                     "green")]
         # The selection state first: the footer reads it, and it needs no
         # heights, so it is settled before anything is measured.
@@ -1755,6 +1767,8 @@ class Dashboard:
         t.append(" · ")
         t.append(f"🟡 {len(data['running'])} running",
                  style="yellow")
+        t.append(" · ")
+        t.append(f"💤 {len(data['hold'])} on hold")
         t.append(" · ")
         t.append(f"⚪ {len(data['pick'])} to pick")
         if hdr["active"] is not None:
@@ -1873,7 +1887,13 @@ class Dashboard:
             status.append(f" {e['rounds'] or 0}/{MAX_REVIEW_ROUNDS}")
         stalled = e["stalled"] or e["kind"] == "STALLED"
         status.append(f" {ago(e['quiet'])}", style="red" if stalled else "")
-        return (self.two_lines(title, width) + [status]
+        badge = []
+        if e.get("engine"):
+            eng = e["engine"]
+            label = "held: paused" if eng["paused"] else eng["label"]
+            badge = [Text(f"⏭ {label}", no_wrap=True, overflow="ellipsis",
+                          style="cyan")]
+        return (self.two_lines(title, width) + [status] + badge
                 + self.two_lines(e["note"] or "", width, "dim"))
 
     def card(self, e, color, body):

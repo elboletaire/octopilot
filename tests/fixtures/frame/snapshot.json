@@ -147,15 +147,20 @@
       "title": "Search page"
     },
     {
-      "extra": "mode=comment session=w9zo4 review posted -> not yours to merge",
+      "extra": "mode=comment session=w9zo4 hold=author -> waiting on the author",
       "fields": {
+        "hold": "author",
         "mode": "comment",
         "session": "w9zo4"
       },
       "head": "0718293",
+      "hold": {
+        "by": "author",
+        "reason": "waiting on the author"
+      },
       "key": "vocdoni/vocdoni.io#25",
-      "kind": "DONE",
-      "note": "not yours to merge",
+      "kind": "HOLD",
+      "note": "waiting on the author",
       "title": "Footer links"
     },
     {
@@ -236,6 +241,35 @@
       },
       "key": "vocdoni/vocdoni-app",
       "kind": "STALE"
+    },
+    {
+      "extra": "mode=fix session=w9zh1 hold=you -> waiting on the schema",
+      "fields": {
+        "hold": "you",
+        "mode": "fix",
+        "session": "w9zh1"
+      },
+      "hold": {
+        "by": "you",
+        "reason": "waiting on the schema"
+      },
+      "key": "vocdoni/vocdoni-app#113",
+      "kind": "HOLD",
+      "note": "waiting on the schema",
+      "title": "Vote tally schema"
+    },
+    {
+      "extra": "mode=fix session=w9zg2 report=failed -> uploads tests red",
+      "fields": {
+        "mode": "fix",
+        "report": "failed",
+        "session": "w9zg2"
+      },
+      "head": "b2c3d4e",
+      "key": "vocdoni/vocdoni-app#114",
+      "kind": "BLOCKED",
+      "note": "uploads tests red",
+      "title": "Retry uploads"
     }
   ],
   "stall_min": 35,

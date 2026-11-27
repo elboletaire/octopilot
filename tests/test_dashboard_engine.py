@@ -381,7 +381,8 @@ class EngineViewTest(unittest.TestCase):
         view.m = self.model
         hdr = {"active": None, "untracked": 0, "generated_at": None,
                "last_tick": None}
-        data = {"needs": [], "running": [], "orch": [], "pick": []}
+        data = {"needs": [], "running": [], "hold": [], "done": [],
+                "pick": []}
         self.assertIn("engine on", view.header(data, hdr, time.time()).plain)
         self.model.drain_running, self.model.drain_started = True, time.time()
         self.assertIn("⏭ acting", view.header(data, hdr, time.time()).plain)
