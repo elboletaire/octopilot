@@ -326,6 +326,14 @@ class HoldEventsTest(unittest.TestCase):
         self.assertEqual([(e["kind"], e.get("reason")) for e in events],
                          [("hold", "waiting on db"), ("unhold", None), ("hold", None)])
 
+    def test_unhold_of_an_item_not_on_hold_is_refused_and_logs_nothing(self):
+        state = state_with({"mode": "fix", "branch": "feat/x", "session": "w1"})
+        with fake.fake_world():
+            r = scan.unhold_item(state, KEY)
+            self.assertFalse(os.path.exists(scan.EVENTS_FILE))
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["error"], f"{KEY} is not on hold")
+
     def test_a_wake_reports_its_cause_for_tick_to_log_as_unhold(self):
         state = state_with(fix_item(hold=hold()))
         info = {}

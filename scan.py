@@ -1761,12 +1761,24 @@ def scan(state, refresh=False, info=None):
             note = one_line(hold_of(it).get("reason")) or "held as you asked"
             rows.append(("HOLD", rk, f"mode={it['mode']} {smeta} hold=you -> {note}"))
 
+        def held_now(rk, pr):
+            # True when the card is still held (its HOLD row is out). A hold that
+            # wakes is cleared here, so every path wakes the same way.
+            if not hold_of(it):
+                return False
+            reason = hold_wake(it, pr, me, lambda p: layer_detail(k, it, p))
+            if reason is None:
+                hold_row(rk)
+                return True
+            wake_item(it, reason)
+            revived.append((rk, reason))
+            return False
+
         def parked_row(rk):
             # herdr-app parked the agent's terminal: nothing to send to until it is
             # shown again, so no prompt goes out, and a held card holds no slot.
             nonlocal active
-            if hold_of(it):
-                hold_row(rk)
+            if held_now(rk, d):
                 return
             active += 1
             waits = parked_feedback(it, d, lambda pr: layer_detail(k, it, pr))[1]
@@ -1842,8 +1854,10 @@ def scan(state, refresh=False, info=None):
                     rows.append(("CLOSED", nk, f"branch={it.get('branch')} {smeta} "
                                                "-> not merged; session left alone"))
                     continue
-                if parked_term or hold_of(it):
+                if parked_term:
                     parked_row(nk)
+                    continue
+                if held_now(nk, d):
                     continue
                 active += 1
                 # An agent-driven item runs its own review loop; a REVIEW row
@@ -1861,13 +1875,8 @@ def scan(state, refresh=False, info=None):
             if parked_term:
                 parked_row(k)
                 continue
-            if hold_of(it):
-                reason = hold_wake(it, None, me, None)
-                if reason is None:
-                    hold_row(k)
-                    continue
-                wake_item(it, reason)
-                revived.append((k, reason))
+            if held_now(k, None):
+                continue
             rep = live_report(it, live)
             if rep.get("state") in ("blocked", "failed", "stalled"):
                 active += 1
@@ -1907,13 +1916,8 @@ def scan(state, refresh=False, info=None):
             continue
         # A card held by you holds no slot. It is still tracked, so its merge
         # is still seen, and the first sign that it needs you wakes it.
-        if hold_of(it):
-            reason = hold_wake(it, d, me, lambda pr: layer_detail(k, it, pr))
-            if reason is None:
-                hold_row(k)
-                continue
-            wake_item(it, reason)
-            revived.append((k, reason))
+        if held_now(k, d):
+            continue
         active += 1
         rv = it.get("reviewed_sha") or ""
 
@@ -2958,7 +2962,9 @@ def unhold_item(state, k):
     it = state["items"].get(k)
     if it is None:
         return {"ok": False, "error": f"unknown item {k}", "msg": None}
-    it.pop("hold", None)
+    if not hold_of(it):
+        return {"ok": False, "error": f"{k} is not on hold", "msg": None}
+    it.pop("hold")
     save(state)
     log_event("unhold", k)
     return {"ok": True, "error": None, "msg": f"unheld {k} -> holds a slot again"}
