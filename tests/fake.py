@@ -20,6 +20,7 @@ EMPTY = {
     "whoami": "octo-user",
     "all_sessions": ([], set(), set()),
     "all_live": {},
+    "parked_agent": None,
     "build_registry": {},
     "home_prs": [],
     "home_issues": [],

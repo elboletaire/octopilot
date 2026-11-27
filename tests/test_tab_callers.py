@@ -12,6 +12,7 @@ from tests.test_rerequest import KEY, new_state, pr_detail
 from tests.test_returns import FakeHost
 from tests.test_tick import events, run_tick
 
+REAL_PARKED_AGENT = scan.parked_agent  # fake_world stubs it; some tests want the real one
 TAB = "tb1"        # a worker's tab that was closed
 MOVED = "tb2"      # the same agent, now in another tab of the Octopilot space
 SPACE = "sp1"
@@ -155,6 +156,66 @@ class RehomeTest(unittest.TestCase):
             rows = scan.scan(state)[0]
         self.assertEqual([r[0] for r in rows], ["GONE"])
 
+    def test_a_parked_agent_keeps_the_item_tracked(self):
+        state = tab_item()
+        parked = {"session": None, "ids": [], "agent": "ap-app-5", "pane": "t9"}
+        with fake.fake_world(all_sessions=([], {"hc"}, {SPACE}), backend_for=scan.HC,
+                             parked_agent=parked, pr_detail=pr_detail):
+            rows = scan.scan(state)[0]
+        self.assertEqual([r[0] for r in rows], ["WORKING"])
+        self.assertIn("terminal.keep --terminal t9", rows[0][2])
+        self.assertEqual(state["items"][KEY]["session"], TAB)
+
+    def test_the_real_check_keeps_a_parked_agents_item_tracked(self):
+        state = tab_item()
+        parked = {"session": None, "ids": [], "agent": "ap-app-5", "pane": "t9"}
+        with mock.patch.object(scan.HC, "agents", return_value=[parked]), \
+                fake.fake_world(all_sessions=([], {"hc"}, {SPACE}), backend_for=scan.HC,
+                                parked_agent=REAL_PARKED_AGENT, pr_detail=pr_detail):
+            rows = scan.scan(state)[0]
+        self.assertEqual([r[0] for r in rows], ["WORKING"])
+        self.assertIn(KEY, state["items"])
+
+    def test_a_parked_agent_shown_in_a_tab_is_rehomed(self):
+        state = tab_item()
+        info = {}
+        parked = {"session": None, "ids": [], "agent": "ap-app-5", "pane": "t9"}
+        live = {MOVED: agent_in(MOVED)}
+        with fake.fake_world(all_sessions=([tab_row(MOVED)], {"hc"}, {SPACE, MOVED}),
+                             all_live=live, parked_agent=parked, pr_detail=pr_detail,
+                             backend_for=scan.HC):
+            rows = scan.scan(state, info=info)[0]
+        self.assertNotIn("GONE", [r[0] for r in rows])
+        self.assertEqual(info["rehomed"], [(KEY, MOVED)])
+        self.assertEqual(state["items"][KEY]["session"], MOVED)
+
+
+class ParkedAgentTest(unittest.TestCase):
+    def parked(self, agents, session=TAB, backend=scan.HC):
+        it = tab_item()["items"][KEY]
+        with mock.patch.object(scan.HC, "agents", return_value=agents), \
+                mock.patch.object(scan, "backend_for", return_value=backend):
+            return scan.parked_agent(it, session)
+
+    def test_a_terminal_with_no_space_or_tab_is_parked(self):
+        agents = [{"session": None, "ids": [], "agent": "ap-app-5", "pane": "t9"}]
+        self.assertEqual(self.parked(agents)["pane"], "t9")
+
+    def test_a_terminal_in_a_tab_is_not_parked(self):
+        agents = [{"session": SPACE, "ids": [SPACE, MOVED], "agent": "ap-app-5",
+                   "pane": "t9"}]
+        self.assertIsNone(self.parked(agents))
+
+    def test_another_agents_parked_terminal_is_not_this_items(self):
+        agents = [{"session": None, "ids": [], "agent": "ap-app-9", "pane": "t9"}]
+        self.assertIsNone(self.parked(agents))
+
+    def test_a_session_that_is_not_herdr_app_is_never_parked(self):
+        agents = [{"session": None, "ids": [], "agent": "ap-app-5", "pane": "t9"}]
+        self.assertIsNone(self.parked(agents, session="w1", backend=None))
+
+
+class RehomeEventsTest(unittest.TestCase):
     def test_the_tick_logs_the_rehome_and_no_gone_row(self):
         state = tab_item()
         live = {MOVED: agent_in(MOVED)}

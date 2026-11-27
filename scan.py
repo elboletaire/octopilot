@@ -1068,6 +1068,16 @@ def all_agents():
     return [a for backend in BACKENDS.values() for a in backend.agents()]
 
 
+def parked_agent(it, session):
+    """The hc agent of an item whose session is a herdr-app tab or space that is
+    gone, when herdr-app parked the agent's terminal (no space or tab left, its
+    claude still running). None otherwise."""
+    if backend_for(session) is not HC or not it.get("agent"):
+        return None
+    return next((a for a in HC.agents()
+                 if a.get("agent") == it["agent"] and not a.get("ids")), None)
+
+
 def session_age(s, live):
     """Seconds since the session did anything: the last commit on the
     worktree's branch stands in."""
@@ -1530,6 +1540,15 @@ def scan(state, refresh=False, info=None):
                 and listed(answered, sess) and not (
                 it.get("pr") and d and d.get("state") == "MERGED"):
             home = rehome_of(it, sessions, live, open_ws, held)
+            term = parked_agent(it, sess) if home is None else None
+            if term:
+                # herdr-app parked its terminal: no tab to follow, but the claude runs.
+                active += 1
+                rows.append(("WORKING", k, f"mode={it['mode']} {smeta} parked in "
+                                           "herdr-app with no tab: `herdr-app do "
+                                           f"terminal.keep --terminal {term['pane']}` "
+                                           "shows it"))
+                continue
             if home is None:
                 items.pop(k)
                 rows.append(("GONE", k, f"{smeta} removed outside octopilot "

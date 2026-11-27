@@ -42,7 +42,9 @@ after it: `engine (ap-<repo>-<number>)`.
 
 A tab closed by hand does not end its session when its agent is live in another open
 tab or space (not held by another item; a tab is preferred): the session follows the
-agent there (re-homed), and the row stays. Only an agent that is gone shows `GONE`.
+agent there (re-homed), and the row stays. An agent herdr-app parked (`terminal.park`: no tab, its claude still
+running) keeps its item tracked as `WORKING`, noting its terminal; `herdr-app do terminal.keep`
+shows it again and the next tick re-homes it. Only an agent that is gone shows `GONE`.
 
 **Upgrading.** Sessions already in their own spaces or workspaces keep working; there is
 nothing to migrate. Both id shapes are read: tabs as `tb…` (GUI) or `w…:t…` (TUI), spaces
