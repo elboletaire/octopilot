@@ -5,12 +5,15 @@
 #     kitchen KITCHEN_PX tall); on the right the octopilot-dashboard mod, full height
 #   Octopilot (code changes): the code agent's own claude (a terminal, never parked)
 #   engine: the headless dashboard (the engine's host, dashboard.sh --headless) and the
-#     prompter beside it, as hc terminals; parked after building by default (no pane,
-#     still running), so the third tab is not shown. --show-engine shows it; a rerun
-#     without it parks them again. An agent of an earlier launcher is retired here.
+#     prompter, as hc terminals started with no herdr.space label, so hidden from birth
+#     (no window needed). --show-engine shows them (a window step); a rerun without it
+#     parks any shown by an earlier run. An agent of an earlier launcher is retired here.
 # Each claude is labelled octopilot.agent=<name> and octopilot.session=<uuid>
 # (its transcript, read by scan.py speech and chat). --terminals builds the
-# TUI-style layout instead (the curses dashboard is the host, the prompter on its left).
+# TUI-style layout instead (the curses dashboard is the host, the prompter on its left),
+# and needs the window.
+# Only the window steps (the mod panes, names, focus, shows and parks) need herdr-app: without
+# a window each is skipped with a log line, and the terminals still come from herdr-core.
 # --no-layout is accepted and does nothing (there is no octopilot layout any more).
 # --close-launcher closes this terminal's own pane at the end (the tab goes with
 # its last pane), for the key or the palette (programs.json). A failed run keeps that
@@ -194,6 +197,15 @@ no_window_note() {
     echo "herdr-app did not answer on $(uname -n) (status $WINDOW_RC)"; fi
 }
 
+# Runs a step that needs the herdr-app window (mod panes, names, focus, shows, parks): without
+# one it is skipped, with a log line saying what was not done.
+window_only() {
+  local what=$1
+  shift
+  if [ "$HAVE_WINDOW" = 1 ]; then "$@"; return 0; fi
+  echo "open-gui.sh: no herdr-app window on $(uname -n); skipped $what" >&2
+}
+
 # herdr-app's spaces and tabs in the shape `herdr-app ls` gives ({spaces: [...]}), from
 # herdr-core (scan.sh core-layout, no window needed). refresh_layout is the only read; the
 # readers use LAYOUT as it was last read. A failed read ends the run: a subshell signals the main
@@ -223,13 +235,50 @@ argv_json() {
   jq -nc '$ARGS.positional' --args -- "$@"
 }
 
-# A JSON argv run in the user's interactive shell (the gateway env of
-# ~/.zshrc.local). pane.split runs its argv as given; exec ends the terminal
-# with its program.
-shell_argv() {
+# The user's login shell (the gateway env of ~/.zshrc.local runs in it).
+login_shell() {
   local sh="${SHELL:-}"
   if [ -z "$sh" ]; then sh=$(getent passwd "$(id -un)" | cut -d: -f7); fi
-  jq -nc --arg sh "$sh" --argjson argv "$1" '[$sh, "-ic", "exec \"$@\"", $sh] + $argv'
+  echo "$sh"
+}
+
+# A JSON argv run in the user's interactive shell. pane.split runs its argv as given; exec ends
+# the terminal with its program.
+shell_argv() {
+  jq -nc --arg sh "$(login_shell)" --argjson argv "$1" '[$sh, "-ic", "exec \"$@\"", $sh] + $argv'
+}
+
+# Starts argv (JSON, unwrapped) as a terminal through hc, which needs no window: in the login
+# shell, as scan.py's hc_start does. keep 1: --keep, and a shell stays once argv exits (the code
+# agent's tab); keep 0: argv ends the terminal. $3 is its folder, the rest are its labels (k=v).
+# Prints its address.
+hc_start() {
+  local argv=$1 keep=$2 cwd=$3 body out address label
+  local -a flags=() wrapped=()
+  shift 3
+  body='exec "$@"'
+  if [ "$keep" = 1 ]; then body='"$@"; exec "$0" -i'; flags+=(--keep); fi
+  for label in "$@"; do flags+=(--label "$label"); done
+  mapfile -d '' -t wrapped < <(jq -nj --arg sh "$(login_shell)" --arg body "$body" --argjson argv "$argv" \
+    '([$sh, "-ic", $body, $sh] + $argv)[] + "\u0000"')
+  if ! out=$("$HC" run --bg --json --no-parent --cwd "$cwd" "${flags[@]}" -- "${wrapped[@]}"); then
+    echo "open-gui.sh: hc run failed: $out" >&2
+    return 1
+  fi
+  address=$(jq -r '.address // empty' <<<"$out")
+  if [ -z "$address" ]; then
+    echo "open-gui.sh: hc run gave no address: $out" >&2
+    return 1
+  fi
+  echo "$address"
+}
+
+# True when a terminal runs a shell in the foreground: a bare one, as reap_dead counts them.
+is_bare_shell() {
+  local fg
+  fg=$("$HC" get "$1" --json | jq -r '.foreground.name // empty')
+  case "$fg" in zsh|bash|sh|fish) return 0 ;; esac
+  return 1
 }
 
 # The argv of the headless dashboard, the engine's host (run through the shell by herdr-app).
@@ -332,6 +381,13 @@ end_terminal() {
   ENDED="$ENDED$1 "
 }
 
+# True when terminal $1 is in the code-changes tab of its space.
+in_code_tab() {
+  local tab
+  tab=$(locate "$1" | cut -f2)
+  [ -n "$tab" ] && [ "$(app_ls | jq -r --arg t "$tab" '.spaces[].tabs[] | select(.id == $t) | .name')" = "$CODE_TAB" ]
+}
+
 # Ends this checkout's terminals of an agent that are not running its program (a
 # shell herdr kept after claude exited, a dead headless), so it starts again.
 reap_dead() {
@@ -344,7 +400,9 @@ reap_dead() {
     # No age rule: the engine's locks are held, so no shell is still starting here (a
     # restored one may be seconds old).
     case "$fg" in
-      zsh|bash|sh|fish) ;;
+      zsh|bash|sh|fish)
+        # A shell left in the code tab is the tab's: add_code_tab starts the claude in it (R3).
+        if [ "$1" = "$CODE_AGENT" ] && in_code_tab "$t"; then continue; fi ;;
       *)
         # The code agent's terminal is the person's own: only a shell is reaped there.
         if [ "$1" = "$CODE_AGENT" ]; then continue; fi ;;
@@ -421,10 +479,18 @@ name_agent() {
   "$HC" label "$1" "${labels[@]}" >/dev/null
 }
 
-# Starts a terminal with argv (JSON, unwrapped) beside the host's pane, or in a tab of
-# the space while it is parked (pane empty). Prints its address.
+# Starts an engine terminal of agent $6 (its session $7, if any) with argv (JSON, unwrapped),
+# labelled as name_agent labels it. Through hc it is hidden from birth (no herdr.space label, only
+# octopilot.space). --terminals instead shows it beside the host's pane, or in a tab of the space
+# while it is parked (pane empty). Prints its address.
 start_engine_term() {
-  local space=$1 pane=$2 direction=$3 argv=$4 name=$5 created term p
+  local space=$1 pane=$2 direction=$3 argv=$4 name=$5 agent=$6 session=${7:-} created term p
+  local labels=("octopilot.space=$space" "octopilot.agent=$agent" "octopilot.dir=$DIR")
+  if [ -n "$session" ]; then labels+=("octopilot.session=$session"); fi
+  if [ "$TERMINALS" = 0 ]; then
+    hc_start "$argv" 0 "$OCTOPILOT_ORCH_CWD" "${labels[@]}"
+    return
+  fi
   if [ -n "$pane" ]; then
     created=$(app do pane.split --direction "$direction" --pane "$pane" \
       --argv "$(shell_argv "$argv")")
@@ -434,6 +500,7 @@ start_engine_term() {
   term=$(jq -r '.terminal' <<<"$created")
   p=$(await_shown "$term" | cut -f3) || true
   if [ -n "$p" ]; then app do pane.rename --pane "$p" --name "$name" >/dev/null; fi
+  name_agent "$term" "$agent" "$session"
   echo "$term"
 }
 
@@ -461,8 +528,7 @@ add_prompter() {
     session=$(new_session)
     argv=$(session_argv "$session" "/octopilot:prompter" "" "$MODEL_PROMPTER")
   fi
-  term=$(start_engine_term "$1" "$2" "$3" "$argv" prompter)
-  name_agent "$term" "$PROMPTER_AGENT" "$session"
+  term=$(start_engine_term "$1" "$2" "$3" "$argv" prompter "$PROMPTER_AGENT" "$session")
   echo "$term"
 }
 
@@ -471,17 +537,23 @@ add_prompter() {
 # Prints its address.
 add_host() {
   local term
-  term=$(start_engine_term "$1" "$2" "$3" "$4" "$5")
-  name_agent "$term" "$HEADLESS_AGENT"
+  term=$(start_engine_term "$1" "$2" "$3" "$4" "$5" "$HEADLESS_AGENT")
   echo "$term"
 }
 
-# The engine tab's helpers beside the host (space, pane), those that are missing.
+# The prompter in space $1, unless this checkout's runs (hidden from birth, see start_engine_term).
+add_prompter_if_missing() {
+  if [ -z "$(find_agent "$PROMPTER_AGENT")" ]; then add_prompter "$1" "" right >/dev/null; fi
+}
+
+# The engine's helpers in space $1, those that are missing (hidden from birth, see start_engine_term).
+# A new host is not looked for here: find_agent skips a bare shell, so a host just started would be
+# started again.
 add_engine_agents() {
   if [ -z "$(find_agent "$HEADLESS_AGENT")" ]; then
-    add_host "$1" "$2" down "$(headless_argv)" headless >/dev/null
+    add_host "$1" "" down "$(headless_argv)" headless >/dev/null
   fi
-  if [ -z "$(find_agent "$PROMPTER_AGENT")" ]; then add_prompter "$1" "$2" right >/dev/null; fi
+  add_prompter_if_missing "$1"
 }
 
 # The prompter on the left of the dashboard pane $2 (--terminals). pane.split only goes
@@ -600,10 +672,11 @@ add_kitchen() {
   record_label "$host" octopilot.kitchen "$main:$kitchen"
 }
 
-# The code agent's claude in a tab of its own, named CODE_TAB: its recorded session resumed in
-# its folder, else a fresh one started in this checkout. Prints its terminal.
+# The code agent's claude, an hc terminal in its tab (herdr.tab, a new id unless $2 is the tab of
+# a bare shell that starts it): its recorded session resumed in its folder, else a fresh one
+# started in this checkout. Kept after claude exits, as the worker tabs are. Prints its terminal.
 start_code_tab() {
-  local session created term recorded cwd argv
+  local space=$1 tab=$2 session recorded cwd argv term
   recorded=$(recorded_session "$CODE_AGENT")
   if [ -n "$recorded" ]; then
     IFS=$'\t' read -r session cwd <<<"$recorded"
@@ -612,14 +685,9 @@ start_code_tab() {
     session=$(new_session)
     argv=$(session_argv "$session" "" "$CODE_CWD" "$MODEL_CODE")
   fi
-  created=$(app do tab.new --space "$1" --name "$CODE_TAB" --argv "$argv" --focus false)
-  term=$(jq -r '.terminal // empty' <<<"$created")
-  if [ -z "$term" ]; then
-    echo "open-gui.sh: the $CODE_TAB tab has no terminal for the $CODE_AGENT agent" >&2
-    exit 1
-  fi
-  await_shown "$term" >/dev/null || true
-  name_agent "$term" "$CODE_AGENT" "$session"
+  if [ -z "$tab" ]; then tab="tb$(uuidgen | tr -d '-' | tr '[:upper:]' '[:lower:]')"; fi
+  term=$(hc_start "$argv" 1 "$CODE_CWD" "herdr.space=$space" "herdr.tab=$tab" \
+    "octopilot.agent=$CODE_AGENT" "octopilot.dir=$DIR" "octopilot.session=$session")
   echo "$term"
 }
 
@@ -651,7 +719,9 @@ show_code_tab() {
   if [ -z "$(locate "$code")" ]; then
     "$HC" label "$code" "herdr.space=$space" "octopilot.space=$space" >/dev/null
     refresh_layout || return 1
-    if [ -z "$(locate "$code")" ]; then app do terminal.keep --terminal "$code" >/dev/null; fi
+    if [ -z "$(locate "$code")" ] && [ "$HAVE_WINDOW" = 1 ]; then
+      app do terminal.keep --terminal "$code" >/dev/null
+    fi
   fi
   located=$(await_shown "$code") || return 1
   if [ "$(cut -f1 <<<"$located")" != "$space" ] \
@@ -680,15 +750,17 @@ drop_side_panel() {
 }
 
 # The code-changes tab: the code agent's claude. A rerun converts the previous chat tab
-# or a parked agent, never ending its claude; a tab holding another terminal is refused.
+# or a parked agent, never ending its claude; a tab holding another terminal is refused, unless
+# it holds only bare shells and no agent runs: the claude starts in that tab, then the shells end.
 add_code_tab() {
-  local space=$1 old code located t
+  local space=$1 old code located t into="" shells="" s
   refresh_layout || exit 1
   code=$(find_agent "$CODE_AGENT")
   old=$(tab_named "$space" "$CODE_TAB" "$(agent_tab "$CODE_AGENT" "$space")")
   if [ -n "$old" ]; then
     for t in $(tab_terminals "$old"); do
       if [ "$t" != "$code" ]; then
+        if [ -z "$code" ] && is_bare_shell "$t"; then shells+="$t "; continue; fi
         echo "open-gui.sh: the $CODE_TAB tab holds $t, which is not the $CODE_AGENT agent;" \
           "close it first" >&2
         exit 1
@@ -696,16 +768,24 @@ add_code_tab() {
     done
   fi
   if [ -z "$code" ]; then
-    # What is left of the old tab holds no terminal: mods only, at most an earlier panel.
-    if [ -n "$old" ]; then app do tab.close --id "$old" >/dev/null; old=""; fi
-    code=$(start_code_tab "$space")
+    if [ -n "$shells" ]; then
+      into=$old
+    elif [ -n "$old" ]; then
+      # What is left of the old tab holds no terminal: mods only, at most an earlier panel.
+      window_only "closing the old $CODE_TAB tab" app do tab.close --id "$old" >/dev/null
+      old=""
+    fi
+    code=$(start_code_tab "$space" "$into")
+    for s in $shells; do end_terminal "$s"; done
   fi
   located=$(show_code_tab "$space" "$code") || return 0
   t=$(cut -f2 <<<"$located")
   # The old tab holds no terminal now (checked above, and the agent is in $t): mods only.
-  if [ -n "$old" ] && [ "$old" != "$t" ]; then app do tab.close --id "$old" >/dev/null; fi
-  app do tab.rename --id "$t" --name "$CODE_TAB" >/dev/null
-  drop_side_panel "$code" "$t" "$(cut -f3 <<<"$located")"
+  if [ -n "$old" ] && [ "$old" != "$t" ]; then
+    window_only "closing the old $CODE_TAB tab" app do tab.close --id "$old" >/dev/null
+  fi
+  window_only "naming the $CODE_TAB tab" app do tab.rename --id "$t" --name "$CODE_TAB" >/dev/null
+  window_only "the side panel of the $CODE_TAB tab" drop_side_panel "$code" "$t" "$(cut -f3 <<<"$located")"
 }
 
 # The --terminals code tab: a terminal tab with its claude, resumed when the launcher recorded
@@ -967,7 +1047,7 @@ finish() {
   local space=$1
   trap - EXIT
   flush_log
-  if [ "$CLOSE_LAUNCHER" = 1 ]; then close_launcher; fi
+  if [ "$CLOSE_LAUNCHER" = 1 ]; then window_only "closing the launcher's pane" close_launcher; fi
 }
 
 # Runs after the space, its tabs and the park: restores the workers (a refusal is only warned
@@ -1025,6 +1105,11 @@ HAVE_WINDOW=0
 WINDOW_RC=0
 window_status || WINDOW_RC=$?
 if [ "$WINDOW_RC" = 0 ]; then HAVE_WINDOW=1; fi
+if [ "$TERMINALS" = 1 ] && [ "$HAVE_WINDOW" = 0 ]; then
+  echo "open-gui.sh: --terminals needs a herdr-app window on $(uname -n) (its panes);" \
+    "$(no_window_note). Nothing is changed." >&2
+  exit 1
+fi
 # The layout is read before anything is changed: a failed read stops the run here.
 refresh_layout || {
   echo "open-gui.sh: nothing is changed; check herdr-core on $(uname -n), then run Open Octopilot again." >&2
@@ -1104,7 +1189,7 @@ fi
 if [ -n "$host" ]; then
   # A run that failed after the host was labelled left the records on the holder.
   keep_saved_records "$host"
-  name_space "$space"
+  window_only "naming the space" name_space "$space"
   if [ "$TERMINALS" = 1 ]; then
     if [ -n "$(tab_named "$space" "$MAIN_TAB")" ] && [ "$(tab_named "$space" "$MAIN_TAB")" != "$tab" ]; then
       echo "open-gui.sh: the space already has an $MAIN_TAB tab (the GUI layout);" \
@@ -1131,19 +1216,22 @@ if [ -n "$host" ]; then
         "close its pane first (two dashboards would run), or use --terminals" >&2
       exit 1
     fi
-    if [ -n "$pane" ]; then app do tab.rename --id "$tab" --name "$ENGINE_TAB" >/dev/null; fi
-    if [ "$HIDE_ENGINE" = 0 ]; then
-      unpark_engine "$space"
-      pane=$(await_shown "$host" | cut -f3) || true
+    if [ -n "$pane" ]; then
+      window_only "naming the $ENGINE_TAB tab" app do tab.rename --id "$tab" --name "$ENGINE_TAB" >/dev/null
     fi
-    add_engine_agents "$space" "$pane"
-    add_main_tab "$space"
-    add_kitchen "$space"
+    if [ "$HIDE_ENGINE" = 0 ]; then
+      window_only "showing the engine terminals (--show-engine)" unpark_engine "$space"
+    fi
+    add_engine_agents "$space"
+    window_only "the $MAIN_TAB tab" add_main_tab "$space"
+    window_only "the $KITCHEN_PANE pane" add_kitchen "$space"
     add_code_tab "$space"
-    place_tabs "$space"
-    focus_main "$space"
+    window_only "the tab order" place_tabs "$space"
+    window_only "focusing the $MAIN_TAB tab" focus_main "$space"
   fi
-  if [ "$TERMINALS" = 0 ]; then park_engine "$space"; fi
+  if [ "$TERMINALS" = 0 ] && [ "$HIDE_ENGINE" = 1 ]; then
+    window_only "parking the engine terminals" park_engine "$space"
+  fi
   restore_and_tick
   finish "$space"
   exit 0
@@ -1163,27 +1251,33 @@ if [ "$TERMINALS" = 1 ]; then
   host_argv=$(argv_json env "${envs[@]}" bash "$DIR/dashboard.sh")
   host_name=dashboard
 fi
-beside=""
-if [ -n "$space" ]; then beside=$(prompter_pane_in "$space" "$(tab_named "$space" "$tab_name")"); fi
-if [ -n "$beside" ]; then
-  host=$(add_host "$space" "$beside" right "$host_argv" "$host_name")
-elif [ -n "$space" ]; then
-  created=$(app do tab.new --space "$space" --name "$tab_name" --argv "$host_argv" --focus false)
-  host=$(jq -r '.terminal' <<<"$created")
-  name_agent "$host" "$HEADLESS_AGENT"
+root=""
+if [ -n "$space" ] && [ "$TERMINALS" = 0 ]; then
+  # Hidden in the space, as the other engine terminals are: no window needed.
+  host=$(add_host "$space" "" down "$host_argv" "$host_name")
 else
-  created=$(app do space.new --name "$LABEL" --folder "$OCTOPILOT_ORCH_CWD" \
-    --tab "$tab_name" --argv "$host_argv" --focus false)
-  space=$(jq -r '.space' <<<"$created")
-  host=$(jq -r '.terminal' <<<"$created")
-  name_agent "$host" "$HEADLESS_AGENT"
+  beside=""
+  if [ -n "$space" ]; then beside=$(prompter_pane_in "$space" "$(tab_named "$space" "$tab_name")"); fi
+  if [ -n "$beside" ]; then
+    host=$(add_host "$space" "$beside" right "$host_argv" "$host_name")
+  elif [ -n "$space" ]; then
+    created=$(app do tab.new --space "$space" --name "$tab_name" --argv "$host_argv" --focus false)
+    host=$(jq -r '.terminal' <<<"$created")
+    name_agent "$host" "$HEADLESS_AGENT"
+  else
+    created=$(app do space.new --name "$LABEL" --folder "$OCTOPILOT_ORCH_CWD" \
+      --tab "$tab_name" --argv "$host_argv" --focus false)
+    space=$(jq -r '.space' <<<"$created")
+    host=$(jq -r '.terminal' <<<"$created")
+    name_agent "$host" "$HEADLESS_AGENT"
+  fi
+  if ! located=$(await_shown "$host"); then
+    echo "open-gui.sh: the new $HEADLESS_AGENT terminal ($host) is not in a Herdr space" >&2
+    exit 1
+  fi
+  root=$(cut -f3 <<<"$located")
 fi
-if ! located=$(await_shown "$host"); then
-  echo "open-gui.sh: the new $HEADLESS_AGENT terminal ($host) is not in a Herdr space" >&2
-  exit 1
-fi
-name_space "$space"
-root=$(cut -f3 <<<"$located")
+window_only "naming the space" name_space "$space"
 keep_saved_records "$host"
 
 if [ "$TERMINALS" = 1 ]; then
@@ -1194,15 +1288,22 @@ if [ "$TERMINALS" = 1 ]; then
   # Best effort: a terminal created a moment ago may not be focusable yet.
   "$APP" do agent.focus --terminal "$host" >/dev/null 2>&1 || true
 else
-  "$APP" do pane.rename --pane "$root" --name headless >/dev/null 2>&1 || true
-  if [ "$HIDE_ENGINE" = 0 ]; then unpark_engine "$space"; fi
-  add_engine_agents "$space" "$root"
-  add_main_tab "$space"
-  add_kitchen "$space"
+  if [ -n "$root" ]; then
+    window_only "naming the headless pane" "$APP" do pane.rename --pane "$root" --name headless \
+      >/dev/null 2>&1 || true
+  fi
+  if [ "$HIDE_ENGINE" = 0 ]; then
+    window_only "showing the engine terminals (--show-engine)" unpark_engine "$space"
+  fi
+  add_prompter_if_missing "$space"
+  window_only "the $MAIN_TAB tab" add_main_tab "$space"
+  window_only "the $KITCHEN_PANE pane" add_kitchen "$space"
   add_code_tab "$space"
-  place_tabs "$space"
-  focus_main "$space"
+  window_only "the tab order" place_tabs "$space"
+  window_only "focusing the $MAIN_TAB tab" focus_main "$space"
 fi
-if [ "$TERMINALS" = 0 ]; then park_engine "$space"; fi
+if [ "$TERMINALS" = 0 ] && [ "$HIDE_ENGINE" = 1 ]; then
+  window_only "parking the engine terminals" park_engine "$space"
+fi
 restore_and_tick
 finish "$space"

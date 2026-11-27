@@ -49,6 +49,9 @@ exit 1
     "hc": '''#!/bin/sh
 echo "hc $*" >> "$SHIM/trace"
 [ -e /proc/self/fd/8 ] && echo "hc 8" >> "$SHIM/fds"
+# run starts a terminal (hc_run.py records it for layout.py); kill and rm end one.
+if [ "$1" = run ]; then exec python3 "$SHIM/hc_run.py" "$@"; fi
+if [ "$1" = kill ] || [ "$1" = rm ]; then echo "$2" >> "$SHIM/ended"; fi
 case "$1 $2" in
   "ls --json")
     # ls --label <label> reads ls-<label>.json, a plain ls reads ls.json; none means no terminals.
@@ -56,6 +59,61 @@ case "$1 $2" in
     if [ -f "$f" ]; then cat "$f"; else echo '{"terminals": []}'; fi ;;
   "get "*) cat "$SHIM/get-$2.json" 2>/dev/null || echo '{}' ;;
 esac
+''',
+    # hc run: the address is t-<agent> for a labelled agent, else t-<n>. Each run is kept in runs.jsonl.
+    "hc_run.py": '''import json, os, sys
+shim = os.environ["SHIM"]
+args = sys.argv[1:]
+labels, cwd, i = {}, None, 0
+while i < len(args) and args[i] != "--":
+    if args[i] == "--label":
+        key, _, value = args[i + 1].partition("=")
+        labels[key] = value
+        i += 2
+        continue
+    if args[i] == "--cwd":
+        cwd = args[i + 1]
+    i += 1
+runs = os.path.join(shim, "runs.jsonl")
+count = len(open(runs).read().splitlines()) if os.path.exists(runs) else 0
+agent = labels.get("octopilot.agent", "")
+address = "t-" + agent[len("octopilot-"):] if agent.startswith("octopilot-") else f"t-{count + 1}"
+with open(runs, "a") as fh:
+    fh.write(json.dumps({"address": address, "labels": labels, "cwd": cwd,
+                         "keep": "--keep" in args, "argv": args[i + 1:]}) + "\\n")
+print(json.dumps({"address": address}))
+''',
+    # core-layout: the layout file, minus the terminals ended since, plus the terminals hc run
+    # started with a herdr.space and herdr.tab label, in that tab (created if missing).
+    "layout.py": '''import json, os
+shim = os.environ["SHIM"]
+def read(name, default):
+    path = os.path.join(shim, name)
+    if not os.path.exists(path):
+        return default
+    return json.load(open(path))
+ended = set(open(os.path.join(shim, "ended")).read().split()) if os.path.exists(os.path.join(shim, "ended")) else set()
+spaces = read("core-layout.json", [])
+for space in spaces:
+    for tab in space["tabs"]:
+        tab["terminals"] = [t for t in tab["terminals"] if t["terminal"] not in ended]
+runs = [json.loads(line) for line in open(os.path.join(shim, "runs.jsonl"))] \\
+    if os.path.exists(os.path.join(shim, "runs.jsonl")) else []
+for run in runs:
+    labels, address = run["labels"], run["address"]
+    space_id, tab_id = labels.get("herdr.space"), labels.get("herdr.tab")
+    if not space_id or not tab_id or address in ended:
+        continue
+    space = next((s for s in spaces if s["id"] == space_id), None)
+    if space is None:
+        space = {"id": space_id, "name": "", "folder": None, "tabs": []}
+        spaces.append(space)
+    tab = next((t for t in space["tabs"] if t["id"] == tab_id), None)
+    if tab is None:
+        tab = {"id": tab_id, "name": "", "terminals": [], "mods": []}
+        space["tabs"].append(tab)
+    tab["terminals"].append({"terminal": address, "pane": "p-" + address, "name": None})
+print(json.dumps(spaces))
 ''',
 }
 
@@ -78,8 +136,7 @@ case "$1" in
     if [ -f "$SHIM/core_down_after" ] && [ "$n" -gt "$(cat "$SHIM/core_down_after")" ]; then
       echo null; exit 0
     fi
-    if [ -f "$SHIM/core-layout.json" ]; then cat "$SHIM/core-layout.json"; else echo '[]'; fi
-    exit 0 ;;
+    exec python3 "$SHIM/layout.py" ;;
   restore-sessions)
     echo "scan restore-sessions locks=$(locks)" >> "$SHIM/trace"
     [ -e /proc/self/fd/8 ] && echo "scan restore-sessions 8" >> "$SHIM/fds"
@@ -164,6 +221,25 @@ class OpenGuiWindowTest(unittest.TestCase):
             return []
         with open(path) as fh:
             return fh.read().splitlines()
+
+    def runs(self):
+        """Every hc run the launcher made, as layout.py reads them (labels, keep, argv)."""
+        path = os.path.join(self.shim, "runs.jsonl")
+        if not os.path.exists(path):
+            return []
+        with open(path) as fh:
+            return [json.loads(line) for line in fh.read().splitlines()]
+
+    def run_of(self, agent):
+        """The hc run labelled octopilot.agent=<agent>, which must be the only one."""
+        found = [r for r in self.runs() if r["labels"].get("octopilot.agent") == agent]
+        self.assertEqual(len(found), 1, (agent, self.runs()))
+        return found[0]
+
+    def assert_no_window_calls(self, res):
+        """A run without a window makes no herdr-app do call at all."""
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertFalse([t for t in self.trace() if t.startswith("herdr-app do")], self.trace())
 
     def argv_of(self, verb):
         """The argv (a JSON array) that the first `herdr-app do <verb>` call was given."""
@@ -254,7 +330,7 @@ class OpenGuiWindowTest(unittest.TestCase):
         opened = open(fds).read().splitlines() if os.path.exists(fds) else []
         self.assertEqual(opened, [])
 
-    def test_no_window_with_a_labelled_space_carries_on_past_the_checks(self):
+    def test_no_window_with_a_labelled_space_runs_to_the_end(self):
         self.app_listing()
         self.write("ls-octopilot.agent=octopilot-headless.json",
                    json.dumps({"terminals": [{"address": "th"}]}))
@@ -265,9 +341,19 @@ class OpenGuiWindowTest(unittest.TestCase):
         out = res.stdout + res.stderr
         self.assertNotIn("No Octopilot space", out)
         self.assertNotIn("does not answer", out)
-        # No window, so the first herdr-app do (the space's tab) is the one that fails.
-        self.assertIn("herdr-app do tab.rename --id t1 --name engine", self.trace())
-        self.assertEqual(res.returncode, 1, out)
+        self.assert_no_window_calls(res)
+        self.assertIn("skipped the tab order", out)
+        self.assertIn("skipped parking the engine terminals", out)
+        # The prompter is hidden from birth; the code agent is in the space's own new tab.
+        prompter = self.run_of("octopilot-prompter")
+        self.assertEqual(prompter["labels"]["octopilot.space"], "s1")
+        self.assertNotIn("herdr.space", prompter["labels"])
+        code = self.run_of("octopilot-code")
+        self.assertEqual(code["labels"]["herdr.space"], "s1")
+        self.assertTrue(code["labels"]["herdr.tab"].startswith("tb"), code)
+        self.assertEqual(len(code["labels"]["herdr.tab"]), 34, code)
+        self.assertTrue(code["keep"])
+        self.assert_restored_between_runs_and_tick(self.trace())
 
     def test_no_window_with_the_dashboard_pane_of_this_checkout_carries_on(self):
         self.write("core-layout.json", json.dumps([{"id": "s9", "name": "Octopilot", "folder": None, "tabs": [
@@ -277,7 +363,9 @@ class OpenGuiWindowTest(unittest.TestCase):
         res = self.launch()
         out = res.stdout + res.stderr
         self.assertNotIn("No Octopilot space", out)
-        self.assertTrue([t for t in self.trace() if t.startswith("herdr-app do tab.new --space s9")], self.trace())
+        self.assert_no_window_calls(res)
+        self.assertEqual(self.run_of("octopilot-headless")["labels"]["octopilot.space"], "s9")
+        self.assertEqual(self.run_of("octopilot-code")["labels"]["herdr.space"], "s9")
 
     def test_the_dashboard_pane_of_another_checkout_is_no_space(self):
         self.write("core-layout.json", json.dumps([{"id": "s9", "name": "Octopilot", "folder": None, "tabs": [
@@ -389,20 +477,19 @@ class OpenGuiWindowTest(unittest.TestCase):
         self.record_sessions({"octopilot-prompter": (prompter, prompter_dir),
                               "octopilot-code": (code, code_dir)}, home)
         self.launch(home=home)
-        argv = self.argv_of("pane.split")
+        argv = self.run_of("octopilot-prompter")["argv"]
         self.assertEqual(argv[argv.index("--resume") + 1], prompter)
         self.assertEqual(argv[argv.index("-C") + 1], prompter_dir)
         self.assertNotIn("/octopilot:prompter", argv)
         self.assertNotIn("--session-id", argv)
-        argv = self.argv_of("tab.new")
+        run = self.run_of("octopilot-code")
+        argv = run["argv"]
         self.assertEqual(argv[argv.index("--resume") + 1], code)
         self.assertEqual(argv[argv.index("-C") + 1], code_dir)
         self.assertNotIn("--session-id", argv)
-        trace = self.trace()
-        self.assertTrue(any(t.startswith("hc label tp ") and f"octopilot.session={prompter}" in t
-                            for t in trace), trace)
-        self.assertTrue(any(t.startswith("hc label tc ") and f"octopilot.session={code}" in t
-                            for t in trace), trace)
+        self.assertTrue(run["keep"])
+        self.assertEqual(self.run_of("octopilot-prompter")["labels"]["octopilot.session"], prompter)
+        self.assertEqual(run["labels"]["octopilot.session"], code)
 
     def test_no_transcript_means_a_fresh_start(self):
         self.shown_host()
@@ -411,11 +498,11 @@ class OpenGuiWindowTest(unittest.TestCase):
                               "octopilot-code": (str(uuid.uuid4()), self.root)},
                              home, transcripts=False)
         self.launch(home=home)
-        argv = self.argv_of("pane.split")
+        argv = self.run_of("octopilot-prompter")["argv"]
         self.assertIn("/octopilot:prompter", argv)
         self.assertIn("--session-id", argv)
         self.assertNotIn("--resume", argv)
-        argv = self.argv_of("tab.new")
+        argv = self.run_of("octopilot-code")["argv"]
         self.assertIn("--session-id", argv)
         self.assertNotIn("--resume", argv)
 
@@ -453,10 +540,10 @@ class OpenGuiWindowTest(unittest.TestCase):
         res = self.launch(home=home)
         self.assertNotIn("Traceback", res.stdout + res.stderr)
         self.assertIn(f"folder {gone} is gone", res.stdout + res.stderr)
-        argv = self.argv_of("pane.split")
+        argv = self.run_of("octopilot-prompter")["argv"]
         self.assertIn("/octopilot:prompter", argv)
         self.assertNotIn("--resume", argv)
-        argv = self.argv_of("tab.new")
+        argv = self.run_of("octopilot-code")["argv"]
         self.assertIn("--session-id", argv)
         self.assertNotIn("--resume", argv)
 
@@ -491,6 +578,17 @@ class OpenGuiWindowTest(unittest.TestCase):
         self.assertLess(max(i for i in tabs if i < restore), restore, trace)
         self.assertLess(restore, trace.index(requests[0]), trace)
         self.assertNotIn("scan restore-sessions 8", trace)
+
+    def assert_restored_between_runs_and_tick(self, trace):
+        """Without a window, restore-sessions runs after the last hc run (the terminals are
+        started), with the locks still held; the tick is requested after it, with them released."""
+        restores = [t for t in trace if t.startswith("scan restore-sessions")]
+        requests = [t for t in trace if t.startswith("scan request tick")]
+        self.assertEqual(restores, ["scan restore-sessions locks=held"], trace)
+        self.assertEqual(requests, ["scan request tick locks=free"], trace)
+        restore = trace.index(restores[0])
+        self.assertLess(max(i for i, t in enumerate(trace) if t.startswith("hc run")), restore, trace)
+        self.assertLess(restore, trace.index(requests[0]), trace)
 
     def test_restore_runs_after_the_tabs_and_before_the_tick_on_the_existing_space(self):
         checkout = self.checkout
@@ -575,13 +673,13 @@ class OpenGuiWindowTest(unittest.TestCase):
                 real, {"herdr.space": "s1", "octopilot.agent": agent}, "zsh", now_ms())))
         res = self.launch(checkout=checkout)
         trace = self.trace()
-        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assert_no_window_calls(res)
         for term in young.values():
             self.assertIn(f"hc kill {term}", trace)
             self.assertIn(f"hc rm {term}", trace)
-        first_app = next(i for i, t in enumerate(trace) if t.startswith("herdr-app do "))
-        self.assertLess(trace.index("hc rm ys1"), first_app, trace)
-        self.assertLess(trace.index("hc rm ys3"), first_app, trace)
+        first_run = next(i for i, t in enumerate(trace) if t.startswith("hc run"))
+        self.assertLess(trace.index("hc rm ys1"), first_run, trace)
+        self.assertLess(trace.index("hc rm ys3"), first_run, trace)
         with open(os.path.join(self.shim, "restore_env")) as fh:
             self.assertEqual(fh.read().strip(), "1")
 
@@ -599,7 +697,70 @@ class OpenGuiWindowTest(unittest.TestCase):
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         self.assertIn("hc kill ys1", trace)
         self.assertFalse([t for t in trace if t.startswith("herdr-app do space.new")], trace)
-        self.assertTrue([t for t in trace if t.startswith("herdr-app do tab.new --space s1")], trace)
+        self.assertEqual(self.run_of("octopilot-headless")["labels"]["octopilot.space"], "s1")
+        self.assertNotIn("herdr.space", self.run_of("octopilot-headless")["labels"])
+
+
+    def test_a_bare_code_shell_in_the_code_tab_gets_the_claude_and_ends(self):
+        real = os.path.realpath(self.checkout)
+        self.write("core-layout.json", json.dumps([{"id": "s1", "name": "Octopilot", "folder": None, "tabs": [
+            {"id": "t1", "name": "OCTOPILOT", "terminals": [{"terminal": "th", "pane": "p1", "name": None}],
+             "mods": []},
+            {"id": "t5", "name": "Octopilot (code changes)",
+             "terminals": [{"terminal": "tshell", "pane": "p5", "name": None}], "mods": []},
+        ]}]))
+        self.write("ls-octopilot.agent=octopilot-headless.json",
+                   json.dumps({"terminals": [{"address": "th"}]}))
+        self.write("get-th.json", json.dumps(terminal_json(
+            real, {"herdr.space": "s1", "octopilot.agent": "octopilot-headless"}, fg="uv")))
+        # The shell a --keep claude leaves keeps the code agent's labels: reap_dead leaves it in its tab.
+        self.write("ls-octopilot.agent=octopilot-code.json", json.dumps({"terminals": [{"address": "tshell"}]}))
+        self.write("get-tshell.json", json.dumps(terminal_json(
+            real, {"octopilot.agent": "octopilot-code"}, fg="zsh")))
+        res = self.launch()
+        self.assert_no_window_calls(res)
+        code = self.run_of("octopilot-code")
+        self.assertEqual(code["labels"]["herdr.space"], "s1")
+        self.assertEqual(code["labels"]["herdr.tab"], "t5")
+        self.assertTrue(code["keep"])
+        # The claude starts in the tab first; the bare shell ends after it.
+        trace = self.trace()
+        started = trace.index(next(t for t in trace if t.startswith("hc run") and "herdr.tab=t5" in t))
+        self.assertLess(started, trace.index("hc kill tshell"), trace)
+        self.assertLess(trace.index("hc kill tshell"), trace.index("hc rm tshell"), trace)
+
+    def test_with_a_window_the_engine_is_started_by_hc_and_the_tabs_are_set_up(self):
+        self.shown_host()
+        res = self.launch()
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        trace = self.trace()
+        self.assertFalse([t for t in trace if t.startswith("herdr-app do pane.split")], trace)
+        self.assertNotIn("herdr.space", self.run_of("octopilot-prompter")["labels"])
+        tab = self.run_of("octopilot-code")["labels"]["herdr.tab"]
+        self.assertIn(f"herdr-app do tab.rename --id {tab} --name Octopilot (code changes)", trace)
+        self.assertIn("herdr-app do space.select --id s1", trace)
+
+    def test_terminals_needs_a_window_and_starts_nothing(self):
+        self.app_listing()
+        res = self.launch("--terminals")
+        out = res.stdout + res.stderr
+        self.assertEqual(res.returncode, 1, out)
+        self.assertIn("--terminals needs a herdr-app window", out)
+        trace = self.trace()
+        for prefix in ("hc run", "hc kill", "hc rm", "hc label", "herdr-app do"):
+            self.assertFalse([t for t in trace if t.startswith(prefix)], trace)
+
+    def test_show_engine_without_a_window_is_skipped_and_the_run_completes(self):
+        self.app_listing()
+        self.write("ls-octopilot.agent=octopilot-headless.json",
+                   json.dumps({"terminals": [{"address": "th"}]}))
+        self.write("get-th.json", json.dumps(terminal_json(
+            os.path.realpath(self.checkout), {"herdr.space": "s1", "octopilot.agent": "octopilot-headless"},
+            fg="uv")))
+        res = self.launch("--show-engine")
+        self.assert_no_window_calls(res)
+        self.assertIn("skipped showing the engine terminals (--show-engine)", res.stdout + res.stderr)
+        self.assert_restored_between_runs_and_tick(self.trace())
 
 
 if __name__ == "__main__":
