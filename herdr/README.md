@@ -75,9 +75,12 @@ worker: a tab of the Octopilot space (a space of its own with `WORKER_HOST=space
 worktree, resuming its claude conversation (`--resume` when its transcript exists, else
 `--continue` in the worktree). An item whose agent is live or parked elsewhere is skipped, as is a
 TUI item (restore it by hand, see the prompter skill's "Reversing a detach" section) and one whose
-worktree is missing. A tab whose terminals are all bare shells is ended and reopened (the launcher
-runs it under the engine's locks, so a shell of any age is bare; run by hand, one up for 30 s or
-more is); one running anything else is left alone. A session another claude has open is not
+worktree is missing. A tab whose terminals are all bare shells keeps its name, place and session:
+its claude is started in that same tab, and the shells end only once it has started (a failed start
+leaves the shells and the item as they were). The launcher runs it under the engine's locks, so a
+shell of any age is bare; run by hand, one up for 30 s or more is. A space of its own
+(`WORKER_HOST=space`) whose terminals are all bare shells is still ended, closed and reopened. One
+running anything else is left alone. A session another claude has open is not
 resumed: that worker starts fresh, apart from it, and its line says so. Only `session`, `space`, `backend` and `claude_session` change on an
 item. It is refused when herdr-app does not answer or no Octopilot space is open. It takes the
 state lock per item and never `tick.lock` or `exec.lock`: the launcher holds those while it runs it.

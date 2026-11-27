@@ -807,22 +807,31 @@ class HcBackend:
 
     def find(self, name):
         """-> "hc:<terminal>" of the live terminal labelled octopilot.agent=<name>,
-        or None. This checkout's terminal first, else one with no octopilot.dir
-        label (a worker's); another checkout's is never picked."""
+        or None. A terminal running an agent beats a bare shell (a shell left after
+        a failed end keeps the label). This checkout's terminal first, else one
+        with no octopilot.dir label (a worker's); another checkout's is never picked."""
         code, data, _ = hc(["ls", "--json", "--label", f"octopilot.agent={name}"],
                            timeout=10)
         terms = (data or {}).get("terminals", []) if code == 0 else []
-        unlabelled = None
+        unlabelled = own_shell = unlabelled_shell = None
         for t in terms:
             code, info, _ = hc(["get", t["address"], "--json"], timeout=10)
             if code != 0 or not isinstance(info, dict):
                 continue  # labels unknown: not ours, and not a worker's either
             d = (info.get("labels") or {}).get("octopilot.dir")
-            if not d:
-                unlabelled = unlabelled or t["address"]
-            elif os.path.realpath(d) == os.path.realpath(OCTOPILOT_DIR):
+            mine = bool(d) and os.path.realpath(d) == os.path.realpath(OCTOPILOT_DIR)
+            shell = (info.get("foreground") or {}).get("name") in SHELLS
+            if shell:
+                if mine:
+                    own_shell = own_shell or t["address"]
+                elif not d:
+                    unlabelled_shell = unlabelled_shell or t["address"]
+            elif mine:
                 return f"hc:{t['address']}"
-        return f"hc:{unlabelled}" if unlabelled else None
+            elif not d:
+                unlabelled = unlabelled or t["address"]
+        found = unlabelled or own_shell or unlabelled_shell
+        return f"hc:{found}" if found else None
 
     def status(self, target):
         _, info, _ = hc(["get", target, "--json"])
@@ -856,8 +865,7 @@ class HcBackend:
             spaces = self.spaces()
             if spaces is None:
                 return False, "herdr-core did not answer"
-            space = next((sp["id"] for sp in spaces for t in sp.get("tabs", [])
-                          if t.get("id") == session), None)
+            space = tab_space(spaces, session)
             if space is None:
                 return False, f"{session} is not open in herdr-app"
             steps = [("space.select", ["--id", space]),

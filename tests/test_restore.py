@@ -259,6 +259,7 @@ class RestoreTest(unittest.TestCase):
         self.assertEqual(self.order, [("start", OLD_TAB), ("end", "t1"), ("end", "t2")])
         self.assertEqual(self.spawn_tab.call_count, 0)
         argv, _, labels = self.hc_start.call_args.args[:3]
+        self.assertTrue(self.hc_start.call_args.kwargs["keep"])
         self.assertIn("--resume", argv)
         self.assertEqual(labels["herdr.space"], OPEN_SPACE)
         self.assertEqual(labels["herdr.tab"], OLD_TAB)
@@ -276,6 +277,47 @@ class RestoreTest(unittest.TestCase):
             terminal_state=lambda term, now_ms: "bare",
             end_terminal=self.fake_end)
         self.assertNotIn("close", [step[0] for step in self.order])
+
+    def test_a_tab_missing_from_every_space_is_left_alone(self):
+        before = self.item("o/repo#1", OLD_TAB)
+        _, out, after, _ = self.run_restore(
+            {"o/repo#1": before},
+            all_sessions=([], {"hc"}, {OLD_TAB, OPEN_SPACE}),
+            labelled_terminals=lambda t: [])
+        self.assertEqual(self.order, [])
+        self.assertEqual(self.hc_start.call_count, 0)
+        self.assertIn(f"{OLD_TAB} is in no space, left alone", out)
+        self.assertEqual(after["o/repo#1"], before)
+
+    def test_a_space_of_its_own_with_bare_shells_is_ended_closed_reopened(self):
+        self.spaces = [{"id": OPEN_SPACE, "tabs": [tab("tb0e5", "t1")]}]
+        with mock.patch.dict(os.environ, {"WORKER_HOST": "space"}), \
+                mock.patch.object(scan.HC, "close", return_value=(1, "gone")) as close, \
+                mock.patch.object(scan.HC, "gone", return_value=True):
+            _, out, after, _ = self.run_restore(
+                {"o/repo#1": self.item("o/repo#1", OPEN_SPACE)},
+                terminal_state=lambda term, now_ms: "bare",
+                end_terminal=self.fake_end)
+        self.assertEqual([step[0] for step in self.order], ["end", "spawn"])
+        close.assert_called_once_with(OPEN_SPACE)
+        self.assertEqual(self.hc_start.call_count, 0)
+        self.assertEqual(self.spawn_space.call_count, 1)
+        self.assertEqual(after["o/repo#1"]["session"], NEW_SPACE)
+        self.assertIn(f"restored in {NEW_SPACE}", out)
+
+    def test_a_space_whose_close_fails_while_open_is_left_as_it_is(self):
+        self.spaces = [{"id": OPEN_SPACE, "tabs": [tab("tb0e5", "t1")]}]
+        before = self.item("o/repo#1", OPEN_SPACE)
+        with mock.patch.dict(os.environ, {"WORKER_HOST": "space"}), \
+                mock.patch.object(scan.HC, "close", return_value=(1, "busy")), \
+                mock.patch.object(scan.HC, "gone", return_value=False):
+            _, out, after, _ = self.run_restore(
+                {"o/repo#1": before},
+                terminal_state=lambda term, now_ms: "bare",
+                end_terminal=self.fake_end)
+        self.assertEqual(self.spawn_space.call_count, 0)
+        self.assertIn(f"closing {OPEN_SPACE} failed: busy, left as it is", out)
+        self.assertEqual(after["o/repo#1"], before)
 
     def test_a_failed_start_in_a_tab_leaves_its_shells_and_the_item(self):
         self.spaces = [{"id": OPEN_SPACE, "tabs": [tab(OLD_TAB, "t1")]}]
