@@ -2,8 +2,7 @@
 """Octopilot reconciler.
 
 Reads GitHub + herdr, diffs against a small state file, prints a compact table of
-actionable rows. Deterministic; no model involved. See SKILL.md for how the
-rows are acted on.
+actionable rows. Deterministic; no model involved. engine.py acts on the rows.
 """
 import copy
 import fcntl
@@ -34,8 +33,7 @@ AGENT_STALL_MIN = int(os.environ.get("AGENT_STALL_MIN", "35"))
 RE_REVIEW_QUIET_HOURS = float(os.environ.get("RE_REVIEW_QUIET_HOURS", "4"))
 
 # Model per spawn, keyed by the template that creates the session. Pinned onto
-# the claude command line rather than inherited, so the orchestrator's own
-# model never decides what the workers run on.
+# the claude command line, so a worker never runs on the user's default model.
 MODEL_FOR = {
     "work": os.environ.get("MODEL_WORK", "claude-opus-5-5[1m]"),
     "investigate": os.environ.get("MODEL_INVESTIGATE", "claude-fable-5-2[1m]"),
@@ -58,25 +56,36 @@ ISSUE_MAX_AGE_DAYS = int(os.environ.get("ISSUE_MAX_AGE_DAYS", "120"))
 STATE_FILE = os.environ.get(
     "STATE_FILE", os.path.expanduser("~/.local/state/octopilot/state.json"))
 # Both live next to the state file and exist for the dashboard: the event log
-# is appended by every mutating command, the snapshot is the last read-only
-# scan rendered as JSON.
+# is appended by every mutating command, the snapshot is the last scan's rows
+# rendered as JSON.
 EVENTS_FILE = os.path.join(os.path.dirname(STATE_FILE), "events.jsonl")
 SNAPSHOT_FILE = os.path.join(os.path.dirname(STATE_FILE), "snapshot.json")
+# The headless dashboard's view (dashboard.py VIEW_FILE): speech reads the
+# engine's last lines from it, and a view older than VIEW_STALE_SECS is no engine.
+VIEW_FILE = os.path.join(os.path.dirname(STATE_FILE), "view.json")
+VIEW_STALE_SECS = 15  # three times dashboard.py's VIEW_EVERY
+# One tick at a time: a tick that finds it held returns at once.
+TICK_LOCK = os.path.join(os.path.dirname(STATE_FILE), "tick.lock")
+# Held by each engine phase that acts (engine.run_rows), taken after the state
+# lock is released: its steps take that lock one at a time.
+EXEC_LOCK = os.path.join(os.path.dirname(STATE_FILE), "exec.lock")
 EVENTS_MAX_BYTES = 512 * 1024
 EVENTS_KEEP = 1000
-# Address of the orchestrator ("herdr:<agent>"). Empty means "whichever agent
-# last ran a scan", recorded by the scan itself.
-OCTOPILOT_ORCH = os.environ.get("OCTOPILOT_ORCH", "")
 # Backend new sessions spawn on: "herdr" (the TUI) or "hc" (herdr-app's GUI).
 OCTOPILOT_BACKEND = os.environ.get("OCTOPILOT_BACKEND", "herdr")
+# Settle a new worker tab at spawn ("1") or leave it as herdr opened it ("0").
+SETTLE_WORKER_TABS = os.environ.get("SETTLE_WORKER_TABS", "1") == "1"
 # The octopilot code dir: where workers find scan.sh and their plugin.
 OCTOPILOT_DIR = (os.environ.get("OCTOPILOT_DIR")
                  or os.path.dirname(os.path.abspath(__file__)))
-# herdr agent name the orchestrator runs under.
-ORCH_AGENT = "octopilot"
+# herdr-app's terminal running the headless dashboard (open-gui.sh), which writes
+# VIEW_FILE.
+HEADLESS_AGENT = "octopilot-headless"
 # herdr agent in the "Octopilot (code changes)" tab (herdr/open.sh): changes
 # and fixes to octopilot itself go there.
 CODE_AGENT = "octopilot-code"
+# The name herdr/open.sh gives the Octopilot workspace (the TUI's host).
+OCTOPILOT_LABEL = "Octopilot"
 
 AGENT_MARKER = "controlled by elboletaire"
 FEEDBACK_IGNORE = set(
@@ -184,11 +193,14 @@ def whoami(state):
 # --------------------------------------------------------------- agent hosts
 #
 # An item's session id names its backend: a TUI workspace (`w12`) or a herdr-app
-# space (`sp<hex>`), since it survives restarts that pane ids and names may not.
+# space (`sp<hex>`), or a tab in either (`w12:t3`, `tb<hex>`), since it survives
+# restarts that pane ids and names may not.
 # New items spawn on OCTOPILOT_BACKEND; a bare agent name is the spawn backend's.
 
 HERDR_WS = re.compile(r"^w[0-9A-Za-z]{1,8}$")
 HC_SPACE = re.compile(r"^sp[0-9a-f]+$")
+HERDR_TAB = re.compile(r"^w[0-9A-Za-z]{1,8}:t[0-9A-Za-z]{1,8}$")
+HC_TAB = re.compile(r"^tb[0-9a-f]+$")
 # Agent states in the vocabulary the scan logic speaks.
 HERDR_STATE = {"working": "running", "blocked": "waiting", "idle": "idle",
                "done": "idle", "unknown": "unknown"}
@@ -244,21 +256,26 @@ def owned_worktree(wt, repo):
 
 
 def live_map(agents, states, backend):
-    """Agents -> {session: {session, agent, pane, backend, state}}. Octopilot
-    runs one agent per session; when the user opened more, the one octopilot
-    named (ap-*) wins."""
+    """-> {id: entry}, each agent under every id it carries (its space or
+    workspace, and its tab); on a shared id the ap-* agent wins."""
     out = {}
     for a in agents:
-        ws = a.get("session")
-        if not ws:
-            continue
         mine = (a.get("agent") or "").startswith("ap-")
-        if ws in out and not mine:
-            continue
-        out[ws] = {"session": ws, "agent": a.get("agent"), "pane": a.get("pane"),
-                   "backend": backend,
-                   "state": states.get(a.get("status"), "unknown")}
+        for ws in a.get("ids") or [a.get("session")]:
+            if not ws or (ws in out and not mine):
+                continue
+            out[ws] = {"session": ws, "agent": a.get("agent"), "pane": a.get("pane"),
+                       "backend": backend,
+                       "state": states.get(a.get("status"), "unknown")}
     return out
+
+
+def session_matches(agent, session):
+    """Whether a backend's agent is in session: by its ids when it has them."""
+    ids = agent.get("ids")
+    if ids:
+        return session in ids
+    return agent.get("session") == session
 
 
 def worktree_of(folder):
@@ -307,15 +324,19 @@ class HerdrBackend:
             return None
         return (data.get("result") or {}).get("workspaces", [])
 
-    def sessions(self, workspaces):
-        """Linked-worktree workspaces as [{id,title,path,backend,worktree}]."""
-        if workspaces is None:
+    def sessions(self, workspaces, tabs, panes, launcher_panes):
+        """Linked-worktree workspaces as [{id,title,path,backend,worktree}], then
+        the worker tabs on a worktree, with their workspace as "space". The panes
+        of launcher_panes (the launcher's agents) are no worker."""
+        if workspaces is None or tabs is None or panes is None:
             return None
         by_repo = {}
+        linked = {}  # workspace id -> its checkout
         for w in workspaces:
             wt = w.get("worktree") or {}
             if wt.get("is_linked_worktree") and wt.get("repo_root"):
                 by_repo.setdefault(wt["repo_root"], []).append((w, wt))
+                linked[w["workspace_id"]] = wt.get("checkout_path")
         out = []
         for repo, rows in by_repo.items():
             code, d, _ = herdr(["worktree", "list", "--cwd", repo])
@@ -327,24 +348,65 @@ class HerdrBackend:
                             "path": wt.get("checkout_path"), "backend": self.name,
                             "worktree": {"branch": branch.get(w["workspace_id"]),
                                          "main_repo_path": repo}})
+        labels = {t.get("tab_id"): t.get("label") for t in tabs}
+        checked, seen = {}, set()
+        for p in panes:
+            tab, cwd, ws = p.get("tab_id"), p.get("cwd"), p.get("workspace_id")
+            if tab in seen or not cwd or p.get("pane_id") in launcher_panes:
+                continue
+            if cwd not in checked:
+                checked[cwd] = worktree_of(cwd)
+            if not checked[cwd]:
+                continue
+            path, repo, branch = checked[cwd]
+            # A linked workspace's own checkout is already its row.
+            own = linked.get(ws)
+            if own and os.path.realpath(own) == os.path.realpath(path):
+                continue
+            seen.add(tab)
+            out.append({"id": tab, "title": labels.get(tab), "path": path,
+                        "backend": self.name, "space": p.get("workspace_id"),
+                        "worktree": {"branch": branch or None,
+                                     "main_repo_path": repo}})
         return out
 
+    def tabs(self):
+        """Every open tab, or None when herdr could not be asked."""
+        return self.result_list(["tab", "list"], "tabs")
+
+    def panes(self):
+        """Every open pane, or None when herdr could not be asked."""
+        return self.result_list(["pane", "list"], "panes")
+
+    def result_list(self, args, key):
+        if not shutil.which("herdr"):
+            return []
+        code, data, _ = herdr(args)
+        if code != 0 or not data:
+            return None
+        return (data.get("result") or {}).get(key, [])
+
     def agents(self):
-        """[{session, agent, pane, status}] for every herdr agent."""
+        """[{session, agent, pane, status, ids}] for every herdr agent; ids are
+        its workspace and tab."""
         if not shutil.which("herdr"):
             return []
         code, data, _ = herdr(["agent", "list"])
         if code != 0 or not data:
             return []
         return [{"session": a.get("workspace_id"), "agent": a.get("name"),
-                 "pane": a.get("pane_id"), "status": a.get("agent_status")}
+                 "pane": a.get("pane_id"), "status": a.get("agent_status"),
+                 "ids": [a.get("workspace_id"), a.get("tab_id")]}
                 for a in (data.get("result") or {}).get("agents", [])]
 
     def listing(self):
         """-> (worktree sessions, answered, open session ids)."""
-        workspaces = self.workspaces()
-        rows = self.sessions(workspaces)
-        ids = {w.get("workspace_id") for w in workspaces or []}
+        workspaces, tabs, panes = self.workspaces(), self.tabs(), self.panes()
+        launchers = {a["pane"] for a in self.agents()
+                     if a["agent"] in (HEADLESS_AGENT, CODE_AGENT, PROMPTER_AGENT)}
+        rows = self.sessions(workspaces, tabs, panes, launchers)
+        ids = {w.get("workspace_id") for w in workspaces or []} \
+            | {t.get("tab_id") for t in tabs or []}
         return rows or [], rows is not None, ids
 
     def live(self):
@@ -357,7 +419,7 @@ class HerdrBackend:
         if name and herdr(["agent", "get", name])[0] == 0:
             return name
         for a in self.agents():
-            if a["session"] == it.get("session"):
+            if session_matches(a, it.get("session")):
                 return a["agent"] or a["pane"]
         return None
 
@@ -378,19 +440,41 @@ class HerdrBackend:
                               "--timeout", "60000"], timeout=90)
         return code, raw
 
-    def focus(self, session, target):
-        code, _, raw = herdr(["agent", "focus", target])
+    def focus(self, session, target, timeout=60):
+        """The agent's pane, else the tab or workspace the session is."""
+        if target:
+            args = ["agent", "focus", target]
+        elif is_tab(session):
+            args = ["tab", "focus", session]
+        else:
+            args = ["workspace", "focus", session]
+        code, _, raw = herdr(args, timeout=timeout)
         return code == 0, raw
 
     def rename(self, entry, name):
         return herdr(["agent", "rename", entry["pane"], name])[0] == 0
 
     def close(self, session):
-        code, _, raw = herdr(["workspace", "close", session])
+        """Close the tab or the workspace."""
+        noun = "tab" if is_tab(session) else "workspace"
+        code, _, raw = herdr([noun, "close", session])
         return code, raw
 
     def discard(self, session, wt):
-        """Remove the workspace and its worktree -> (code, message)."""
+        """Remove the tab or workspace and its worktree -> (code, message)."""
+        if is_tab(session):
+            # herdr's worktree remove takes only a workspace: git removes the checkout.
+            wt = wt or self.checkout_of(session)
+            code, data, raw = herdr(["tab", "close", session])
+            # A tab already gone leaves its checkout behind: remove that.
+            if code != 0 and error_code(data) != "tab_not_found":
+                return code, raw
+            code, raw = 0, ""
+            if wt and os.path.isdir(wt):
+                code, out, err = sh(["git", "worktree", "remove", "--force", wt],
+                                    cwd=wt, timeout=180)
+                raw = err or out
+            return code, raw
         code, _, raw = herdr(["worktree", "remove", "--workspace", session,
                               "--force"], timeout=180)
         if code != 0 and wt and os.path.isdir(wt):
@@ -400,32 +484,56 @@ class HerdrBackend:
             raw = err or out
         return code, raw
 
-    def current(self):
-        """Address of the agent running this command, if it is a herdr agent.
-        In herdr the orchestrator needs a name others can address; an unnamed
-        agent is named ORCH_AGENT on the spot."""
-        pane = os.environ.get("HERDR_PANE_ID")
-        if not pane or not shutil.which("herdr"):
-            return None
-        code, data, _ = herdr(["agent", "get", pane])
-        a = ((data or {}).get("result") or {}).get("agent") or {}
-        if code != 0 or not a:
-            return None
-        name = a.get("name")
-        if not name and herdr(["agent", "rename", pane, ORCH_AGENT])[0] == 0:
-            name = ORCH_AGENT
-        return f"herdr:{name or pane}"
+    def checkout_of(self, session):
+        """The worktree path of a worker tab, or None."""
+        rows, _, _ = self.listing()
+        return next((r["path"] for r in rows if r["id"] == session), None)
 
     def spawn(self, key_, path, wt, title, model):
-        """A herdr workspace on the worktree, running a named claude agent."""
+        """A tab of the Octopilot workspace on the worktree when WORKER_HOST is tab,
+        else a workspace; either runs a named claude agent."""
+        tab = worker_host() == "tab"
+        ws = octopilot_workspace() if tab else None
+        if ws:
+            return self.spawn_tab(ws, key_, path, wt, title, model)
+        note = "no Octopilot workspace: the worker opens as its own workspace" \
+            if tab else None
         code, data, raw = herdr(["worktree", "open", "--cwd", path, "--path", wt,
                                  "--label", title, "--no-focus"])
         if code != 0:
             raise SystemExit(f"herdr worktree open failed: {raw}")
         res = data["result"]
         ws, pane = res["workspace"]["workspace_id"], res["root_pane"]["pane_id"]
-
         name = agent_name(key_)
+        host = {"backend": self.name, "session": ws, "agent": name, "worktree": wt}
+        warning = self.start_agent(pane, name, path, wt, model, f"workspace {ws}")
+        if warning:
+            host["warning"] = warning
+        return add_note(host, note) if note else host
+
+    def spawn_tab(self, ws, key_, path, wt, title, model):
+        """A tab of workspace ws on the worktree, its root pane running claude."""
+        name = agent_name(key_)
+        # The tab inherits herdr's environment, not this one: pass the octopilot settings.
+        argv = ["tab", "create", "--workspace", ws, "--cwd", wt,
+                "--label", tab_label(title, name), "--no-focus",
+                "--env", f"OCTOPILOT_DIR={OCTOPILOT_DIR}",
+                "--env", f"OCTOPILOT_STATE_DIR={os.path.dirname(STATE_FILE)}"]
+        code, data, raw = herdr(argv, timeout=90)
+        if code != 0:
+            raise SystemExit(f"herdr tab create failed: {raw}")
+        res = data["result"]
+        tab, pane = res["tab"]["tab_id"], res["root_pane"]["pane_id"]
+        host = {"backend": self.name, "session": tab, "space": ws, "agent": name,
+                "worktree": wt}
+        warning = self.start_agent(pane, name, path, wt, model, f"tab {tab}")
+        if warning:
+            host["warning"] = warning
+        return host
+
+    def start_agent(self, pane, name, path, wt, model, where):
+        """Start the claude agent name in pane -> its startup warning, or None.
+        where names the host in the messages; a failed start raises SystemExit."""
         args = ["agent", "start", name, "--kind", "claude", "--pane", pane,
                 "--timeout", "60000"]
         if model:
@@ -437,15 +545,14 @@ class HerdrBackend:
             if code == 0 or error_code(data) == "agent_not_ready":
                 break
             time.sleep(2)
-        host = {"backend": self.name, "session": ws, "agent": name, "worktree": wt}
-        if code != 0 and error_code(data) == "agent_not_ready":
-            if not accept_trust(self, name, wt, path):
-                host["warning"] = (f"agent {name} is blocked at startup; check "
-                                   f"workspace {ws} before sending it a prompt")
-        elif code != 0:
-            raise SystemExit(f"herdr agent start failed (workspace {ws} kept): "
-                             f"{raw}")
-        return host
+        if code == 0:
+            return None
+        if error_code(data) == "agent_not_ready":
+            if accept_trust(self, name, wt, path):
+                return None
+            return (f"agent {name} is blocked at startup; check {where} "
+                    "before sending it a prompt")
+        raise SystemExit(f"herdr agent start failed ({where} kept): {raw}")
 
 
 class HcBackend:
@@ -467,25 +574,67 @@ class HcBackend:
         return data.get("spaces", [])
 
     def sessions(self, spaces):
-        """Linked-worktree spaces, shaped like HerdrBackend.sessions()."""
+        """Linked-worktree spaces, and the tabs of other local spaces that run in
+        a linked worktree (a worker's), shaped like HerdrBackend.sessions()."""
         if spaces is None:
             return None
+        checkouts = {}  # worktree_of() once per folder in this scan
+
+        def checkout(folder):
+            if folder not in checkouts:
+                checkouts[folder] = worktree_of(folder)
+            return checkouts[folder]
+        cwds = None
         out = []
         for sp in spaces:
             # A space on another machine has a folder this one cannot see.
-            if sp.get("machine") or not sp.get("folder"):
+            if sp.get("machine"):
                 continue
-            wt = worktree_of(sp["folder"])
+            wt = checkout(sp["folder"]) if sp.get("folder") else None
             if wt:
-                path, repo, branch = wt
-                out.append({"id": sp["id"], "title": sp.get("name"), "path": path,
-                            "backend": self.name,
-                            "worktree": {"branch": branch or None,
-                                         "main_repo_path": repo}})
+                out.append(self.session_row(sp["id"], sp.get("name"), sp["id"], wt))
+                continue
+            if cwds is None:
+                cwds = self.terminal_cwds()
+            for tab in sp.get("tabs", []):
+                row = self.tab_row(sp, tab, cwds, checkout)
+                if row:
+                    out.append(row)
         return out
 
+    def session_row(self, session, title, space, wt):
+        """A session row for a checkout: wt is worktree_of()'s (path, repo, branch)."""
+        path, repo, branch = wt
+        return {"id": session, "title": title, "path": path, "backend": self.name,
+                "space": space,
+                "worktree": {"branch": branch or None, "main_repo_path": repo}}
+
+    def terminal_cwds(self):
+        """{terminal: cwd} for the terminals hc lists, finished ones too (a tab
+        whose claude exited keeps its session), {} when it cannot say."""
+        code, data, _ = hc(["ls", "--all", "--json"], timeout=10)
+        if code != 0 or not data:
+            return {}
+        return {t["address"]: t.get("cwd") for t in data.get("terminals", [])}
+
+    def tab_row(self, space, tab, cwds, checkout):
+        """The row of a tab with a terminal in a linked worktree, or None. The
+        launcher's terminals (octopilot.dir) are not a worker's."""
+        for t in tab.get("terminals", []):
+            folder = cwds.get(t.get("terminal"))
+            wt = checkout(folder) if folder else None
+            if not wt:
+                continue
+            code, info, _ = hc(["get", t["terminal"], "--json"], timeout=10)
+            if code != 0 or not isinstance(info, dict):
+                continue  # labels unknown: not a worker's either
+            if (info.get("labels") or {}).get("octopilot.dir"):
+                continue
+            return self.session_row(tab["id"], tab.get("name"), space["id"], wt)
+        return None
+
     def agents(self):
-        """[{session, agent, pane, status}] for every terminal running an agent.
+        """[{session, ids, agent, pane, status}] for every terminal running an agent.
         The agent's name is its octopilot.agent label, else the terminal's name."""
         code, data, _ = hc(["ls", "--json"], timeout=10)
         if code != 0 or not data:
@@ -498,6 +647,8 @@ class HcBackend:
             info = info or {}
             labels = info.get("labels") or {}
             out.append({"session": labels.get("herdr.space"),
+                        "ids": [labels[k] for k in ("herdr.space", "herdr.tab")
+                                if labels.get(k)],
                         "agent": labels.get("octopilot.agent") or info.get("name"),
                         "pane": t["address"], "status": t.get("status")})
         return out
@@ -506,28 +657,42 @@ class HcBackend:
         """-> (worktree sessions, answered, open session ids)."""
         spaces = self.spaces()
         rows = self.sessions(spaces)
-        ids = {s.get("id") for s in spaces or []}
-        return rows or [], rows is not None, ids
+        return rows or [], rows is not None, open_ids(spaces or [])
 
     def live(self):
         return live_map(self.agents(), HC_STATE, self.name)
 
     def target(self, it):
         """The terminal of an item's agent: the one labelled with its name, else
-        any agent in its space."""
-        found = [a for a in self.agents() if a["session"] == it.get("session")]
+        any agent in its space, else the parked terminal of that name."""
+        agents = self.agents()
+        found = [a for a in agents if session_matches(a, it.get("session"))]
         for a in found:
             if it.get("agent") and a["agent"] == it["agent"]:
                 return a["pane"]
-        return found[0]["pane"] if found else None
+        if found:
+            return found[0]["pane"]
+        return next((a["pane"] for a in agents
+                     if it.get("agent") and a["agent"] == it["agent"]), None)
 
     def find(self, name):
         """-> "hc:<terminal>" of the live terminal labelled octopilot.agent=<name>,
-        or None."""
+        or None. This checkout's terminal first, else one with no octopilot.dir
+        label (a worker's); another checkout's is never picked."""
         code, data, _ = hc(["ls", "--json", "--label", f"octopilot.agent={name}"],
                            timeout=10)
         terms = (data or {}).get("terminals", []) if code == 0 else []
-        return f"hc:{terms[0]['address']}" if terms else None
+        unlabelled = None
+        for t in terms:
+            code, info, _ = hc(["get", t["address"], "--json"], timeout=10)
+            if code != 0 or not isinstance(info, dict):
+                continue  # labels unknown: not ours, and not a worker's either
+            d = (info.get("labels") or {}).get("octopilot.dir")
+            if not d:
+                unlabelled = unlabelled or t["address"]
+            elif os.path.realpath(d) == os.path.realpath(OCTOPILOT_DIR):
+                return f"hc:{t['address']}"
+        return f"hc:{unlabelled}" if unlabelled else None
 
     def status(self, target):
         _, info, _ = hc(["get", target, "--json"])
@@ -554,33 +719,53 @@ class HcBackend:
         code, _, raw = hc(["wait", target, "--timeout", "60"], timeout=90)
         return code, raw
 
-    def focus(self, session, target, timeout=60):
-        code, _, raw = app_do("space.select", ["--id", session], timeout=timeout)
-        if code == 0:
-            code, _, raw = app_do("agent.focus", ["--terminal", target],
-                                  timeout=timeout)
+    def focus(self, session, target=None, timeout=60):
+        """Show the session's space, then its tab, then the target agent."""
+        steps = [("space.select", ["--id", session])]
+        if is_tab(session):
+            spaces = self.spaces()
+            if spaces is None:
+                return False, "herdr-app did not answer"
+            space = next((sp["id"] for sp in spaces for t in sp.get("tabs", [])
+                          if t.get("id") == session), None)
+            if space is None:
+                return False, f"{session} is not open in herdr-app"
+            steps = [("space.select", ["--id", space]),
+                     ("tab.select", ["--id", session])]
+        if target:
+            steps.append(("agent.focus", ["--terminal", target]))
+        code, raw = 0, ""
+        for command, args in steps:
+            code, _, raw = app_do(command, args, timeout=timeout)
+            if code != 0:
+                break
         return code == 0, raw
 
     def rename(self, entry, name):
         return hc(["label", entry["pane"], f"octopilot.agent={name}"])[0] == 0
 
     def close(self, session):
-        code, _, raw = app_do("space.close", ["--id", session, "--confirmed", "true"])
+        """Close the session's tab, or its space."""
+        command = "tab.close" if is_tab(session) else "space.close"
+        code, _, raw = app_do(command, ["--id", session, "--confirmed", "true"])
         return code, raw
 
     def discard(self, session, wt):
-        """Close the space, then remove its worktree -> (code, message). A
+        """Close the space or tab, then remove its worktree -> (code, message). A
         tracked item has none on record: its space's worktree stands in, and
         when the space list is unreadable the worktree is kept."""
         spaces = self.spaces()
         if not wt:
             wt = self.checkout_of(spaces, session)
         code, raw = self.close(session)
-        if code != 0:
-            remaining = self.spaces()
-            if remaining is None or any(s.get("id") == session for s in remaining):
-                # Still open, or unknown: its worktree is still in use.
-                return code, raw
+        # A closed tab is checked against the list too, whatever close said.
+        if code != 0 or is_tab(session):
+            gone = self.gone(session, TAB_GONE_TRIES if is_tab(session) else 1)
+            if gone is None:
+                return code or 1, "herdr-app did not answer: its worktree is kept"
+            if not gone:
+                # Still open: its worktree is still in use.
+                return code or 1, raw or "still open: its worktree is kept"
             code, raw = 0, ""
         if not wt and spaces is None:
             spaces = self.spaces()
@@ -593,23 +778,38 @@ class HcBackend:
             raw = err or out
         return code, raw
 
+    def gone(self, session, tries):
+        """True once herdr-app no longer lists the session, False while it still
+        does after `tries` looks, None when the list cannot be read. A closed tab
+        can linger in the list a moment."""
+        for attempt in range(tries):
+            spaces = self.spaces()
+            if spaces is None:
+                return None
+            if session not in open_ids(spaces):
+                return True
+            if attempt < tries - 1:
+                time.sleep(0.5)
+        return False
+
     def checkout_of(self, spaces, session):
         """The worktree path of a space, or None."""
         return next((s["path"] for s in self.sessions(spaces) or []
                      if s["id"] == session), None)
 
-    def current(self):
-        """This terminal's address when it is the orchestrator, i.e. labelled
-        octopilot.agent=octopilot. The user's own claude is not."""
-        tid = os.environ.get("HC_TERMINAL_ID")
-        if not tid or not shutil.which("hc"):
-            return None
-        _, info, _ = hc(["get", tid, "--json"], timeout=10)
-        labels = (info or {}).get("labels") or {}
-        return f"hc:{tid}" if labels.get("octopilot.agent") == ORCH_AGENT else None
-
     def spawn(self, key_, path, wt, title, model):
-        """A space on the worktree, its first terminal running a named claude."""
+        """A worker's tab in the Octopilot space, else a space of its own."""
+        if worker_host() == "tab":
+            sp = octopilot_space()
+            if sp:
+                return self.spawn_tab(sp, key_, path, wt, title, model)
+            return add_note(
+                self.spawn_space(key_, path, wt, title, model),
+                "no Octopilot space open; the worker gets a space of its own")
+        return self.spawn_space(key_, path, wt, title, model)
+
+    def spawn_command(self, model):
+        """The argv of a worker's terminal: a named claude on this octopilot."""
         # The terminal inherits herdr-core's login environment, not this one,
         # so the octopilot settings the worker needs travel in its argv.
         env = ["OCTOPILOT_BACKEND=hc", f"OCTOPILOT_DIR={OCTOPILOT_DIR}",
@@ -619,18 +819,63 @@ class HcBackend:
         # one wins.
         settings = plugin_settings()
         plugin = ["--settings", settings] if settings else []
-        argv = (["env"] + env + ["claude"] + plugin
+        return (["env"] + env + ["claude"] + plugin
                 + (["--model", model] if model else []))
+
+    def spawn_space(self, key_, path, wt, title, model):
+        """A space on the worktree, its first terminal running a named claude."""
+        argv = json.dumps(self.spawn_command(model))
         code, data, raw = app_do("space.new", ["--name", title, "--folder", wt,
-                                               "--argv", json.dumps(argv),
-                                               "--focus", "false"], timeout=90)
+                                               "--argv", argv, "--focus", "false"],
+                                 timeout=90)
         if code != 0 or not data or "terminal" not in data:
             raise SystemExit(f"herdr-app space.new failed: {raw}")
         ws, term = data["space"], data["terminal"]
         name = agent_name(key_)
+        warning = self.start_agent(term, wt, path, name, f"space {ws}")
+        return self.host_of(ws, name, wt, warning)
+
+    def spawn_tab(self, sp, key_, path, wt, title, model):
+        """A tab of the Octopilot space on the worktree, its terminal running a
+        named claude. A reserved tab name gets the agent's name after it."""
+        name = agent_name(key_)
+        argv = json.dumps(self.spawn_command(model))
+        code, data, raw = app_do("tab.new", ["--space", sp, "--name",
+                                             tab_label(title, name),
+                                             "--folder", wt, "--argv", argv,
+                                             "--focus", "false"], timeout=90)
+        if code != 0 or not data or "terminal" not in data:
+            raise SystemExit(f"herdr-app tab.new failed: {raw}")
+        term = data["terminal"]
+        tab = data.get("tab") if isinstance(data.get("tab"), str) else self.tab_of(term)
+        if not tab:
+            raise SystemExit(f"herdr-app tab.new: {term} has no tab label (tab kept)")
+        warning = self.start_agent(term, wt, path, name, f"tab {tab}")
+        if SETTLE_WORKER_TABS:
+            code, _, raw = app_do("tab.settle", ["--id", tab])
+            if code != 0:
+                print(f"note: tab {tab} not settled: {raw}")
+        host = self.host_of(tab, name, wt, warning)
+        host["space"] = sp
+        return host
+
+    def tab_of(self, term):
+        """The tab of a terminal, from its herdr.tab label once herdr-core sets it."""
+        for _ in range(30):
+            _, info, _ = hc(["get", term, "--json"], timeout=10)
+            tab = ((info or {}).get("labels") or {}).get("herdr.tab")
+            if tab:
+                return tab
+            time.sleep(0.5)
+        return None
+
+    def start_agent(self, term, wt, path, name, where):
+        """Label the terminal as the named agent, answer its trust dialog and wait
+        for it to settle -> the warning when it is blocked, else None. where
+        names the host in messages."""
         code, _, raw = hc(["label", term, f"octopilot.agent={name}"])
         if code != 0:
-            raise SystemExit(f"hc label failed (space {ws} kept): {raw}")
+            raise SystemExit(f"hc label failed ({where} kept): {raw}")
         # claude draws its trust dialog a moment after it starts: keep looking
         # for it for a while, then wait for the agent to settle.
         for _ in range(30):
@@ -640,26 +885,74 @@ class HcBackend:
                 break
             time.sleep(1)
         self.wait_idle(term)
-        host = {"backend": self.name, "session": ws, "agent": name, "worktree": wt}
         if self.status(term) == "blocked":
-            host["warning"] = (f"agent {name} is blocked at startup; check "
-                               f"space {ws} before sending it a prompt")
+            return (f"agent {name} is blocked at startup; check {where} "
+                    "before sending it a prompt")
+        return None
+
+    def host_of(self, session, name, wt, warning):
+        """The host a spawn returns: the session, its agent and checkout."""
+        host = {"backend": self.name, "session": session, "agent": name,
+                "worktree": wt}
+        if warning:
+            host["warning"] = warning
         return host
+
+
+# Looks at herdr-app's list for a closed tab, half a second apart.
+TAB_GONE_TRIES = 5
+
+
+def open_ids(spaces):
+    """Every space and tab id herdr-app lists, settled tabs included."""
+    return ({sp.get("id") for sp in spaces}
+            | {t.get("id") for sp in spaces for t in sp.get("tabs", [])})
 
 
 HERDR = HerdrBackend()
 HC = HcBackend()
 # Both are listed on every scan; a session id belongs to exactly one of them.
 BACKENDS = {"herdr": HERDR, "hc": HC}
+# Every label a discard is logged under, so a failed removal is recognised.
+REMOVE_LABELS = (HERDR.remove_label, HC.remove_label, "herdr tab remove",
+                 "herdr-app tab remove")
 
 
 def backend_for(session):
     """The backend a session id belongs to, or None."""
-    if HERDR_WS.match(session or ""):
+    if HERDR_WS.match(session or "") or HERDR_TAB.match(session or ""):
         return HERDR
-    if HC_SPACE.match(session or ""):
+    if HC_SPACE.match(session or "") or HC_TAB.match(session or ""):
         return HC
     return None
+
+
+def is_tab(session):
+    """True for a worker's tab id, not for a whole workspace or space."""
+    return bool(HERDR_TAB.match(session or "") or HC_TAB.match(session or ""))
+
+
+def short_noun(session):
+    """What a detach or park leaves open, short: a tab, else the workspace."""
+    return "tab" if is_tab(session) else "workspace"
+
+
+def host_noun(backend, session):
+    """What the session's host is called in messages: a tab for a tab id."""
+    if HC_TAB.match(session or ""):
+        return "herdr-app tab"
+    if HERDR_TAB.match(session or ""):
+        return "herdr tab"
+    return backend.noun
+
+
+def remove_label_for(backend, session):
+    """The command a discard of the session is logged under, by its host."""
+    if HC_TAB.match(session or ""):
+        return "herdr-app tab remove"
+    if HERDR_TAB.match(session or ""):
+        return "herdr tab remove"
+    return backend.remove_label
 
 
 def spawn_backend():
@@ -668,6 +961,74 @@ def spawn_backend():
         raise SystemExit(f"OCTOPILOT_BACKEND must be herdr or hc, not "
                          f"{OCTOPILOT_BACKEND!r}")
     return backend
+
+
+def own_labels(agent):
+    """The labels of this checkout's terminal running agent, or None: only a
+    terminal labelled with this checkout's dir, as open-gui.sh's is_mine."""
+    code, data, _ = hc(["ls", "--json", "--label", f"octopilot.agent={agent}"],
+                       timeout=10)
+    for t in (data or {}).get("terminals", []) if code == 0 else []:
+        code, info, _ = hc(["get", t["address"], "--json"], timeout=10)
+        if code != 0 or not isinstance(info, dict):
+            continue
+        labels = info.get("labels") or {}
+        d = labels.get("octopilot.dir")
+        if d and os.path.realpath(d) == os.path.realpath(OCTOPILOT_DIR):
+            return labels
+    return None
+
+
+def octopilot_space():
+    """The GUI's Octopilot space: that of the headless engine, the code agent or
+    the prompter (their herdr.space label, else octopilot.space once parked),
+    when this computer lists it. None when none is found."""
+    local = {s.get("id") for s in HC.spaces() or [] if not s.get("machine")}
+    for label in (HEADLESS_AGENT, CODE_AGENT, PROMPTER_AGENT):
+        labels = own_labels(label) or {}
+        space = labels.get("herdr.space") or labels.get("octopilot.space")
+        if space in local:
+            return space
+    return None
+
+
+def octopilot_workspace():
+    """The TUI's Octopilot workspace (labelled as herdr/open.sh does), else the
+    one the prompter runs in. None when neither is found."""
+    for w in HERDR.workspaces() or []:
+        if w.get("label") == OCTOPILOT_LABEL:
+            return w.get("workspace_id")
+    code, data, _ = herdr(["agent", "get", PROMPTER_AGENT])
+    if code != 0:
+        return None
+    return (((data or {}).get("result") or {}).get("agent") or {}).get("workspace_id")
+
+
+def worker_host():
+    """Where worker sessions open, read at use: "tab" or "space"."""
+    host = os.environ.get("WORKER_HOST", "tab")
+    if host not in ("tab", "space"):
+        raise SystemExit(f"WORKER_HOST must be tab or space, not {host!r}")
+    return host
+
+
+# The launcher's tab titles: keep in step with MAIN_TAB, CODE_TAB, ENGINE_TAB in herdr/open*.sh.
+LAUNCHER_TAB_TITLES = ("OCTOPILOT", "engine", "Octopilot (code changes)")
+
+
+def tab_label(title, name):
+    """A worker tab's label: its spawn title, with the agent's name after it when
+    the title is a launcher tab's (case-insensitively)."""
+    if title.lower() in {t.lower() for t in LAUNCHER_TAB_TITLES}:
+        return f"{title} ({name})"
+    return title
+
+
+def add_note(host, note):
+    """The host with note: what the spawn did instead of what was asked, not a
+    startup problem, so it never holds back the first prompt."""
+    host["note"] = note
+    return host
 
 
 def split_address(address):
@@ -711,6 +1072,29 @@ def all_agents():
     return [a for backend in BACKENDS.values() for a in backend.agents()]
 
 
+def parked_agent(it, session, open_ws, agents):
+    """The herdr-app terminal named for the item's agent that no open tab holds:
+    herdr-app parked it, its claude still runs. agents() is HC.agents(). Else None."""
+    if backend_for(session) is not HC or not it.get("agent"):
+        return None
+    return next((a for a in agents() if a.get("agent") == it["agent"]
+                 and not (set(a.get("ids") or []) & open_ws)), None)
+
+
+def kill_parked(it, sess):
+    """hc kill of the item's parked terminal, its claude runs in no tab. None when
+    there is none, else (pane, code, raw)."""
+    # Without HC's answer every labelled terminal would look parked.
+    _, answered, open_ws = all_sessions()[:3]
+    if backend_for(sess) is not HC or HC.name not in answered:
+        return None
+    parked = parked_agent(it, sess, open_ws, HC.agents)
+    if not parked:
+        return None
+    code, _, raw = hc(["kill", parked["pane"]])
+    return parked["pane"], code, raw
+
+
 def session_age(s, live):
     """Seconds since the session did anything: the last commit on the
     worktree's branch stands in."""
@@ -730,17 +1114,6 @@ def send_to(address, text):
     """-> (ok, error code or message)."""
     backend, target = split_address(address)
     return backend.send(target, text)
-
-
-def current_orch():
-    """Address of the agent running this command, if it is one. The TUI is
-    asked first, so it wins when both ran the command."""
-    backends = [HERDR, HC] if OCTOPILOT_BACKEND == "hc" else [HERDR]
-    for backend in backends:
-        address = backend.current()
-        if address:
-            return address
-    return None
 
 
 def sid(session_id):
@@ -1040,6 +1413,16 @@ def stack_feedback(it, detail_of):
     return None, []
 
 
+def parked_feedback(it, d, detail_of):
+    """The feedback a parked fix item has waiting, as (layer, feedback), as the
+    FEEDBACK path would see it, but marks nothing: the watermark stays put."""
+    if it["mode"] != "fix" or "feedback_seen" not in it:
+        return None, []
+    if it.get("stack"):
+        return stack_feedback(it, detail_of)
+    return None, new_feedback(d, it["feedback_seen"])
+
+
 def closed_layer(layers, detail_of):
     """The first of `layers` that GitHub reports CLOSED (not merged), or None."""
     for layer in layers:
@@ -1056,6 +1439,36 @@ def stack_rest(it, detail_of):
     while left and (detail_of(left[0]["pr"]) or {}).get("state") == "MERGED":
         merged.append(left.pop(0))
     return merged, left
+
+
+def boot_template(it, d, me):
+    """The review prompt a booting item gets: -> (template, prev), prev the sha
+    a re-review covers from. A reviewed comment item gets a follow-up on the
+    author's new commits, not a second full review."""
+    prev = it.get("reviewed_sha")
+    if it["mode"] == "comment" and not prev:
+        prev = last_own_review(d, me)
+    if it.get("stack") and it["mode"] == "comment":
+        return "review-stack", None
+    if it["mode"] == "comment" and prev:
+        return "re-review", prev
+    if it["mode"] == "comment":
+        return "review-comment", None
+    return "review-fix", None
+
+
+def rehome_of(it, sessions, live, open_ws, held):
+    """-> (session, space) of the open tab or space the item's agent is live in,
+    or None. A session in held is another item's: it is never taken."""
+    name = it.get("agent")
+    rows = {s["id"]: s for s in sessions}
+    homes = [sess for sess, a in live.items()
+             if name and a.get("agent") == name and sess in open_ws
+             and sess in rows and sess not in held and sess != it.get("session")]
+    if not homes:
+        return None
+    home = next((h for h in homes if is_tab(h)), homes[0])
+    return home, rows[home].get("space")
 
 
 def scan(state, refresh=False, info=None):
@@ -1126,32 +1539,60 @@ def scan(state, refresh=False, info=None):
     # Revivals are reported, not logged, here: snapshot() runs this on a
     # copy and must not write the event log. dispatch() logs them on save.
     revived = []
+    # Re-homed items, as (key, session): the tick logs them, as it does revivals.
+    rehomed = []
     if info is not None:
         info["details"] = details
         info["meta"] = meta
         info["revived"] = revived
+        info["rehomed"] = rehomed
 
     rows = []
     active = 0
 
     # ---- tracked items
+    # Every item's session: a re-home never takes one of them.
+    held = {it.get("session") for it in items.values()}
+    # herdr-app's agents, listed on first use this scan (only a gone item asks).
+    hc_listed = []
+
+    def hc_agents():
+        if not hc_listed:
+            hc_listed.append(HC.agents())
+        return hc_listed[0]
+
     for k, it in list(items.items()):
         slug = k.split("#")[0].split("!")[0].split("?")[0]
         d = details.get(k)
         sess = it.get("session")
         smeta = f"session={sid(sess)}"
 
-        # The user closed the session's workspace by hand. Stop tracking it
-        # so it frees its slot; a merged PR still goes through MERGED below
-        # so its cleanup and fan-out happen. Only when its backend answered:
-        # silence is not removal.
+        # A session closed by hand follows its agent if live elsewhere, stays
+        # tracked if herdr-app parked it, else is untracked (slot freed). Only when
+        # its backend answered; a merged PR still reaches MERGED below.
+        parked_term = None
         if sess and sess not in open_ws \
                 and listed(answered, sess) and not (
                 it.get("pr") and d and d.get("state") == "MERGED"):
-            items.pop(k)
-            rows.append(("GONE", k, f"{smeta} removed outside octopilot "
-                                    "-> untracked, slot freed"))
-            continue
+            home = rehome_of(it, sessions, live, open_ws, held)
+            if home is None:
+                parked_term = parked_agent(it, sess, open_ws, hc_agents)
+                if parked_term is None:
+                    items.pop(k)
+                    rows.append(("GONE", k, f"{smeta} removed outside octopilot "
+                                            "-> untracked, slot freed"))
+                    continue
+            else:
+                # Its agent is live in another tab or space: the item follows it.
+                sess, space = home
+                held.add(sess)
+                it["session"], it["backend"] = sess, backend_for(sess).name
+                if space:
+                    it["space"] = space
+                else:
+                    it.pop("space", None)
+                smeta = f"session={sid(sess)}"
+                rehomed.append((k, sess))
 
         if it.get("pr") and d and d.get("state") == "MERGED":
             # A fix stack whose bottom merged, with layers still open, is
@@ -1189,28 +1630,40 @@ def scan(state, refresh=False, info=None):
                                           "session left alone"))
                 continue
 
-        if it.get("phase") == "booting":
+        def parked_row(rk):
+            # herdr-app parked the agent's terminal: nothing to send to until it is
+            # shown again, so no prompt goes out, and a parked card stays in Done.
+            nonlocal active
+            if it.get("parked"):
+                rows.append(("DONE", rk, f"mode={it['mode']} {smeta} parked by you "
+                                         "-> waiting on merge or new activity"))
+                return
+            active += 1
+            waits = parked_feedback(it, d, lambda pr: layer_detail(k, it, pr))[1]
+            wait = (f"{len(waits)} new feedback item(s) wait until then" if waits
+                    else "feedback waits until then")
+            rows.append(("WORKING", rk, f"mode={it['mode']} {smeta} parked in "
+                                        "herdr-app with no tab: `herdr-app do "
+                                        "terminal.keep --terminal "
+                                        f"{parked_term['pane']}` shows it; "
+                                        f"{wait}"))
+
+        # Without a PR the branch lookup below runs first, so a PR the parked
+        # claude opened still re-keys and reaches MERGED or CLOSED.
+        if parked_term and it.get("pr"):
+            parked_row(k)
+            continue
+
+        if it.get("phase") == "booting" and not parked_term:
             active += 1
             # A reboot whose wait timed out leaves a busy agent: a BOOTING row
-            # would have the orchestrator prompt it mid-task.
+            # would have the engine prompt it mid-task.
             if live.get(sess, {}).get("state") == "running":
                 rows.append(("WORKING", k, f"mode={it['mode']} {smeta} "
                                            "booting, agent not idle yet"))
                 continue
-            # A comment item that was already reviewed gets a follow-up review
-            # scoped to the author's new commits, not a second full review.
-            # Items tracked before reviewed_sha was seeded fall back to GitHub.
-            prev = it.get("reviewed_sha")
-            if it["mode"] == "comment" and not prev:
-                prev = last_own_review(d, me)
-            if it.get("stack") and it["mode"] == "comment":
-                tmpl = "template=review-stack"
-            elif it["mode"] == "comment" and prev:
-                tmpl = f"template=re-review PREV={prev}"
-            elif it["mode"] == "comment":
-                tmpl = "template=review-comment"
-            else:
-                tmpl = "template=review-fix"
+            tmpl, prev = boot_template(it, d, me)
+            tmpl = f"template={tmpl}" + (f" PREV={prev}" if tmpl == "re-review" else "")
             rows.append(("BOOTING", k, f"mode={it['mode']} {smeta} {tmpl}"))
             continue
 
@@ -1259,9 +1712,12 @@ def scan(state, refresh=False, info=None):
                     rows.append(("CLOSED", nk, f"branch={it.get('branch')} {smeta} "
                                                "-> not merged; session left alone"))
                     continue
+                if parked_term:
+                    parked_row(nk)
+                    continue
                 active += 1
                 # An agent-driven item runs its own review loop; a REVIEW row
-                # here would tell the orchestrator to reboot it mid-flight.
+                # here would tell the engine to reboot it mid-flight.
                 if it.get("driver") == "agent":
                     rows.append(("WORKING", nk,
                                  f"branch={it.get('branch')} {smeta} driver=agent "
@@ -1271,6 +1727,9 @@ def scan(state, refresh=False, info=None):
                     rows.append(("REVIEW", nk,
                                  f"mode={it['mode']} {smeta} head={found['headRefOid'][:7]} "
                                  f"reviewed=none"))
+                continue
+            if parked_term:
+                parked_row(k)
                 continue
             st = live.get(sess, {}).get("state", "?")
             age = live.get(sess, {}).get("age_secs")
@@ -1349,7 +1808,7 @@ def scan(state, refresh=False, info=None):
             else head
 
         # An agent-driven item runs its own loop: it waits on its own CI,
-        # claims its own rounds and reports when it is done. The orchestrator
+        # claims its own rounds and reports when it is done. The engine
         # never sends it a review prompt -- it only watches for the agent
         # going quiet, because a dead agent and a working one look identical
         # from here.
@@ -1423,23 +1882,26 @@ def scan(state, refresh=False, info=None):
                                            "reviewing, not posted yet"))
                 continue
             active -= 1
-            # `mine` non-empty: our review is posted, so a pending request for
-            # us is a re-request, not the original one. Once per head, so a
-            # request left pending (e.g. we posted nothing) cannot loop.
+            # `mine` non-empty: our review is posted, so a pending request is a
+            # re-request. Once per head (rerequest_head, set by reboot()), so a
+            # request left pending cannot loop.
             if requested and mine and it.get("rerequest_head") != head:
                 if rounds >= MAX_REVIEW_ROUNDS:
+                    it.pop("pending_rerequest", None)
                     rows.append(("CAPPED", k,
                                  f"mode=comment {smeta} head={head[:7]} "
                                  f"rounds={rounds}/{MAX_REVIEW_ROUNDS} "
                                  "re-requested -> octopilot stopped; you decide"))
                     continue
-                it["rerequest_head"] = head
+                it["pending_rerequest"] = head
                 active += 1
                 rows.append(("REVIEW", k, f"mode=comment {smeta} "
                                           f"head={head[:7]} reviewed={rv[:7]} "
                                           f"round={rounds + 1}/{MAX_REVIEW_ROUNDS} "
                                           "re-requested"))
                 continue
+            # The request was withdrawn before reboot() acted on it.
+            it.pop("pending_rerequest", None)
             if not head.startswith(rv):
                 if it.get("head_seen") != head:
                     it["head_seen"] = head
@@ -1623,27 +2085,16 @@ def split_key(k):
                      f"or owner/repo?investigation)")
 
 
-def orchestrator_session(state=None):
-    """Address of the orchestrator, for the agent to report back to.
-
-    The session rendering the prompt is the orchestrator, so its own address
-    wins; the recorded one is the fallback. A stale address would silently
-    swallow every agent report.
-    """
-    return current_orch() or orchestrator_target(state or load())
-
-
 def issue_context(slug, number, body_max=8000, comment_max=1500, keep=8):
     """The issue, verbatim, for splicing into the prompt.
 
-    Fetched here rather than summarised by the orchestrator: a paraphrase of a
-    requirement is lossy in exactly the way that matters, and the orchestrator
-    typically read only the title and body while the discussion often lives in
-    the comments.
+    Fetched here rather than summarised: a paraphrase of a requirement is lossy
+    in exactly the way that matters, and an agent that reads only the title and
+    body misses the discussion, which often lives in the comments.
 
     Body and comments get separate budgets. A single overlong body must never
     be able to push the comments out -- the comments are the part the
-    orchestrator has not seen, so they are the last thing to drop.
+    agent has not seen, so they are the last thing to drop.
     """
     d = gh_json(["issue", "view", str(number), "-R", slug, "--json",
                  "number,title,body,labels,comments"], default=None)
@@ -1702,8 +2153,6 @@ def render_prompt(name, subs):
     if "{{STACK_LOOP}}" in body:
         with open(os.path.join(pdir, "shared", "stack-loop.md")) as fh:
             subs.setdefault("STACK_LOOP", fh.read().strip())
-    if "{{ORCH}}" in body or "{{LOOP}}" in body or "{{STACK_LOOP}}" in body:
-        subs.setdefault("ORCH", orchestrator_session())
     # Set unconditionally: FIND_MODEL and VERIFY_MODEL also live inside the
     # LOOP fragment, not only in the template body, so an `in body` test would
     # never fire.
@@ -1759,6 +2208,27 @@ def render_prompt(name, subs):
             continue
         body = body.replace("{{" + k + "}}", str(v))
     return re.sub(r"\{\{[A-Z_]+\}\}", "", body).strip()
+
+
+def render_for(state, template, subs):
+    """The prompt `template` renders to for `subs`, with the facts of the item
+    it is for (KEY, question, branch, stack, read-only) filled in from state.
+    Mutates `subs`; the caller's own KEY=VAL values win over the item's."""
+    if "KEY" not in subs and subs.get("REPO") and subs.get("PR"):
+        # BOOTING rows send no KEY: a layer's PR resolves to its stack.
+        found = item_key_for(state, subs["REPO"], subs["PR"])
+        if found:
+            subs["KEY"] = found
+    it_ = state.get("items", {}).get(subs.get("KEY", ""), {})
+    if it_.get("question"):
+        subs.setdefault("QUESTION", it_["question"])
+        subs.setdefault("BRANCH", it_.get("branch", ""))
+    if it_.get("stack"):
+        subs.setdefault("STACK", stack_text(it_["stack"]))
+    # A read-only item never gets a prompt that tells it to commit and
+    # open a PR, whatever template the caller asked for.
+    tmpl = "investigate-readonly" if it_.get("read_only") else template
+    return render_prompt(tmpl, subs)
 
 
 def resolve_mode(slug, num, kind, me):
@@ -1830,8 +2300,20 @@ def check_stack(slug, num, branch, base, layers, me):
     return modes
 
 
-def spawn(state, key_, branch, title, new_branch, question=None,
-          read_only=False, stack_spec=None):
+def spawn_item(state, key_, branch, title, new_branch, question=None,
+               read_only=False, stack_spec=None):
+    """Create the item's worktree and session, and track it.
+
+    Raises SystemExit on a refusal (unknown repo, a stack that does not check
+    out, a session already open on the branch), on a failed git fetch, and when
+    the host cannot start the session. A host failure can come after
+    add_worktree has created the worktree, which is left in place.
+
+    -> {"ok", "error", "key", "template", "base", "slug", "prev", "stack",
+    "warning", "note", "model"}: ok is always True here (refusals raise), template
+    is the prompt to render, prev the sha a re-review follows (or None), stack the
+    parsed layers (or None), warning the host's startup warning (or None), note
+    what the host did instead of what was asked (or None)."""
     me = whoami(state)
     slug, num, kind = split_key(key_)
     reg = state.get("registry", {})
@@ -1891,7 +2373,7 @@ def spawn(state, key_, branch, title, new_branch, question=None,
     item = {"mode": mode, "branch": branch, "pr": num if kind == "pr" else None,
             "reviewed_sha": reviewed, "phase": "working", "added": int(time.time()),
             "driver": "agent" if mode == "fix" else "orchestrator"}
-    item.update({k: v for k, v in host.items() if k != "warning"})
+    item.update({k: v for k, v in host.items() if k not in ("warning", "note")})
     if stack:
         item["stack"] = stack
     if question:
@@ -1902,19 +2384,33 @@ def spawn(state, key_, branch, title, new_branch, question=None,
     save(state)
     log_event("spawn", key_, mode=mode, branch=branch, session=item["session"],
               title=title)
+    return {"ok": True, "error": None, "key": key_, "template": tmpl, "base": base,
+            "slug": slug, "prev": reviewed, "stack": stack,
+            "warning": host.get("warning"), "note": host.get("note"),
+            "model": model}
 
-    where = " ".join(f"{k}={v}" for k, v in host.items()
-                     if k not in ("session", "warning", "backend"))
-    print(f"spawned {key_} mode={mode} branch={branch} "
-          f"session={item['session']} {where} model={model or 'default'}")
-    if host.get("warning"):
-        print(f"WARNING: {host['warning']}")
+
+def spawn(state, key_, branch, title, new_branch, question=None,
+          read_only=False, stack_spec=None):
+    """spawn <key> <branch> <title> [--new] [--stack "PR:branch ..."]: prints
+    what the caller needs to send the first prompt."""
+    r = spawn_item(state, key_, branch, title, new_branch, question=question,
+                   read_only=read_only, stack_spec=stack_spec)
+    it = state["items"][key_]
+    where = f"agent={it['agent']} worktree={it['worktree']}"
+    print(f"spawned {key_} mode={it['mode']} branch={branch} "
+          f"session={it['session']} {where} model={r['model'] or 'default'}")
+    if r["note"]:
+        print(f"NOTE: {r['note']}")
+    if r["warning"]:
+        print(f"WARNING: {r['warning']}")
+    tmpl, prev = r["template"], r["prev"]
     print(f"next: `$A send {key_} ...` with the '{tmpl}' prompt"
-          + (" (PREV= from the last line)" if reviewed else ""))
-    prev = f" PREV={reviewed}" if reviewed else ""
-    print(f"PROMPT_TEMPLATE={tmpl} BASE={base} REPO={slug}{prev}")
-    if stack:
-        print(f"STACK=\"{stack_text(stack)}\"")
+          + (" (PREV= from the last line)" if prev else ""))
+    prev_arg = f" PREV={prev}" if prev else ""
+    print(f"PROMPT_TEMPLATE={tmpl} BASE={r['base']} REPO={r['slug']}{prev_arg}")
+    if r["stack"]:
+        print(f"STACK=\"{stack_text(r['stack'])}\"")
     return 0
 
 
@@ -2000,88 +2496,121 @@ def siblings(state, slug, exclude=None):
     return out
 
 
-def print_siblings(state, slug, exclude=None):
-    base = state.get("registry", {}).get(slug, {}).get("base", "main")
-    rows = siblings(state, slug, exclude)
+def print_sibling_rows(rows, base):
     if not rows:
         print("SIBLINGS: none")
         return
     print("SIBLINGS:")
     for k, it in rows:
-        # A trailing `stack` tells the orchestrator to send rebase-stack.
+        # A trailing `stack` marks a sibling that needs rebase-stack, not rebase.
         marker = " stack" if it.get("stack") else ""
         print(f"  {it['session']} {it['branch']} {it['pr']} {base} {k}{marker}")
 
 
-def cleanup(state, key_):
-    """Remove a merged item's session and worktree, then mark it handled."""
+def print_siblings(state, slug, exclude=None):
+    base = state.get("registry", {}).get(slug, {}).get("base", "main")
+    print_sibling_rows(siblings(state, slug, exclude), base)
+
+
+def cleanup_item(state, key_):
+    """Remove a merged item's session and worktree, then mark it handled.
+
+    -> {"ok", "error", "msg", "discard_error", "siblings", "base"}: error is the
+    refusal (untracked item); msg is the text the CLI prints for it, including
+    the failed discard line; discard_error is the backend's message when its
+    discard failed, which does not stop the cleanup; siblings is the rebase
+    fan-out set afterwards and base the repo's base branch."""
     it = state.get("items", {}).get(key_)
     if not it:
-        print(f"{key_} is not tracked; nothing to clean up", file=sys.stderr)
-        return 1
+        return {"ok": False, "error": f"{key_} is not tracked; nothing to clean up",
+                "msg": None, "discard_error": None, "siblings": [], "base": None}
+    lines, discard_error = [], None
     sess = it.get("session")
     backend = backend_for(sess)
+    # A parked terminal keeps its claude running in no tab: end it before its
+    # worktree goes, or keep the item tracked when that fails.
+    killed = kill_parked(it, sess)
+    if killed:
+        pane, code, raw = killed
+        if code != 0:
+            return {"ok": False, "msg": None, "siblings": [], "base": None,
+                    "discard_error": None,
+                    "error": f"could not end parked terminal {pane}: {raw}; "
+                             f"{key_} stays tracked"}
+        lines.append(f"hc kill {pane}: ok")
     if backend:
         code, raw = backend.discard(sess, it.get("worktree"))
-        print(f"{backend.remove_label} {sess}: {'ok' if code == 0 else raw}")
+        lines.append(f"{remove_label_for(backend, sess)} {sess}: "
+                     f"{'ok' if code == 0 else raw}")
+        if code != 0:
+            discard_error = raw
     if key_ not in state["handled_merges"]:
         state["handled_merges"].append(key_)
     state["items"].pop(key_, None)
     save(state)
     log_event("cleanup", key_)
-    print(f"cleaned up {key_}")
+    lines.append(f"cleaned up {key_}")
     slug = key_.split("#")[0].split("!")[0]
-    print_siblings(state, slug)
+    return {"ok": True, "error": None, "msg": "\n".join(lines),
+            "discard_error": discard_error, "siblings": siblings(state, slug),
+            "base": state.get("registry", {}).get(slug, {}).get("base", "main")}
+
+
+def cleanup(state, key_):
+    """cleanup <key>: remove a merged item's session and worktree."""
+    r = cleanup_item(state, key_)
+    if not r["ok"]:
+        print(r["error"], file=sys.stderr)
+        return 1
+    print(r["msg"])
+    print_sibling_rows(r["siblings"], r["base"])
     return 0
 
 
-def restack(state, k):
+def restack_item(state, k):
     """Drop a stack's merged bottom layers and re-key the item to the new
     bottom. Its session and worktree stay; everything else on the item moves
-    with it. A single layer left is no stack: the item becomes a plain PR."""
+    with it. A single layer left is no stack: the item becomes a plain PR.
+
+    -> {"ok", "error", "new_key", "template", "subs", "siblings"}: error is the
+    refusal the CLI prints (stderr); on success template and subs are the next
+    prompt to render, and siblings the rebase fan-out set without the item."""
+    def refused(error):
+        return {"ok": False, "error": error, "new_key": None, "template": None,
+                "subs": {}, "siblings": [], "base": None}
+
     k = resolve_key(state, k)
     it = state.get("items", {}).get(k)
     if it is None:
-        print(f"unknown item {k}", file=sys.stderr)
-        return 1
+        return refused(f"unknown item {k}")
     if not it.get("stack"):
-        print(f"{k} is not a stack", file=sys.stderr)
-        return 1
+        return refused(f"{k} is not a stack")
     if it.get("mode") != "fix":
-        print(f"{k} is mode={it.get('mode')}: never restacked, nothing of "
-              "theirs is pushed to", file=sys.stderr)
-        return 1
+        return refused(f"{k} is mode={it.get('mode')}: never restacked, nothing "
+                       "of theirs is pushed to")
     slug = k.split("#")[0]
     # Asked again rather than taken from the row: the row is one tick old.
     merged, left = stack_rest(it, lambda pr: pr_detail(slug, pr))
     if not merged:
-        print(f"{k}: the bottom PR is not merged; nothing to restack",
-              file=sys.stderr)
-        return 1
+        return refused(f"{k}: the bottom PR is not merged; nothing to restack")
     if not left:
-        print(f"{k}: every layer is merged; cleanup takes it from here",
-              file=sys.stderr)
-        return 1
+        return refused(f"{k}: every layer is merged; cleanup takes it from here")
     nxt = left[0]
     nk = key(slug, nxt["pr"])
     if nk in state["items"]:
-        print(f"{nk} is already tracked", file=sys.stderr)
-        return 1
+        return refused(f"{nk} is already tracked")
     nxt_d = pr_detail(slug, nxt["pr"])
     if nxt_d is None:
-        print(f"{k}: gh pr view failed for #{nxt['pr']}", file=sys.stderr)
-        return 1
+        return refused(f"{k}: gh pr view failed for #{nxt['pr']}")
     if nxt_d.get("state") == "CLOSED":
-        print(f"{k}: #{nxt['pr']} is closed, not merged; the stack cannot "
-              "restack past it -- you decide", file=sys.stderr)
-        return 1
+        return refused(f"{k}: #{nxt['pr']} is closed, not merged; the stack "
+                       "cannot restack past it -- you decide")
     # rebase-stack replays the layers above from this head, passed on the
     # command line: a squash merge leaves it out of base's history.
     top_head = (pr_detail(slug, merged[-1]["pr"]) or {}).get("headRefOid")
     if not top_head:
-        print(f"{k}: could not read the merged head of #{merged[-1]['pr']}",
-              file=sys.stderr)
-        return 1
+        return refused(f"{k}: could not read the merged head of "
+                       f"#{merged[-1]['pr']}")
     base = state.get("registry", {}).get(slug, {}).get("base", "main")
 
     for layer in merged:
@@ -2104,16 +2633,143 @@ def restack(state, k):
     save(state)
     gone = ",".join(f"#{layer['pr']}" for layer in merged)
     log_event("restack", nk, old=k, merged=gone, next=f"#{nxt['pr']}")
-    print(f"restacked {k} -> {nk} branch={nxt['branch']} "
-          f"layers={len(left)} session={sid(it.get('session'))}")
     if len(left) > 1:
-        print(f"next: `$A send {nk} \"$($A render rebase-stack REPO={slug} "
-              f"BASE={base} KEY={nk} RESTACK_FROM={top_head})\"`")
+        template = "rebase-stack"
+        subs = {"REPO": slug, "BASE": base, "KEY": nk, "RESTACK_FROM": top_head}
     else:
-        print(f"next: `$A send {nk} \"$($A render rebase REPO={slug} "
-              f"PR={nxt['pr']} BRANCH={nxt['branch']} BASE={base})\"`")
-    print_siblings(state, slug, exclude=nk)
+        template = "rebase"
+        subs = {"REPO": slug, "PR": nxt["pr"], "BRANCH": nxt["branch"], "BASE": base}
+    return {"ok": True, "error": None, "new_key": nk, "template": template,
+            "subs": subs, "siblings": siblings(state, slug, exclude=nk),
+            "base": base}
+
+
+def restack(state, k):
+    """restack <key>: drop a stack's merged bottom layers and re-key it."""
+    k = resolve_key(state, k)
+    r = restack_item(state, k)
+    if not r["ok"]:
+        print(r["error"], file=sys.stderr)
+        return 1
+    nk, subs = r["new_key"], r["subs"]
+    it = state["items"][nk]
+    layers = len(it["stack"]) if it.get("stack") else 1
+    print(f"restacked {k} -> {nk} branch={it['branch']} "
+          f"layers={layers} session={sid(it.get('session'))}")
+    if r["template"] == "rebase-stack":
+        print(f"next: `$A send {nk} \"$($A render rebase-stack REPO={subs['REPO']} "
+              f"BASE={subs['BASE']} KEY={nk} RESTACK_FROM={subs['RESTACK_FROM']})\"`")
+    else:
+        print(f"next: `$A send {nk} \"$($A render rebase REPO={subs['REPO']} "
+              f"PR={subs['PR']} BRANCH={subs['BRANCH']} BASE={subs['BASE']})\"`")
+    print_sibling_rows(r["siblings"], r["base"])
     return 0
+
+
+def mark_reviewed(state, k, sha):
+    """Record a review of `k` at `sha`: the item moves to fixing and counts one
+    more round. -> {"ok", "error", "round"}; error names an untracked item."""
+    it = state["items"].get(k)
+    if it is None:
+        return {"ok": False, "error": f"{k} is not tracked", "round": None}
+    it["reviewed_sha"] = sha
+    it["phase"] = "fixing"
+    it["review_rounds"] = int(it.get("review_rounds", 0)) + 1
+    save(state)
+    log_event("reviewed", k, sha=sha[:7], round=it["review_rounds"])
+    return {"ok": True, "error": None, "round": it["review_rounds"]}
+
+
+def mark_feedback(state, k, since, pr=None):
+    """Move `k`'s feedback watermark to `since` and reset its review rounds. On a
+    stack, `pr` names the layer whose watermark moves; a plain PR ignores it.
+    -> {"ok", "error", "pr"}: error names an untracked item or a `pr` that is
+    not one of the stack's layers."""
+    it = state["items"].get(k)
+    if it is None:
+        return {"ok": False, "error": f"{k} is not tracked", "pr": None}
+    if it.get("stack"):
+        if pr not in [layer["pr"] for layer in it["stack"]]:
+            names = " ".join(str(layer["pr"]) for layer in it["stack"])
+            return {"ok": False, "pr": None, "error": f"{k} is a stack: name one "
+                    f"of its layers ({names})"}
+        it.setdefault("layer_seen", {})[str(pr)] = since
+    else:
+        pr = None
+        it["feedback_seen"] = since
+    it["review_rounds"] = 0
+    it.pop("capped_at", None)
+    save(state)
+    log_event("feedback", k, since=since, pr=pr)
+    return {"ok": True, "error": None, "pr": pr}
+
+
+def decline(state, keys):
+    """Add `keys` to the declined list, each once, and log each. -> {"ok",
+    "error", "added"}: added holds the keys this call added."""
+    added = []
+    for k in keys:
+        if k not in state["declined"]:
+            state["declined"].append(k)
+            added.append(k)
+    save(state)
+    for k in keys:
+        log_event("decline", k)
+    return {"ok": True, "error": None, "added": added}
+
+
+def ack_push(state, k):
+    """The user has seen the PUSHED flag: stop flagging this head. A re-request
+    or a further push brings the PR back. -> {"ok", "error", "push_acked"}; error
+    names an untracked item or one without a PR yet."""
+    it = state["items"].get(k)
+    if it and it.get("pr"):
+        d = pr_detail(k.split("#")[0], it["pr"]) or {}
+        it["push_acked"] = d.get("headRefOid")
+        save(state)
+        return {"ok": True, "error": None, "push_acked": it["push_acked"]}
+    return {"ok": False, "error": f"unknown item {k}", "push_acked": None}
+
+
+def detach_item(state, k):
+    """Close the item's workspace or space, keep its worktree and branch, and
+    drop the item so it holds no slot (it is proposed again). -> {"ok", "error",
+    "msg"}: msg is the line to print on success; error is the refusal."""
+    it = state["items"].get(k)
+    if not it:
+        return {"ok": False, "error": f"unknown item {k}", "msg": None}
+    sess = it.get("session")
+    backend = backend_for(sess)
+    killed = kill_parked(it, sess)
+    if killed:
+        pane, code, raw = killed
+        if code != 0:
+            return {"ok": False, "msg": None,
+                    "error": f"parked terminal {pane} kill failed: {raw}"}
+        closed = f"parked terminal {pane} ended"
+    elif backend:
+        code, raw = backend.close(sess)
+        if code != 0:
+            return {"ok": False,
+                    "error": f"{host_noun(backend, sess)} close failed: {raw}",
+                    "msg": None}
+        closed = f"{short_noun(sess)} closed"
+    state["items"].pop(k)
+    save(state)
+    log_event("detach", k, branch=it.get("branch"))
+    worktree = f", worktree kept at {it['worktree']}" if it.get("worktree") \
+        else ", worktree kept"
+    return {"ok": True, "error": None,
+            "msg": (f"detached {k} session={sid(sess)} branch={it.get('branch')} "
+                    f"-> {closed}{worktree}, untracked")}
+
+
+def set_paused(state, paused):
+    """Pause or resume the engine's work. -> {"ok", "error", "paused"}."""
+    state["paused"] = paused
+    save(state)
+    log_event("pause" if paused else "resume")
+    return {"ok": True, "error": None, "paused": paused}
 
 
 ORDER = ["MERGED", "RESTACK", "REVIEW", "FEEDBACK", "BOOTING", "WORKING",
@@ -2137,8 +2793,9 @@ def render(rows, active, nrepos, state, untracked=0):
     wd = wind_down()
     if wd:
         extra += f"   WIND_DOWN {wd} (from {WIND_DOWN_AT})"
-    if state.get("inbox"):
-        extra += f"   INBOX {len(state['inbox'])} (run inbox)"
+    box = state.get("inbox") or []
+    if box:
+        extra += f"   INBOX {len(box)} (run inbox)"
     print(f"PAUSED {'yes' if state.get('paused') else 'no'}   "
           f"REPOS {nrepos}   ACTIVE {active}/{MAX_ACTIVE}{extra}")
     rows.sort(key=row_order)
@@ -2176,17 +2833,23 @@ def parse_extra(extra):
 def snapshot(state):
     """Run a scan on a throwaway copy of the state and publish it as JSON.
 
-    Nothing is saved: the orchestrator's scan owns every state transition
-    (feedback watermarks, re-keys, untracking), and a dashboard refreshing
-    every two minutes must never consume one of them before it does.
+    Nothing is saved: this runs where `tick` may not (see engine_allowed), and
+    a worktree must not consume the live state's transitions.
     """
     work = copy.deepcopy(state)
     info = {}
     rows, active, nrepos, untracked = scan(work, info=info)
-    rows.sort(key=row_order)
+    snap = snapshot_doc(state, work, rows, active, nrepos, untracked, info)
+    write_snapshot(snap)
+    return snap
+
+
+def snapshot_doc(state, work, rows, active, nrepos, untracked, info):
+    """The dashboard's JSON view of one scan: its rows with their item and
+    GitHub details, and the header numbers. `work` is the scanned state."""
     items = work.get("items", {})
     out = []
-    for kind, k, extra in rows:
+    for kind, k, extra in sorted(rows, key=row_order):
         r = {"kind": kind, "key": k, "extra": extra}
         r.update(parse_extra(extra))
         it = items.get(k)
@@ -2202,29 +2865,22 @@ def snapshot(state):
         elif m:
             r.update({f: v for f, v in m.items() if v is not None})
         out.append(r)
-    snap = {"generated_at": int(time.time()),
+    return {"generated_at": int(time.time()),
             "paused": bool(state.get("paused")),
             "repos": nrepos, "active": active, "max_active": MAX_ACTIVE,
             "untracked": untracked, "max_rounds": MAX_REVIEW_ROUNDS,
             "stall_min": AGENT_STALL_MIN,
             "last_tick": state.get("last_tick"),
-            "orch": orchestrator_target(state),
             "rows": out}
+
+
+def write_snapshot(snap):
+    """Replace SNAPSHOT_FILE atomically: the dashboard reads it at any time."""
     os.makedirs(os.path.dirname(SNAPSHOT_FILE), exist_ok=True)
     tmp = f"{SNAPSHOT_FILE}.tmp.{os.getpid()}"
     with open(tmp, "w") as fh:
         json.dump(snap, fh, indent=2, sort_keys=True)
     os.replace(tmp, SNAPSHOT_FILE)
-    return snap
-
-
-def orchestrator_target(state):
-    """Where agent reports and dashboard commands are sent."""
-    if OCTOPILOT_ORCH or state.get("orch"):
-        return OCTOPILOT_ORCH or state["orch"]
-    if OCTOPILOT_BACKEND == "hc":
-        return HC.find(ORCH_AGENT) or f"hc:{ORCH_AGENT}"
-    return f"herdr:{ORCH_AGENT}"
 
 
 def item_or_exit(state, k):
@@ -2268,7 +2924,8 @@ def reboot(state, k):
     backend = backend_for(it.get("session"))
     target = backend.target(it) if backend else None
     if not target:
-        print(f"{k}: no live agent in workspace {it.get('session')}",
+        where = host_noun(backend, it.get("session")) if backend else "workspace"
+        print(f"{k}: no live agent in {where} {it.get('session')}",
               file=sys.stderr)
         return 1
     ok, err = send_to(f"{backend.prefix}{target}", "/clear")
@@ -2277,9 +2934,11 @@ def reboot(state, k):
         return 4 if err == "agent_blocked" else 1
     code, raw = backend.wait_idle(target)
     it["phase"] = "booting"
+    if it.get("pending_rerequest"):
+        it["rerequest_head"] = it.pop("pending_rerequest")
     save(state)
     log_event("reboot", k)
-    # Still booting either way; a non-zero exit tells the orchestrator not to
+    # Still booting either way; a non-zero exit tells the engine not to
     # send the prompt in this same tick to an agent that is not idle yet.
     if code != 0:
         print(f"{k} cleared but not idle yet -> booting: {raw}",
@@ -2327,12 +2986,10 @@ REPORT_STATES = ("ready", "capped", "blocked", "failed", "stalled")
 def report(state, args):
     """report <key> <state> <sha> <message...> [--to <session>]
 
-    Records the agent's final report on its item and queues it in the
-    orchestrator's inbox as the `OCTOPILOT <key> <state> <sha> <message>`
-    line it already parses. The dashboard shows it from the item.
+    Records the agent's final report on its item and logs it as a `report`
+    event: the dashboard, the kitchen and the Needs-you list show it from there.
 
-    `--to` is accepted and ignored: agents spawned before the inbox still
-    pass it.
+    `--to` is accepted and ignored: agents spawned earlier still pass it.
     """
     if "--to" in args:
         i = args.index("--to")
@@ -2351,8 +3008,8 @@ def report(state, args):
     it = state["items"].get(k)
     if it is None:
         # Detached or cleaned up while its agent was still mid-turn: nobody
-        # is waiting for this, and the orchestrator must not act on it. Keep
-        # a neutral trace in the log (no doorbell) and tell the agent to stop.
+        # is waiting for this, so nothing acts on it. Keep a neutral trace in
+        # the log and tell the agent to stop.
         log_event("orphan-report", k, state=st, sha=sha[:7], msg=msg[:300])
         print(f"{k} is no longer tracked by octopilot (detached or cleaned "
               "up): report not delivered. Stop here; there is nothing left "
@@ -2361,12 +3018,8 @@ def report(state, args):
     it["last_report"] = {"state": st, "sha": sha, "msg": msg[:300], "at": now}
     it["last_seen"] = now
     save(state)
-    # Into the orchestrator's inbox, never typed into its pane: a typed
-    # prompt lands on whatever the user is half-way through writing there
-    # and sends it. The log line below is what its Monitor wakes on.
-    to_inbox(state, f"OCTOPILOT {args[1]} {st} {sha} {msg}".rstrip())
     log_event("report", k, state=st, sha=sha[:7], msg=msg[:300])
-    print(f"reported {k} {st} -> inbox")
+    print(f"reported {k} {st}")
     return 0
 
 
@@ -2400,7 +3053,7 @@ def send_code(state, text=None):
 
 
 def to_inbox(state, text):
-    """Queue one message for the orchestrator. Caller holds the lock."""
+    """Queue one message for the engine's drain. Caller holds the lock."""
     box = state.setdefault("inbox", [])
     box.append({"at": int(time.time()), "text": text})
     del box[:-INBOX_MAX]
@@ -2408,11 +3061,10 @@ def to_inbox(state, text):
 
 
 def inbox(state):
-    """Print and clear the orchestrator's pending messages, oldest first.
-
-    Agent reports print as the `OCTOPILOT <key> <state> <sha> <message>` line
-    they always were; dashboard requests as `REQUEST <command>`. Continuation
-    lines are indented, so every message starts at column 0."""
+    """List the queued requests, oldest first, without clearing them: the
+    engine's drain takes them. Continuation lines are indented, so every
+    message starts at column 0."""
+    print("pending requests (the engine drains them; act on none)")
     box = state.get("inbox") or []
     if not box:
         print("(inbox empty)")
@@ -2422,8 +3074,6 @@ def inbox(state):
         print(f"{time.strftime('%H:%M', time.localtime(m['at']))} {first}")
         for line in rest:
             print(f"    {line}")
-    state["inbox"] = []
-    save(state)
     return 0
 
 
@@ -2462,16 +3112,18 @@ def terminal_info(address):
     return info if code == 0 and isinstance(info, dict) else None
 
 
-def orchestrator_terminal(state):
-    """-> (address, info) of the orchestrator's terminal, the one labelled
-    octopilot.agent=octopilot else the one the last scan recorded; (None, None)
-    when there is none (the TUI backend, or nothing running)."""
-    address = agent_address(ORCH_AGENT)
-    recorded = state.get("orch") or ""
-    if address is None and recorded.startswith(HC.prefix):
-        address = recorded[len(HC.prefix):]
-    info = terminal_info(address) if address else None
-    return (address, info) if info else (None, None)
+def view_doc():
+    """The headless dashboard's view.json, or None when it is missing, unreadable
+    or older than VIEW_STALE_SECS (no headless dashboard is writing it)."""
+    try:
+        with open(VIEW_FILE) as fh:
+            view = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    gen = view.get("generated_at") if isinstance(view, dict) else None
+    if not isinstance(gen, (int, float)) or time.time() - gen > VIEW_STALE_SECS:
+        return None
+    return view
 
 
 def proc_start(pid):
@@ -2511,7 +3163,7 @@ def transcript_path(info):
     in its foreground (claude's sessions/<pid>.json, which follows /clear), else
     the octopilot.session label's, else None. A live session whose transcript is
     not written yet gives None, never the stale label. No guess from the folder:
-    the orchestrator and the prompter share one."""
+    other claude sessions, the user's own included, may run in the prompter's folder."""
     session = live_session_id(info) or (info.get("labels") or {}).get("octopilot.session") or ""
     if not UUID_RE.match(session):
         return None
@@ -2645,22 +3297,24 @@ def blocked_of(info):
 
 
 def speech_cmd(state):
-    """The orchestrator's last message with text, and its state."""
+    """The engine's last lines (view.json's header.engine.last) and its state."""
     out = {"agent": None, "terminal": None, "status": "offline",
            "paused": bool(state.get("paused")), "text": "", "at": None, "seq": 0}
-    address, info = orchestrator_terminal(state)
-    if info is None:
+    view = view_doc()
+    engine = ((view or {}).get("header") or {}).get("engine") or {}
+    if view is None or engine.get("mode") == "off":
         return out
-    out.update(agent=HC.prefix + address, terminal=address, status=status_of(info))
-    path = transcript_path(info)
-    last = None
-    for m in (chat_messages(tail_entries(path)) if path else []):
-        if m["role"] == "assistant" and m["text"]:
-            last = m
+    address = agent_address(HEADLESS_AGENT)
+    # A hung engine is one the user must look at: the kitchen shows it as blocked.
+    status = {"acting": "working", "stale": "blocked"}.get(engine.get("state"), "idle")
+    out.update(terminal=address, agent=HC.prefix + address if address else None,
+               status=status)
+    last = engine.get("last")
     if last:
-        # seq moves with the text, so a re-read of the same message is a no-op.
-        out.update(text=last["text"], at=last["at"],
-                   seq=zlib.crc32(f"{last['id']}\n{last['text']}".encode()))
+        text = "\n".join("- " + line for line in last.get("lines") or [])
+        at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(last["at"]))
+        # seq moves with the text, so a re-read of the same lines is a no-op.
+        out.update(text=text, at=at, seq=zlib.crc32(f"{at}\n{text}".encode()))
     return out
 
 
@@ -2761,8 +3415,10 @@ def chat_keys(args):
     return result_code
 
 
+SELF_LOCKING = {"tick", "drain"}
 READ_ONLY = {"render", "status", "siblings", "snapshot", "wind-down", "plugin-settings",
-             "installed-dir", "speech", "chat", "chat-send", "chat-keys"}
+             "inbox", "installed-dir", "speech", "chat", "chat-send", "chat-keys",
+             "host-space"}
 
 
 def claude_plugin_dirs():
@@ -2818,11 +3474,146 @@ def plugin_settings():
     return json.dumps({"env": {"CLAUDE_CODE_PLUGIN_DIRS": ":".join(dirs)}})
 
 
+def engine_allowed(checkout):
+    """Whether the checkout at `checkout` may run `tick`, which saves state: the
+    live one, or any with a scratch state dir (OCTOPILOT_STATE_DIR). A worktree
+    must not consume the live state's transitions."""
+    if os.environ.get("OCTOPILOT_STATE_DIR"):
+        return True
+    return os.path.realpath(checkout) == os.path.realpath(installed_dir())
+
+
+def engine_mode(args=(), checkout=None):
+    """off, plan or on: OCTOPILOT_ENGINE picks it, and `tick --plan` forces plan.
+    Off wherever engine_allowed() refuses the checkout (this one unless
+    `checkout` names the caller's): a worktree's events would land in the live
+    log."""
+    mode = "plan" if "--plan" in args else os.environ.get("OCTOPILOT_ENGINE", "on")
+    if mode not in ("plan", "on") or not engine_allowed(checkout or OCTOPILOT_DIR):
+        return "off"
+    return mode
+
+
+@contextmanager
+def exec_lock():
+    """Yields True while holding exec.lock, False at once when another run holds
+    it. Waiting would spend the dashboard's timeout on someone else's actions."""
+    os.makedirs(os.path.dirname(EXEC_LOCK), exist_ok=True)
+    with open(EXEC_LOCK, "w") as ex:
+        try:
+            fcntl.flock(ex.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            yield False
+            return
+        yield True
+
+
+def tick(args):
+    """tick [--quiet] [--plan] [--refresh] [--legacy]: one scan that saves the
+    transitions it finds, writes the dashboard's snapshot from the same rows,
+    then runs the engine. `scan` and `refresh` are this command with --legacy:
+    an orchestrator still running them is told to stop, and gets no engine rows."""
+    mode = engine_mode(args)
+    os.makedirs(os.path.dirname(TICK_LOCK), exist_ok=True)
+    with open(TICK_LOCK, "w") as lk:
+        try:
+            fcntl.flock(lk.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            print("tick already running")
+            return 0
+        with locked():
+            state = load()
+            info = {}
+            rows, active, n, untracked = scan(state, refresh="--refresh" in args,
+                                              info=info)
+            for k, reason in info["revived"]:
+                log_event("unpark", k, reason=reason)
+            for k, session in info["rehomed"]:
+                log_event("rehome", k, session=session)
+            for kind, k, _ in rows:
+                if kind == "GONE":
+                    log_event("gone", k)
+            counts = {}
+            for kind, _, _ in rows:
+                counts[kind] = counts.get(kind, 0) + 1
+            # The event log is shown on every dashboard; log a tick only when
+            # the table changed, not once per two minutes.
+            changed = counts != state.get("tick_counts")
+            state["tick_counts"] = counts
+            state["last_tick"] = int(time.time())
+            state.pop("orch", None)
+            save(state)
+            write_snapshot(snapshot_doc(state, state, rows, active, n,
+                                        untracked, info))
+            if changed:
+                log_event("tick", active=active, counts=counts)
+            # `shown` is only what is printed: the engine below gets every row.
+            shown = rows
+            if "--legacy" in args and mode == "on":
+                # The engine acts on these kinds itself: the table leaves them out.
+                import engine
+                print("octopilot has no orchestrator any more: stop ticking, "
+                      "the engine acts on every row")
+                shown = [r for r in rows if r[0] not in engine.PLANNED]
+            if "--quiet" not in args:
+                render(shown, active, n, state, untracked)
+        if mode == "off" and "--plan" in args and "--quiet" not in args:
+            print(f"engine off here: {OCTOPILOT_DIR} is not the live checkout "
+                  "and OCTOPILOT_STATE_DIR is unset")
+        # A legacy tick never acts: the dashboard runs the engine, and a
+        # leftover orchestrator's Bash call would time out mid-action.
+        if mode != "off" and "--legacy" not in args:
+            import engine
+            with exec_lock() as held:
+                # The budget counts from here: the scan is not the engine's to pay for.
+                if held:
+                    lines = engine.run_rows(rows, mode, time.monotonic())
+                elif "--quiet" not in args:
+                    lines = ["engine busy: another run acts, the next tick does"]
+                else:
+                    lines = []
+            if lines:
+                print("\n".join(lines))
+    return 0
+
+
+def drain(args):
+    """drain [--quiet] [--plan]: handle the inbox's requests in order, then the
+    queued sends. The dashboard runs it quiet when a request lands; --quiet
+    hides only the off and busy notices, never the outcome lines."""
+    mode = engine_mode(args)
+    if mode == "off":
+        if "--quiet" not in args:
+            print("engine off here: nothing drained")
+        return 0
+    import engine
+    with exec_lock() as held:
+        if not held:
+            # The dashboard's next wake (a minute at most) drains again.
+            if "--quiet" not in args:
+                print("engine busy: another run acts, the drain retries later")
+            return 0
+        lines = engine.drain(mode, time.monotonic())
+    if lines:
+        print("\n".join(lines))
+    return 0
+
+
 def main():
     args = sys.argv[1:]
     cmd = args[0] if args else "scan"
+    # scan and refresh are tick: mapped before the lock checks below, or tick
+    # would take the state lock twice in one process and deadlock.
+    if cmd in ("scan", "refresh"):
+        args = ["tick", *args[1:], "--legacy"]
+        args += ["--refresh"] if cmd == "refresh" else []
+        cmd = "tick"
     if cmd in READ_ONLY:
         return dispatch(cmd, args, load())
+    # These take the state lock themselves, step by step, rather than for the
+    # whole command.
+    if cmd in SELF_LOCKING:
+        return dispatch(cmd, args, None)
     # scan mutates (registry memo, feedback_seen stamps) and every other
     # command is a read-modify-write, so both run under the lock.
     with locked():
@@ -2830,30 +3621,10 @@ def main():
 
 
 def dispatch(cmd, args, state):
-    if cmd in ("scan", "refresh"):
-        info = {}
-        rows, active, n, untracked = scan(state, refresh=(cmd == "refresh"),
-                                          info=info)
-        for k, reason in info["revived"]:
-            log_event("unpark", k, reason=reason)
-        state["last_tick"] = int(time.time())
-        # The orchestrator is whoever runs the tick; remembering it here lets
-        # `report` and the dashboard reach it without being told.
-        orch = current_orch()
-        if orch:
-            state["orch"] = orch
-        save(state)
-        render(rows, active, n, state, untracked)
-        if state.get("code_pending"):
-            sent, err = send_code(state)
-            left = len(state.get("code_pending") or [])
-            print(f"CODE     {sent} queued request(s) delivered to {CODE_AGENT}"
-                  + (f", {left} still pending ({err})" if left else ""))
-        counts = {}
-        for kind, _, _ in rows:
-            counts[kind] = counts.get(kind, 0) + 1
-        log_event("tick", active=active, counts=counts)
-        return 0
+    if cmd == "tick":
+        return tick(args)
+    if cmd == "drain":
+        return drain(args)
     if cmd == "snapshot":
         snap = snapshot(state)
         if "--quiet" not in args:
@@ -2864,15 +3635,15 @@ def dispatch(cmd, args, state):
     if cmd == "inbox":
         return inbox(state)
     if cmd == "request":
-        # A command from the dashboard (go/no/re-review/investigate...),
-        # queued for the orchestrator the same way agent reports are.
+        # A command from the dashboard or the prompter (go/no/re-review/
+        # investigate...), queued for the engine's drain.
         text = " ".join(args[1:]).strip()
         if not text:
             print("usage: request <command...>", file=sys.stderr)
             return 1
         to_inbox(state, f"REQUEST {text}")
         log_event("request", text=text[:200])
-        print(f"queued for the orchestrator: {text}")
+        print(f"queued: {text}")
         return 0
     if cmd == "send":
         # send <key> <text...>: prompt the item's agent, wherever it runs.
@@ -2888,10 +3659,19 @@ def dispatch(cmd, args, state):
         if err:
             # Kept, not dropped: the tab may just be closed for now.
             print(f"{CODE_AGENT}: {err} -- kept, {len(state['code_pending'])} "
-                  "pending; every tick retries them. Do not resend.")
+                  "pending; the engine retries them on its next run. Do not resend.")
             return 0
         print(f"sent to {CODE_AGENT}" + (f" ({sent} with earlier queued)"
                                          if sent > 1 else ""))
+        return 0
+    if cmd == "host-space":
+        # host-space: the Octopilot space (GUI) or workspace (TUI) that worker tabs open in.
+        # With WORKER_HOST=space nothing: workers open as spaces, the old layout.
+        host = None
+        if worker_host() == "tab":
+            host = octopilot_space() if spawn_backend() is HC else octopilot_workspace()
+        if host:
+            print(host)
         return 0
     if cmd == "speech":
         print(json.dumps(speech_cmd(state)))
@@ -2917,21 +3697,7 @@ def dispatch(cmd, args, state):
     if cmd == "render":
         # render <template> KEY=VAL ...
         subs = dict(kv.split("=", 1) for kv in args[2:] if "=" in kv)
-        if "KEY" not in subs and subs.get("REPO") and subs.get("PR"):
-            # BOOTING rows send no KEY: a layer's PR resolves to its stack.
-            found = item_key_for(state, subs["REPO"], subs["PR"])
-            if found:
-                subs["KEY"] = found
-        it_ = state.get("items", {}).get(subs.get("KEY", ""), {})
-        if it_.get("question"):
-            subs.setdefault("QUESTION", it_["question"])
-            subs.setdefault("BRANCH", it_.get("branch", ""))
-        if it_.get("stack"):
-            subs.setdefault("STACK", stack_text(it_["stack"]))
-        # A read-only item never gets a prompt that tells it to commit and
-        # open a PR, whatever template the caller asked for.
-        tmpl = "investigate-readonly" if it_.get("read_only") else args[1]
-        print(render_prompt(tmpl, subs))
+        print(render_for(state, args[1], subs))
         return 0
     if cmd == "spawn":
         # spawn <key> <branch> <title> [--new] [--stack "PR:branch ..."]
@@ -2958,18 +3724,10 @@ def dispatch(cmd, args, state):
         print(json.dumps(state, indent=2, sort_keys=True))
         return 0
     if cmd in ("pause", "resume"):
-        state["paused"] = cmd == "pause"
-        save(state)
-        log_event(cmd)
-        print(f"paused={state['paused']}")
+        print(f"paused={set_paused(state, cmd == 'pause')['paused']}")
         return 0
     if cmd == "decline":
-        for k in args[1:]:
-            if k not in state["declined"]:
-                state["declined"].append(k)
-        save(state)
-        for k in args[1:]:
-            log_event("decline", k)
+        decline(state, args[1:])
         print("declined:", " ".join(args[1:]))
         return 0
     if cmd == "undecline":
@@ -2994,12 +3752,14 @@ def dispatch(cmd, args, state):
         pr = int(args[5]) if len(args) > 5 else None
         backend = backend_for(session)
         if backend is None:
-            print(f"{session} is not a herdr workspace id (like w12) or a "
-                  "herdr-app space id (like sp<hex>)", file=sys.stderr)
+            print(f"{session} is not a herdr workspace (w12), herdr tab (w12:t1), "
+                  "herdr-app space (sp<hex>) or herdr-app tab (tb<hex>) id",
+                  file=sys.stderr)
             return 1
-        _, answered, open_ws = all_sessions()
+        sessions, answered, open_ws = all_sessions()
         if listed(answered, session) and session not in open_ws:
-            print(f"{session} is not an open {backend.noun}", file=sys.stderr)
+            print(f"{session} is not an open {host_noun(backend, session)}",
+                  file=sys.stderr)
             return 1
         reviewed = None
         if pr and mode == "comment":
@@ -3012,6 +3772,10 @@ def dispatch(cmd, args, state):
         # Name its agent so it can be addressed.
         it = state["items"][k]
         it["backend"] = backend.name
+        space = next((s.get("space") for s in sessions if s["id"] == session), None) \
+            if is_tab(session) else None
+        if space:
+            it["space"] = space
         occupant = backend.live().get(session) or {}
         if occupant.get("agent"):
             it["agent"] = occupant["agent"]
@@ -3026,16 +3790,12 @@ def dispatch(cmd, args, state):
     if cmd == "ack-push":
         # ack-push <key>: the user has seen the PUSHED flag; stop flagging this
         # head. A re-request or a further push brings the PR back.
-        k = args[1]
-        it = state["items"].get(k)
-        if it and it.get("pr"):
-            d = pr_detail(k.split("#")[0], it["pr"]) or {}
-            it["push_acked"] = d.get("headRefOid")
-            save(state)
-            print(f"{k} push_acked={str(it['push_acked'])[:7]}")
-            return 0
-        print(f"unknown item {k}", file=sys.stderr)
-        return 1
+        r = ack_push(state, args[1])
+        if not r["ok"]:
+            print(r["error"], file=sys.stderr)
+            return 1
+        print(f"{args[1]} push_acked={str(r['push_acked'])[:7]}")
+        return 0
     if cmd == "park":
         # park <key>: the dashboard's `d` moves a card to Done. Unlike detach
         # the workspace stays open and the item stays tracked; it just holds
@@ -3061,7 +3821,7 @@ def dispatch(cmd, args, state):
         save(state)
         log_event("park", k)
         print(f"parked {k} session={sid(it.get('session'))} "
-              "-> workspace kept, holds no slot")
+              f"-> {short_noun(it.get('session'))} kept, holds no slot")
         return 0
     if cmd == "unpark":
         k = args[1]
@@ -3078,25 +3838,11 @@ def dispatch(cmd, args, state):
         # detach <key>: close its workspace or space, keep the worktree and
         # branch, and drop the item so it holds no slot (it is proposed again).
         # Reverse by hand: reopen the worktree, start claude in it, then `track`.
-        k = args[1]
-        it = state["items"].get(k)
-        if not it:
-            print(f"unknown item {k}", file=sys.stderr)
+        r = detach_item(state, args[1])
+        if not r["ok"]:
+            print(r["error"], file=sys.stderr)
             return 1
-        sess = it.get("session")
-        backend = backend_for(sess)
-        if backend:
-            code, raw = backend.close(sess)
-            if code != 0:
-                print(f"{backend.noun} close failed: {raw}", file=sys.stderr)
-                return 1
-        state["items"].pop(k)
-        save(state)
-        log_event("detach", k, branch=it.get("branch"))
-        print(f"detached {k} session={sid(sess)} branch={it.get('branch')} "
-              "-> workspace closed"
-              f", worktree kept{' at ' + it['worktree'] if it.get('worktree') else ''}"
-              ", untracked")
+        print(r["msg"])
         return 0
     if cmd == "untrack":
         for k in args[1:]:
@@ -3120,37 +3866,24 @@ def dispatch(cmd, args, state):
         # mark-feedback <key> <since> [<layer PR>]: a stack needs the layer's
         # PR, so one layer's mark never hides another layer's feedback.
         k, when = args[1], args[2]
-        if k in state["items"]:
-            it = state["items"][k]
-            pr = None
-            if it.get("stack"):
-                pr = int(args[3]) if len(args) > 3 and args[3].isdigit() else None
-                if pr not in [layer["pr"] for layer in it["stack"]]:
-                    print(f"{k} is a stack: name one of its layers "
-                          f"({' '.join(str(layer['pr']) for layer in it['stack'])})",
-                          file=sys.stderr)
-                    return 1
-                it.setdefault("layer_seen", {})[str(pr)] = when
-            else:
-                it["feedback_seen"] = when
-            it["review_rounds"] = 0
-            it.pop("capped_at", None)
-            save(state)
-            log_event("feedback", k, since=when, pr=pr)
-            layer = f" layer=#{pr}" if pr else ""
-            print(f"{k}{layer} feedback_seen={when} rounds=0")
+        pr = int(args[3]) if len(args) > 3 and args[3].isdigit() else None
+        r = mark_feedback(state, k, when, pr)
+        if not r["ok"]:
+            # An untracked key is a silent no-op.
+            if k in state["items"]:
+                print(r["error"], file=sys.stderr)
+                return 1
+            return 0
+        layer = f" layer=#{r['pr']}" if r["pr"] else ""
+        print(f"{k}{layer} feedback_seen={when} rounds=0")
         return 0
     if cmd == "mark-reviewed":
         k, sha = args[1], args[2]
-        if k in state["items"]:
-            it = state["items"][k]
-            it["reviewed_sha"] = sha
-            it["phase"] = "fixing"
-            it["review_rounds"] = int(it.get("review_rounds", 0)) + 1
-            save(state)
-            log_event("reviewed", k, sha=sha[:7], round=it["review_rounds"])
-            print(f"{k} reviewed={sha[:7]} "
-                  f"round={it['review_rounds']}/{MAX_REVIEW_ROUNDS}")
+        r = mark_reviewed(state, k, sha)
+        if not r["ok"]:
+            # An untracked key is a silent no-op.
+            return 0
+        print(f"{k} reviewed={sha[:7]} round={r['round']}/{MAX_REVIEW_ROUNDS}")
         return 0
     if cmd == "review-base":
         # The base sha a review merged the PR into, so a later base move
@@ -3219,7 +3952,7 @@ def dispatch(cmd, args, state):
         return 0
 
     print(f"unknown command: {cmd}", file=sys.stderr)
-    print("usage: scan.sh [scan|refresh|status|pause|resume|decline|undecline|"
+    print("usage: scan.sh [tick|drain|status|pause|resume|decline|undecline|"
           "track|untrack|detach|park|unpark|set-phase|mark-reviewed|claim-round|heartbeat|"
           "reset-rounds|review-base|"
           "mark-merged|restack|"

@@ -2,6 +2,8 @@
 // Pick next tree show it. No Herdr calls here, so the keys and cards read the
 // same numbers the TUI does.
 
+import { addressOn } from "./machine.js";
+
 export const REPO_PREFIX = "repo:";
 // A second press of the same action within this window confirms it (CONFIRM_SECS).
 export const CONFIRM_MS = 4000;
@@ -44,6 +46,18 @@ export function ago(secs) {
 export const elapsed = (view, now) => Math.max(0, now / 1000 - (view.generated_at ?? 0));
 export const liveAge = (secs, view, now) => (secs == null ? null : secs + elapsed(view, now));
 export const isStale = (view, now) => elapsed(view, now) > STALE_S;
+
+// The header's engine label (CONTRACT.md header.engine), or null for a view with no
+// engine block (one written before the header had it, still on disk during a switch).
+export function engineLabel(engine, view, now) {
+  if (!engine) return null;
+  const since = liveAge(engine.since_s, view, now);
+  if (engine.state === "stale") return { text: `engine running ${ago(since)}+ (hung?)`, tone: "blocked" };
+  if (engine.mode === "off") return { text: "engine off here", tone: "dim" };
+  if (engine.state === "acting") return { text: `⏭ acting ${ago(since)}`, tone: "working" };
+  if (engine.mode === "plan") return { text: "engine plan (logs only)", tone: "dim" };
+  return { text: "engine on", tone: "dim" };
+}
 
 // Board columns with the rows they show (Done hides closed rows unless asked),
 // and the Pick next tree as the lines it draws, plus every key the cursor can
@@ -174,8 +188,33 @@ export function parseAnswer(stdout) {
   const line = text.split("\n").filter(Boolean).pop() ?? "";
   try {
     const j = JSON.parse(line);
-    return { ok: Boolean(j.ok), kitchen: Boolean(j.kitchen), message: String(j.message ?? "") };
+    const answer = { ok: Boolean(j.ok), kitchen: Boolean(j.kitchen), message: String(j.message ?? "") };
+    if (Array.isArray(j.holds)) answer.holds = j.holds.map(String);
+    return answer;
   } catch {
     return { ok: false, kitchen: false, message: text || "no answer from octopilot" };
   }
+}
+
+// The --action args of a held start's second press. holds are the names the
+// alert showed; without them (an older dashboard) only confirmed=1 is sent.
+export function confirmArgs(args, holds) {
+  return { ...(args ?? {}), confirmed: 1, ...(holds ? { holds: holds.join(",") } : {}) };
+}
+
+// A herdr-app tab id: `tb…`, or `w…:t…` in the TUI's form. Anything else is a space or workspace.
+export const isTabId = (id) => /^tb/.test(id ?? "") || /^w[^:]+:t/.test(id ?? "");
+
+// The herdr-app commands a remote row's focus or shell runs on machine `on` (see CONTRACT.md, Remote
+// spaces). The space is entry.space, else the session when it is a space (an old-style session in
+// its own space). A tab session is selected in its space, then as a tab. [] when no space is known.
+export function remoteSteps(id, entry, on) {
+  const session = entry.session ?? null;
+  const space = entry.space ?? (isTabId(session) ? null : session);
+  if (!space) return [];
+  if (id === "shell") return [{ cmd: "tab.new", args: { space: `${on}/${space}`, folder: entry.path } }];
+  const steps = [{ cmd: "space.select", args: { id: `${on}/${space}` } }];
+  if (isTabId(session)) steps.push({ cmd: "tab.select", args: { id: `${on}/${session}` } });
+  if (entry.pane) steps.push({ cmd: "agent.focus", args: { terminal: addressOn(on, entry.pane) } });
+  return steps;
 }

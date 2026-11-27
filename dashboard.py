@@ -9,13 +9,14 @@ A read-only view over three sources, each refreshed at its own pace:
 
 - agent state from herdr (`herdr agent list`), every few seconds;
 - octopilot's own state.json and events.jsonl, the moment they change;
-- GitHub, through `scan.py snapshot` (a scan that saves nothing), every
-  DASHBOARD_REFRESH_SECS and right after any event that changes the table.
+- GitHub, through `scan.py tick` (the scan that saves its transitions) when
+  this checkout may run it, else `scan.py snapshot` (a scan that saves
+  nothing), every DASHBOARD_REFRESH_SECS and right after any event that
+  changes the table.
 
-It never acts on the table: the orchestrator does. The things it sends are the
-ones you ask for (go/no to the orchestrator, pause/resume), and a `request
-tick` doorbell when the table has Next tick work the orchestrator has not
-been woken for.
+It never acts on the table: the engine does. The things it sends are the ones
+you ask for: requests queued for the engine (go/no, re-review, investigate) and
+pause/resume.
 Run it through dashboard.sh so config.sh is loaded.
 """
 import argparse
@@ -46,6 +47,7 @@ DIR = os.path.dirname(os.path.abspath(__file__))
 # how to reach it.
 sys.path.insert(0, DIR)
 import scan  # noqa: E402
+import engine  # noqa: E402
 STATE_FILE = os.environ.get(
     "STATE_FILE", os.path.expanduser("~/.local/state/octopilot/state.json"))
 STATE_DIR = os.path.dirname(STATE_FILE)
@@ -56,12 +58,6 @@ SNAPSHOT_LOCK = SNAPSHOT_FILE + ".lock"
 # dashboard so only one of them notifies.
 NOTIFIED_FILE = os.path.join(STATE_DIR, "notified.json")
 NOTIFIED_LOCK = NOTIFIED_FILE + ".lock"
-# The Next tick rows the orchestrator was already woken for, by row key, as
-# [kind, head, *WAKE_FIELDS]: one doorbell per change, shared by dashboards.
-# A re-request on the same head only shows through its reviewed/round fields.
-WAKE_FIELDS = ("since", "reviewed", "round")
-WOKEN_FILE = os.path.join(STATE_DIR, "woken.json")
-WOKEN_LOCK = WOKEN_FILE + ".lock"
 # GitHub notifications watermark, shared so whichever dashboard polls next
 # carries on from it; only the lock holder polls.
 NOTIFY_WATCH_FILE = os.path.join(STATE_DIR, "notifications.json")
@@ -86,11 +82,9 @@ META_TTL_MS = 10 * 60 * 1000   # sidebar tokens vanish if the dashboard dies
 META_EVERY = 180               # re-push unchanged tokens before they expire
 KICK_DEBOUNCE = 15     # min seconds between event-triggered GitHub refreshes
 CONFIRM_SECS = 4       # window for the second press of g / n / P
-KITCHEN_SECS = 15      # the kitchen-closed alert cancels itself after this
+KITCHEN_SECS = 15      # the held-start alert cancels itself after this
 KITCHEN_GRACE = 0.5    # a g this soon after the alert opened is a typed-ahead
                        # ggg, not a confirmation of something seen
-# Appended to a request the user already confirmed past WIND_DOWN_AT.
-CONFIRMED = "(confirmed past wind-down)"
 
 # The headless dashboard writes its view here; a `refresh` action touches
 # KICK_FILE to ask it for a forced GitHub refresh.
@@ -98,11 +92,12 @@ VIEW_FILE = os.path.join(STATE_DIR, "view.json")
 VIEW_EVERY = 5         # rewrite at least this often, even when unchanged
 KICK_FILE = os.path.join(STATE_DIR, "kick")
 # A refresh is refused when view.json is older than this: no daemon is running.
-VIEW_STALE_SECS = 3 * VIEW_EVERY
+VIEW_STALE_SECS = scan.VIEW_STALE_SECS
 # How long the chef rests after the last event before dozing (register.tsx).
 DOZE_SECS = 10 * 60
 # Clock-relative fields move every second: left out of the change check.
-VIEW_VOLATILE = ("generated_at", "quiet_s", "age_s", "last_tick_s", "heat")
+VIEW_VOLATILE = ("generated_at", "quiet_s", "age_s", "last_tick_s", "heat",
+                 "since_s")
 INVESTIGATE_ARGS = ["repo", "question", "read_only"]
 # Row actions: id, the TUI key that runs it, and its footer label. The order
 # is the order the mods list them in.
@@ -126,6 +121,7 @@ KEY_ALIASES = {"\x7f": "\x1b[3~", "\x08": "\x1b[3~"}
 # Rows by who has the next move. Agent reports and blocked agents are moved
 # into NEEDS on top of these; see build().
 NEEDS_ROWS = {"CAPPED", "READY", "PUSHED", "STALLED", "CLOSED"}
+# Rows the engine acts on at its next tick, not the user (the note says what).
 ORCH_ROWS = {"MERGED": "cleanup + rebase fan-out",
              "RESTACK": "restack + rebase-stack",
              "REVIEW": "reboot for review",
@@ -133,14 +129,25 @@ ORCH_ROWS = {"MERGED": "cleanup + rebase fan-out",
 RUN_ROWS = {"WORKING"}
 DONE_ROWS = {"DONE", "GONE"}
 # Rows that keep a parked card out of Done, whatever the snapshot's age: each
-# needs the orchestrator or the user now.
+# needs the engine or the user now.
 PARK_EXEMPT = {"MERGED", "RESTACK", "CLOSED", "GONE", "FEEDBACK"}
 PICK_ROWS = {"PROPOSE"}
 NOTE_ROWS = {"UNCLONED", "STALE", "UNKNOWN"}
 REPORT_NEEDS = {"blocked", "failed", "stalled", "capped"}
 # Events after which the GitHub view is worth refreshing early.
-KICK_EVENTS = {"report", "spawn", "sent", "cleanup", "tick", "track", "detach",
-               "park", "unpark", "untrack", "decline", "merged"}
+KICK_EVENTS = {"report", "spawn", "sent", "cleanup", "track", "detach",
+               "park", "unpark", "untrack", "decline", "merged", "tick-asked"}
+# Events that wake the engine's drain: a request queued.
+DRAIN_EVENTS = {"request"}
+# The drain runs at once on those, and at least this often otherwise.
+DRAIN_EVERY = 60
+# Approximate, not a bound: engine.ACT_BUDGET_SECS (240) plus one go's worst case
+# (about 1380 of timeouts). Left out: the wait for the state lock behind a tick's
+# GitHub pass, and spawn_item's own gh calls (2 x 60). The margin is for those.
+DRAIN_TIMEOUT_SECS = 2400
+# A tick or drain running longer than this is reported as hung (the header's
+# red flag).
+TICK_STALE_SECS = 900
 
 AGENT_GLYPH = {"running": ("◐", "yellow"), "waiting": ("⏸", "bold red"),
                "idle": ("○", "dim"), "stopped": ("■", "dim"),
@@ -170,16 +177,6 @@ def read_json(path, default=None):
             return json.load(fh)
     except (OSError, json.JSONDecodeError):
         return default
-
-
-def snapshot_rows():
-    """The well-formed rows of snapshot.json, or none."""
-    snap = read_json(SNAPSHOT_FILE)
-    rows = snap.get("rows") if isinstance(snap, dict) else None
-    if not isinstance(rows, list):
-        return []
-    return [r for r in rows
-            if isinstance(r, dict) and isinstance(r.get("key"), str)]
 
 
 def ago(secs):
@@ -284,7 +281,7 @@ def repo_key(slug):
 
 class Hosts:
     """Where the agents live: herdr workspaces and herdr-app spaces, through
-    scan.py so the dashboard and the orchestrator agree on them."""
+    scan.py so the dashboard and the engine agree on them."""
 
     def live(self):
         return scan.all_live()
@@ -296,17 +293,13 @@ class Hosts:
         return scan.send_to(address, text)
 
     def focus(self, session, live):
-        """Bring the item's agent forward in its own backend, or its workspace
-        or space."""
+        """Bring the session forward in its own backend: its tab, space or
+        workspace, and the item's agent in it."""
+        backend = scan.backend_for(session)
+        if backend is None:
+            return False
         target = (live.get(session) or {}).get("pane")
-        if scan.backend_for(session) is scan.HC:
-            if target:
-                return scan.HC.focus(session, target, timeout=10)[0]
-            code, _, _ = scan.app_do("space.select", ["--id", session], timeout=10)
-            return code == 0
-        args = ["agent", "focus", target] if target else \
-            ["workspace", "focus", session]
-        return scan.herdr(args, timeout=10)[0] == 0
+        return backend.focus(session, target, timeout=10)[0]
 
     def publish(self, entries):
         """Octopilot's view of each herdr agent, as pane metadata tokens the
@@ -339,6 +332,14 @@ class Model:
         self.live = {}
         self.sessions = {}
         self.kick = threading.Event()
+        self.drain_kick = threading.Event()
+        # Set and read under self.lock together: a drain is acting from its start.
+        self.drain_running = False
+        self.drain_started = None
+        # The last lines a tick or drain printed, for the header and the kitchen.
+        self.engine_last = None
+        # Where the headless dashboard logs those lines; the TUI keeps stderr clean.
+        self.log_engine = None
         self.changed = threading.Event()
         # Set by a headless refresh: the GitHub loop then skips its debounce.
         self.urgent = threading.Event()
@@ -395,12 +396,14 @@ class Model:
                 self.events_size = size
             if not first and any(e.get("kind") in KICK_EVENTS for e in fresh):
                 self.kick.set()
+            if not first and any(e.get("kind") in DRAIN_EVENTS for e in fresh):
+                self.drain_kick.set()
             self.changed.set()
 
-    def refresh_snapshot(self, force=False):
-        """Run a read-only scan, unless another dashboard (the pane and a
-        peek overlay, say) is already running one or ran one recently: they
-        all read the same snapshot.json, so one refresh serves them all."""
+    def refresh_snapshot(self, force=False, verb="snapshot"):
+        """Refresh snapshot.json by running scan.py `verb`, unless another
+        dashboard (the pane and a peek overlay, say) is already running one or
+        ran one recently: they all read the same snapshot.json."""
         if not force:
             gen = (read_json(SNAPSHOT_FILE) or {}).get("generated_at") or 0
             if time.time() - gen < REFRESH_SECS - 5:
@@ -413,8 +416,10 @@ class Model:
                 return
             self.snap_running, self.snap_started = True, time.time()
             self.changed.set()
-            code, _, err = sh([sys.executable, os.path.join(DIR, "scan.py"),
-                               "snapshot", "--quiet"], timeout=600)
+            code, out, err = sh([sys.executable, os.path.join(DIR, "scan.py"),
+                                 verb, "--quiet"], timeout=1200)
+            if verb == "tick":
+                self.engine_output("tick", out)
             with self.lock:
                 self.snap_err = None if code == 0 else \
                     (err or "snapshot failed").splitlines()[-1][:120]
@@ -438,63 +443,52 @@ class Model:
                     break
 
     def github_pass(self, force):
-        """One snapshot and doorbell pass; an error must not end the loop."""
+        """One snapshot refresh; an error must not end the loop."""
         try:
-            self.refresh_snapshot(force)
-            self.wake_orchestrator()
+            self.refresh_snapshot(force, "tick" if scan.engine_allowed(DIR)
+                                  else "snapshot")
         except Exception:
             # Silent like notify_loop: the next pass retries.
             pass
 
-    def wake_orchestrator(self):
-        """Ring the orchestrator's doorbell with one `request tick` for Next
-        tick rows it was not woken for. Nothing rings while paused."""
-        state = read_json(STATE_FILE)
-        if isinstance(state, dict) and state.get("paused"):
+    def engine_output(self, verb, out):
+        """Keep the lines a tick or drain printed for the header, and log each one
+        when headless. Both callers run --quiet, so a busy note is only a guard."""
+        lines = [l for l in out.splitlines()
+                 if l.strip() and not l.startswith("engine busy")]
+        if not lines:
             return
-        rows = snapshot_rows()
-        present = {r["key"] for r in rows}
-        os.makedirs(STATE_DIR, exist_ok=True)
-        with open(WOKEN_LOCK, "w") as lk:
-            fcntl.flock(lk.fileno(), fcntl.LOCK_EX)
-            first = not os.path.exists(WOKEN_FILE)
-            woken = read_json(WOKEN_FILE)
-            if not isinstance(woken, dict):
-                woken = {}
-            rung = []
-            for r in rows:
-                if r.get("kind") not in ORCH_ROWS:
-                    continue
-                old = woken.get(r["key"])
-                if not (isinstance(old, list)
-                        and len(old) == 2 + len(WAKE_FIELDS)):
-                    old = [None, ""] + [None] * len(WAKE_FIELDS)
-                fields = r.get("fields")
-                if not isinstance(fields, dict):
-                    fields = {}
-                # An empty head is unknown (a failed details fetch): keep the
-                # one already rung for, so a flip to "" does not ring again.
-                cur = [r.get("kind"), r.get("head") or old[1]]
-                cur += [fields.get(f) for f in WAKE_FIELDS]
-                if cur != old:
-                    rung.append((r["key"], cur))
-            # A failed request is not recorded, so the next refresh retries it.
-            if rung and sh([sys.executable, os.path.join(DIR, "scan.py"),
-                            "request", "tick"])[0] != 0:
-                rung = []
-            # Entries stay while their key is in the snapshot at all, so a row
-            # bouncing through UNKNOWN or STALE does not ring again on return.
-            out = {k: woken[k] for k in woken if k in present}
-            out.update(rung)
-            if out != woken or first:
-                tmp = f"{WOKEN_FILE}.tmp.{os.getpid()}"
-                with open(tmp, "w") as fh:
-                    json.dump(out, fh)
-                os.replace(tmp, WOKEN_FILE)
+        self.engine_last = {"at": time.time(), "verb": verb, "lines": lines[-12:]}
+        if self.log_engine:
+            for line in lines:
+                self.log_engine(line)
+
+    def engine_loop(self):
+        """Drain the engine's inbox (scan.py drain): once at start, then on each
+        request in the events log, and at least every DRAIN_EVERY seconds. Only
+        where the engine is on."""
+        while True:
+            # Cleared before the drain, so a request that lands during it wakes the next.
+            self.drain_kick.clear()
+            try:
+                if scan.engine_mode(checkout=DIR) == "on":
+                    with self.lock:
+                        self.drain_started, self.drain_running = time.time(), True
+                    try:
+                        _, out, _ = sh([sys.executable, os.path.join(DIR, "scan.py"),
+                                        "drain", "--quiet"], timeout=DRAIN_TIMEOUT_SECS)
+                        self.engine_output("drain", out)
+                    finally:
+                        with self.lock:
+                            self.drain_running = False
+            except Exception:
+                # Silent like the other loops: the next wake retries.
+                pass
+            self.drain_kick.wait(timeout=DRAIN_EVERY)
 
     def notify_loop(self):
         """Kick the GitHub loop when the user's notifications bring something
-        new, so a review request or a comment reaches the orchestrator within
+        new, so a review request or a comment reaches the engine within
         about a minute, not at the next scheduled refresh."""
         while True:
             try:
@@ -570,7 +564,7 @@ class Model:
 
     def start(self):
         for fn in (self.github_loop, self.agents_loop, self.publish_loop,
-                   self.notify_loop):
+                   self.notify_loop, self.engine_loop):
             threading.Thread(target=fn, daemon=True).start()
 
     # -- view
@@ -620,7 +614,7 @@ class Model:
                 out["pick"].append(e)
             # herdr's live state is seconds old; the snapshot can be minutes
             # old. A tracked item's agent mid-turn -- prompted by the
-            # orchestrator or by hand -- is running, whatever its last report
+            # engine or by hand -- is running, whatever its last report
             # or row says, DONE included.
             elif it is not None and e["agent"] == "running" \
                     and kind not in ORCH_ROWS and kind != "GONE":
@@ -660,9 +654,36 @@ class Model:
                "active": snap.get("active"), "max_active": snap.get("max_active"),
                "untracked": snap.get("untracked") or 0,
                "generated_at": snap.get("generated_at"),
-               "last_tick": state.get("last_tick"),
-               "orch": self.orch_target(state, sessions, live)}
+               "last_tick": state.get("last_tick")}
         return out, hdr
+
+    def engine_status(self, now):
+        """The engine for the header and the pan: its mode, what it is doing
+        (off, idle, scanning a GitHub pass, acting on the table, or a tick
+        hung past TICK_STALE_SECS) and the last lines it printed."""
+        mode = scan.engine_mode(checkout=DIR)
+        with self.lock:
+            running, started = self.snap_running, self.snap_started
+            generated = (self.snap or {}).get("generated_at") or 0
+            drain_running, drain_started = self.drain_running, self.drain_started
+            last = self.engine_last
+        # generated_at is whole seconds: compare it with the start's second.
+        if mode == "off":
+            state, since = "off", None
+        elif running and now - started > TICK_STALE_SECS:
+            state, since = "stale", started
+        elif drain_running and now - drain_started > TICK_STALE_SECS:
+            state, since = "stale", drain_started
+        elif drain_running:
+            state, since = "acting", drain_started
+        elif running and generated >= int(started):
+            state, since = "acting", started
+        elif running:
+            state, since = "scanning", started
+        else:
+            state, since = "idle", None
+        return {"mode": mode, "state": state,
+                "since_s": int(now - since) if since else None, "last": last}
 
     def parked_done(self, row, it, snap_at):
         """Whether a parked card (`d`) sits in Done. An older row predates the
@@ -714,6 +735,8 @@ class Model:
             note = "agent not reporting"
         elif parked:
             note = "parked"
+        elif it.get("engine_error"):
+            note = it["engine_error"]
         elif kind in ORCH_ROWS:
             note = f"next tick: {ORCH_ROWS[kind]}"
         elif kind == "NEW":
@@ -733,12 +756,18 @@ class Model:
         else:
             pick_kind = "your PR"
         sinfo = sessions.get(sess, {}) if sess else {}
+        # herdr-app's space holds the session; a tab is not one. The TUI has none.
+        space = None
+        if scan.backend_for(sess) is scan.HC:
+            space = (sinfo.get("space") or it.get("space")
+                     or (None if scan.is_tab(sess) else sess))
         pr = it.get("pr") or (split_key(key)[1] if split_key(key)[2] == "pr"
                               else None)
         return {"kind": kind, "key": key, "title": row.get("title") or
                 it.get("branch") or "", "url": row.get("url"),
                 "checks": row.get("checks"), "draft": row.get("draft"),
-                "session": sess, "agent": agent_state, "stalled": stalled,
+                "session": sess, "space": space, "agent": agent_state,
+                "stalled": stalled,
                 "rounds": it.get("review_rounds"), "driver": it.get("driver"),
                 "quiet": quiet, "note": note, "needs": needs,
                 "pick_kind": pick_kind, "path": sinfo.get("path"),
@@ -746,17 +775,6 @@ class Model:
                 "stack": len(it.get("stack") or []),
                 "pane": ag.get("pane"), "open": bool(sess and sess in sessions),
                 "why": why}
-
-    def orch_target(self, state, sessions, live):
-        """-> (address, label). Addresses are "herdr:<agent>" or "hc:<terminal>".
-        An hc label is the agent's octopilot.agent name, from the live list."""
-        backend, target = scan.split_address(scan.orchestrator_target(state))
-        if backend is scan.HC:
-            title = next((a.get("agent") for a in live.values()
-                          if a.get("pane") == target), None)
-        else:
-            title = (sessions.get(target) or {}).get("title")
-        return f"{backend.prefix}{target}", title or target
 
 
 def sidebar_tokens(e, section):
@@ -777,8 +795,8 @@ def sidebar_tokens(e, section):
 # both come here. A row action is checked with row_refusal() and, when it
 # asks, confirmed with row_confirm(); perform() then runs it.
 
-Result = collections.namedtuple("Result", "ok message kitchen",
-                                defaults=(False,))
+Result = collections.namedtuple("Result", "ok message kitchen holds",
+                                defaults=(False, ()))
 
 
 def truthy(value):
@@ -793,34 +811,66 @@ def kitchen_message():
     return f"🍳 The kitchen is closed (past {scan.WIND_DOWN_AT})"
 
 
-def to_orch(text):
-    """Queue a command in the orchestrator's inbox. Typing it into its pane
-    would also send whatever the user is half-way through there."""
+# A start held past wind-down or at the cap: hold name (as engine._held names
+# it) -> the marker the request ends with, and the short reason the row prompt
+# gives.
+HOLDS = {
+    "wind-down": (engine.CONFIRMED_PAST, "🍳 kitchen closed"),
+    "cap": (engine.CONFIRMED_OVER, "⚠ at the cap"),
+}
+
+
+def start_holds(model):
+    """What a go or an investigation started now must be confirmed past: a list
+    of (hold name, the message). Past wind-down and at the cap (the engine's
+    count, as engine._held makes it) are the two."""
+    holds = []
+    if scan.wind_down() == "yes":
+        holds.append(("wind-down", kitchen_message()))
+    used = engine.slots_used(model.state, model.snap)
+    if used >= scan.MAX_ACTIVE:
+        holds.append(("cap",
+                      f"⚠ At the cap: {used}/{scan.MAX_ACTIVE} slots in use"))
+    return holds
+
+
+def queue_request(text):
+    """Queue a request for the engine (scan.py request). Nothing is typed into a
+    pane, which would also send whatever the user is half-way through."""
     code, out, err = sh([sys.executable, os.path.join(DIR, "scan.py"),
                          "request", text])
     if code == 0:
-        return Result(True, f"queued '{text}' for the orchestrator")
+        return Result(True, f"queued '{text}'")
     return Result(False, f"queue failed: {(err or out)[:100]}")
 
 
-def go_orch(key, confirmed=False):
-    """`go KEY`. Past wind-down it needs confirmed: the kitchen-closed alert's
-    second press."""
-    if scan.wind_down() != "yes":
-        return to_orch(f"go {key}")
-    if not confirmed:
-        return Result(False, kitchen_message(), kitchen=True)
-    return to_orch(f"go {key} {CONFIRMED}")
+def start_request(model, cmd, confirmed=False):
+    """Queue cmd, a go or an investigation, past its holds. `confirmed` is the
+    hold names the user was shown: a hold not among them asks again, with the
+    message of each hold now. True is an old mod's confirmed=1: every hold now."""
+    holds = start_holds(model)
+    if not holds:
+        return queue_request(cmd)
+    names = [name for name, _ in holds]
+    if confirmed is True:
+        confirmed = names
+    if not confirmed or any(name not in confirmed for name in names):
+        return Result(False, "\n".join(msg for _, msg in holds), kitchen=True,
+                      holds=tuple(names))
+    return queue_request(cmd + "".join(f" {HOLDS[name][0]}"
+                                       for name in names))
 
 
-def investigate_orch(repo, question, read_only, confirmed=False):
-    """`/investigate`, which past wind-down needs confirmed like go_orch."""
+def go_request(model, key, confirmed=False):
+    """`go KEY`. A start held past wind-down or at the cap needs confirmed: the
+    second press of the held-start alert."""
+    return start_request(model, f"go {key}", confirmed)
+
+
+def investigate_request(model, repo, question, read_only, confirmed=False):
+    """`/investigate`, which a hold needs confirmed like go_request."""
     cmd = f"/investigate {'--read-only ' if read_only else ''}{repo} {question}"
-    if scan.wind_down() == "yes":
-        if not confirmed:
-            return Result(False, kitchen_message(), kitchen=True)
-        cmd += f" {CONFIRMED}"
-    return to_orch(cmd)
+    return start_request(model, cmd, confirmed)
 
 
 def set_paused(verb):
@@ -836,7 +886,7 @@ def scan_run(args, timeout=30):
     lines = (out or err).splitlines()
     # cleanup ends with its SIBLINGS output; show a failed removal first,
     # else its "cleaned up" line.
-    removed = (f"{scan.HERDR.remove_label} ", f"{scan.HC.remove_label} ")
+    removed = tuple(f"{label} " for label in scan.REMOVE_LABELS)
     failed = next((l for l in lines if not l.endswith(": ok")
                    and l.startswith(removed)), None)
     done = next((l for l in lines if l.startswith("cleaned up")), None)
@@ -869,10 +919,9 @@ def peek_hc(terminal):
     return scan.app_do("terminal.peek", ["--terminal", terminal], timeout=10)[0] == 0
 
 
-def open_prompter(model):
-    """The prompter when there is one (that is where the user types), else the
-    orchestrator itself. The prompter is looked up only in the dashboard's own
-    backend; the orchestrator wherever its address points."""
+def open_prompter():
+    """Focus the prompter, where the user types. It is looked up only in the
+    dashboard's own backend."""
     own = scan.HC if scan.OCTOPILOT_BACKEND == "hc" else scan.HERDR
     if own is scan.HC:
         # Peek, not agent.focus: the engine terminals are parked (no pane).
@@ -881,13 +930,7 @@ def open_prompter(model):
             return Result(True, "")
     elif scan.herdr(["agent", "focus", scan.PROMPTER_AGENT], timeout=10)[0] == 0:
         return Result(True, "")
-    _, hdr = model.build()
-    backend, target = scan.split_address(hdr["orch"][0])
-    if backend is scan.HC:
-        ok = peek_hc(target)
-    else:
-        ok = scan.herdr(["agent", "focus", target], timeout=10)[0] == 0
-    return Result(ok, "" if ok else f"no agent named {target}")
+    return Result(False, "no prompter running")
 
 
 def focus_row(model, e):
@@ -898,7 +941,7 @@ def focus_row(model, e):
         # From the GUI, a TUI session comes forward in the herdr TUI, not here: say so.
         gui_on_tui = scan.OCTOPILOT_BACKEND == "hc" and scan.backend_for(e["session"]) is scan.HERDR
         return Result(True, "focused in the herdr TUI (this session lives there)" if gui_on_tui else "")
-    return Result(False, f"could not focus workspace {e['session']}")
+    return Result(False, f"could not focus session {e['session']}")
 
 
 def peek_row(model, e):
@@ -923,7 +966,9 @@ def shell_row(model, e, suspend=None):
     herdr popup, or else `suspend` runs one in the dashboard's own terminal."""
     path = e["path"]
     if scan.backend_for(e["session"]) is scan.HC:
-        code, _, raw = scan.app_do("tab.new", ["--space", e["session"],
+        if not e["space"]:
+            return Result(False, "no space for this row")
+        code, _, raw = scan.app_do("tab.new", ["--space", e["space"],
                                                "--folder", path], timeout=10)
         if code != 0:
             return Result(False, f"new tab failed: {raw[:100]}")
@@ -954,8 +999,11 @@ def row_refusal(model, aid, e):
     if aid == "focus":
         return None if e["session"] else "no session for this row"
     if aid == "shell":
-        return (None if e["path"] and os.path.isdir(e["path"])
-                else "no worktree for this row")
+        if not (e["path"] and os.path.isdir(e["path"])):
+            return "no worktree for this row"
+        if scan.backend_for(e["session"]) is scan.HC and not e["space"]:
+            return "no space for this row"
+        return None
     if aid in ("go", "no"):
         return None if kind == "PROPOSE" else \
             "go/no only applies to Pick next rows"
@@ -993,7 +1041,7 @@ def row_refusal(model, aid, e):
             return "remove only applies to tracked items"
         # MERGED needs the SIBLINGS fan-out, RESTACK a restack, not a removal.
         if kind in ("MERGED", "RESTACK"):
-            return "the orchestrator handles MERGED and RESTACK rows"
+            return "octopilot handles MERGED and RESTACK rows itself"
     return None
 
 
@@ -1003,11 +1051,13 @@ def row_confirm(model, aid, e):
     key = e["key"]
     it = tracked_item(model, key) or {}
     if aid == "go":
-        if scan.wind_down() == "yes":
-            return f"🍳 kitchen closed -- press g again to start {key} anyway"
-        return f"press g again to send 'go {key}' to the orchestrator"
+        holds = start_holds(model)
+        if not holds:
+            return f"press g again to queue 'go {key}'"
+        why = " · ".join(HOLDS[name][1] for name, _ in holds)
+        return f"{why} -- press g again to start {key} anyway"
     if aid == "no":
-        return f"press n again to send 'no {key}' to the orchestrator"
+        return f"press n again to decline {key}"
     if aid == "grant":
         return (f"press R again to grant {key} another "
                 f"{MAX_REVIEW_ROUNDS} review rounds")
@@ -1025,7 +1075,8 @@ def row_confirm(model, aid, e):
         busy = ("⚠ its agent is working -- " if e["kind"] in
                 ("WORKING", "BOOTING", "REVIEW", "FEEDBACK") else "")
         # An item without a workspace is only untracked by cleanup.
-        gone = ("workspace and worktree deleted" if it.get("session")
+        gone = ("tab and worktree deleted" if scan.is_tab(it.get("session"))
+                else "workspace and worktree deleted" if it.get("session")
                 else "worktree kept")
         return f"{busy}press del (⌫) again to remove {key} ({gone}, untracked)"
     return None
@@ -1033,8 +1084,8 @@ def row_confirm(model, aid, e):
 
 def perform(model, aid, e, confirmed=False, suspend=None):
     """Run the row action aid on e; the caller has checked row_refusal().
-    `confirmed` lets go past wind-down through. `suspend` runs a shell in the
-    dashboard's own terminal when no popup can."""
+    `confirmed` lets go past its holds (wind-down, the cap) through. `suspend`
+    runs a shell in the dashboard's own terminal when no popup can."""
     key = e["key"]
     if aid == "focus":
         return focus_row(model, e)
@@ -1045,13 +1096,13 @@ def perform(model, aid, e, confirmed=False, suspend=None):
     if aid == "browser":
         return browse_row(e)
     if aid == "go":
-        return go_orch(key, confirmed)
+        return go_request(model, key, confirmed)
     if aid == "no":
-        return to_orch(f"no {key}")
+        return queue_request(f"no {key}")
     if aid == "grant":
         return scan_run(["reset-rounds", key])
     if aid == "rereview":
-        return to_orch(f"re-review {key}")
+        return queue_request(f"re-review {key}")
     if aid == "ack":
         return scan_run(["ack-push", key])
     if aid == "detach":
@@ -1065,7 +1116,7 @@ def perform(model, aid, e, confirmed=False, suspend=None):
 
 def pick_groups(rows):
     """[(repo slug, [(#, entry)])], repos in order of first appearance. The #
-    is the row's place in rows, which `go N` and the orchestrator both count
+    is the row's place in rows, which `go N` and the engine both count
     by, so rows are not re-sorted, even when a repo's rows are not together."""
     groups = {}
     for i, e in enumerate(rows):
@@ -1077,7 +1128,8 @@ def pick_groups(rows):
 
 def event_detail(e):
     return " ".join(str(e[f]) for f in ("state", "round", "phase", "branch",
-                                        "msg", "note")
+                                        "msg", "note", "reason", "left", "text",
+                                        "error")
                     if e.get(f) not in (None, ""))
 
 
@@ -1109,6 +1161,23 @@ def kitchen_reaction(ev):
                 "key": key if keyed else None, "text": line,
                 "good": good, "tone": tone}
 
+    if kind == "engine-error":
+        return rx("worried", 3000, "smoke", True, text("msg") or f"engine-error {k}",
+                  bad=True)
+    if kind == "engine-skip":
+        return rx("worried", 3000, "smoke", line=f"skipped: {text('left') or text('reason')}",
+                  bad=True)
+    if kind == "held":
+        return rx("worried", 2500, "smoke", True,
+                  f"held {short(key or 'request')}: {text('reason')}")
+    if kind in ("go-refused", "request-refused"):
+        verb = text("verb") or ("go" if kind == "go-refused" else "request")
+        return rx("sad", 3500, "smoke", True,
+                  " ".join(p for p in (verb, k, "refused:", text("reason")) if p),
+                  bad=True)
+    if kind == "go":
+        return rx("flip", 2000, None, True, f"started {k} {text('title')}".strip(),
+                  True)
     if kind == "tick":
         active = ev.get("active")
         active = int(active) if isinstance(active, (int, float)) else 0
@@ -1236,17 +1305,6 @@ def kitchen_pan(model, hdr, evs, now, busy):
             "shelf": served[:8], "shelf_total": len(served), "chef": chef}
 
 
-def orchestrator_busy(model, hdr):
-    """Whether the orchestrator's agent is running, by its live row."""
-    _, target = scan.split_address(hdr["orch"][0])
-    label = hdr["orch"][1]
-    with model.lock:
-        live = list(model.live.values())
-    return any(a.get("state") == "running"
-               and (a.get("pane") == target or a.get("agent") == label)
-               for a in live)
-
-
 def row_actions(model, e):
     """The row's actions, the ones the TUI would run on its keys."""
     out = []
@@ -1292,7 +1350,7 @@ def entry_view(model, e, section, index=None):
         "quiet_s": None if e["quiet"] is None else int(e["quiet"]),
         "stalled": e["stalled"], "needs": e["needs"], "why": e["why"],
         "note": e["note"], "pick_kind": e["pick_kind"],
-        "session": e["session"],
+        "session": e["session"], "space": e["space"],
         "backend": backend.name if backend else None,
         "pane": e["pane"], "path": e["path"], "branch": e["branch"],
         "pr": int(pr) if str(pr or "").isdigit() else None,
@@ -1329,7 +1387,8 @@ def view_for(model):
 
     with model.lock:
         evs = list(model.events)
-    busy = orchestrator_busy(model, hdr)
+    engine = model.engine_status(now)
+    busy = engine["state"] == "acting"
     return {
         "v": 1,
         "generated_at": now,
@@ -1343,7 +1402,7 @@ def view_for(model):
                        "age_s": None if not gen else int(now - gen),
                        "error": model.snap_err},
             "last_tick_s": int(now - last_tick) if last_tick else None,
-            "orch_label": hdr["orch"][1],
+            "engine": engine,
             "paused": hdr["paused"],
             "wind_down": {"state": scan.wind_down() or "off",
                           "at": scan.WIND_DOWN_AT or None},
@@ -1373,10 +1432,22 @@ def find_row(model, key):
                  if e["key"] == key), None)
 
 
+def confirmed_holds(args):
+    """The holds a --action confirm answers: the names the alert showed
+    (holds=wind-down,cap), True for an old mod's confirmed=1 alone, False when
+    nothing was confirmed."""
+    if not truthy(args.get("confirmed")):
+        return False
+    if "holds" in args:
+        return [name for name in args["holds"].split(",") if name]
+    return True
+
+
 def run_action(model, aid, key, args):
     """--action: one row or global action by its id, through the TUI key's
     code path. The mod asks the second press (`confirm`), so this runs at
-    once; confirmed=1 is the kitchen alert's second press."""
+    once; confirmed=1 with holds=<the shown names> is the kitchen alert's
+    second press."""
     if aid == "refresh":
         # Only a running headless dashboard rewrites view.json; it watches the
         # kick file's mtime (see headless()).
@@ -1395,10 +1466,11 @@ def run_action(model, aid, key, args):
         question = args.get("question", "").strip()
         if not (repo and question):
             return Result(False, "investigate needs a repo and a question")
-        return investigate_orch(repo, question, truthy(args.get("read_only")),
-                                truthy(args.get("confirmed")))
+        return investigate_request(model, repo, question,
+                                   truthy(args.get("read_only")),
+                                   confirmed_holds(args))
     if aid == "prompter":
-        return open_prompter(model)
+        return open_prompter()
     if aid == "toggle_done":
         return Result(False, "toggle_done is the mod's own: the mod filters "
                              "Done")
@@ -1411,7 +1483,7 @@ def run_action(model, aid, key, args):
     refused = row_refusal(model, aid, e)
     if refused:
         return Result(False, refused)
-    return perform(model, aid, e, confirmed=truthy(args.get("confirmed")))
+    return perform(model, aid, e, confirmed=confirmed_holds(args))
 
 
 # -------------------------------------------------------------------- view
@@ -1425,7 +1497,7 @@ class Dashboard:
         self.hidden_done = 0
         self.flash = ("", 0)
         self.confirm = None   # (action, key, deadline)
-        self.alert = None     # (key, title, deadline): the kitchen is closed
+        self.alert = None     # (key, title, deadline, message, holds): a start is held
         self.selectable = []
         self.groups = []      # keys per board column, then the pick list
         self.expanded = set() # pick repos showing their rows; the rest collapse
@@ -1447,7 +1519,7 @@ class Dashboard:
         data, hdr = self.m.build()
         head = [self.header(data, hdr, now)]
         if hdr["paused"]:
-            head.append(Text(" ⏸  PAUSED — the orchestrator acts on nothing "
+            head.append(Text(" ⏸  PAUSED — octopilot starts and acts on nothing "
                              "until resumed (P)", style="bold black on yellow"))
         # Done rows that still hold a workspace or session stay on the board,
         # so they can be opened or detached (z) without toggling D first.
@@ -1495,16 +1567,15 @@ class Dashboard:
         return Group(*head, pick, *tail)
 
     def kitchen(self):
-        """The kitchen-closed alert, alone and centered on the screen."""
-        key, title, _ = self.alert
+        """The held-start alert (wind-down or cap), alone and centered on the screen."""
+        key, title, _, message, _ = self.alert
         body = Text(justify="center")
-        body.append(f"🍳 The kitchen is closed (past {scan.WIND_DOWN_AT})\n\n",
-                    style="bold red")
+        body.append(f"{message}\n\n", style="bold red")
         body.append(f"{key}\n", style="bold")
         body.append(f"{title or ''}\n\n")
         body.append("Press g to start it anyway", style="bold yellow")
         body.append(" · any other key cancels", style="dim")
-        panel = Panel(body, title="🍳 Kitchen closed", border_style="bold red",
+        panel = Panel(body, title="🍳 Start held", border_style="bold red",
                       box=box.DOUBLE, padding=(1, 4), expand=False)
         return Align.center(panel, vertical="middle",
                             height=self.console.height)
@@ -1530,7 +1601,13 @@ class Dashboard:
                 t.append(f" (+{hdr['untracked']} untracked)", style="dim")
         t.append("\n ")
         gen = hdr["generated_at"]
-        if self.m.snap_running:
+        engine = self.m.engine_status(now)
+        if engine["state"] == "acting":
+            t.append("⏭ acting", style="cyan")
+        elif engine["state"] == "stale":
+            t.append(f"engine running {ago(engine['since_s'])}+ (hung?)",
+                     style="red")
+        elif self.m.snap_running:
             t.append("GitHub ⟳ refreshing", style="cyan")
         elif gen:
             age = now - gen
@@ -1544,7 +1621,9 @@ class Dashboard:
         t.append("  ·  last tick ")
         t.append(ago(now - hdr["last_tick"]) + " ago" if hdr["last_tick"]
                  else "never", style="dim")
-        t.append(f"  ·  orchestrator {hdr['orch'][1]}", style="dim")
+        label = {"on": "engine on", "plan": "engine plan (logs only)",
+                 "off": "engine off here"}[engine["mode"]]
+        t.append(f"  ·  {label}", style="dim")
         t.append(f"  ·  {time.strftime('%H:%M:%S')}", style="dim")
         return t
 
@@ -1893,9 +1972,15 @@ class Dashboard:
         res = perform(self.m, aid, e, suspend=lambda cmd: term.suspend(
             live, cmd, cwd=e["path"]))
         if res.kitchen:
-            self.alert = (e["key"], e["title"], time.time() + KITCHEN_SECS)
+            self.hold_alert(e["key"], e["title"], res)
         else:
             self.report(res)
+
+    def hold_alert(self, key, title, res):
+        """Open the held-start alert for res, keeping the holds it shows: the
+        second press confirms those and no others."""
+        self.alert = (key, title, time.time() + KITCHEN_SECS, res.message,
+                      res.holds)
 
     def handle(self, key, live, term):
         if self.alert:
@@ -1903,9 +1988,15 @@ class Dashboard:
             if key == "g" and time.time() - opened < KITCHEN_GRACE:
                 return True
             # Only g gets through the alert; anything else (q too) cancels.
-            k, self.alert = self.alert[0], None
+            k, title, _, _, shown = self.alert
+            self.alert = None
             if key == "g":
-                self.report(go_orch(k, confirmed=True))
+                res = go_request(self.m, k, confirmed=shown)
+                # A hold that came up since the alert is asked again, not sent.
+                if res.kitchen:
+                    self.hold_alert(k, title, res)
+                else:
+                    self.report(res)
             else:
                 self.say("start cancelled")
             return True
@@ -1941,7 +2032,7 @@ class Dashboard:
             if self.ask("P", "", f"press P again to {verb} octopilot"):
                 self.report(set_paused(verb))
         elif key == "a":
-            self.report(open_prompter(self.m))
+            self.report(open_prompter())
         elif key == "i":
             self.investigate(live, term)
         elif key in (" ", "\r", "\n") and repo:
@@ -1978,14 +2069,19 @@ class Dashboard:
         ro = term.read_line(live, "Read-only (a report, no commits or PR)? "
                             "[y/N] ")
         read_only = ro.lower() in ("y", "yes")
-        res = investigate_orch(repo, question, read_only)
+        res = investigate_request(self.m, repo, question, read_only)
         if res.kitchen:
-            ok = term.read_line(live, f"🌇 Past {scan.WIND_DOWN_AT} -- start it "
-                                "anyway? [y/N] ")
+            held = " · ".join(res.message.splitlines())
+            ok = term.read_line(live, f"{held} -- start it anyway? [y/N] ")
             if ok.lower() not in ("y", "yes"):
-                self.say("investigation not started (wind-down)")
+                self.say("investigation not started (held)")
                 return
-            res = investigate_orch(repo, question, read_only, confirmed=True)
+            res = investigate_request(self.m, repo, question, read_only,
+                                      confirmed=res.holds)
+            if res.kitchen:
+                held = " · ".join(res.message.splitlines())
+                self.say(f"investigation not started (held again: {held})")
+                return
         self.report(res)
 
 
@@ -2095,6 +2191,7 @@ def headless(model):
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, lambda signum, _frame: stopping.append(signum))
     model.poll_files()
+    model.log_engine = log
     model.start()
     log(f"headless dashboard: writing {VIEW_FILE}")
     kick_seen = kick_mtime()
@@ -2169,6 +2266,7 @@ def main():
             out = {"ok": res.ok, "message": res.message}
             if res.kitchen:
                 out["kitchen"] = True
+                out["holds"] = list(res.holds)
         except Exception as e:
             out = {"ok": False, "message": f"{type(e).__name__}: {e}"}
         print(json.dumps(out))

@@ -49,10 +49,10 @@ $A report "{{KEY}}" <ready|blocked> "$(git rev-parse HEAD)" "<one line>"
 `ready` when the report is written, `blocked` when you could not finish.
 The first line is a one-line summary (e.g. "3 findings, 1 high: ..."); put
 the findings list on the lines after it, inside the same quotes. The full
-report stays in this pane. Never message the orchestrator any other way, and
-never send desktop notifications.
+report stays in this pane. Never type into the octopilot panes, and never send
+desktop notifications.
 
 If you are going to be working for more than half an hour (a long build, a
 stack coming up, a slow test run), call
-`$A heartbeat "{{KEY}}" "<what you are doing>"` now and then, so the
-orchestrator does not report you as stalled.
+`$A heartbeat "{{KEY}}" "<what you are doing>"` now and then, so octopilot does
+not flag you as stalled.

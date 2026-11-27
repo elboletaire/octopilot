@@ -14,7 +14,16 @@
       "error": null
     },
     "last_tick_s": 120,
-    "orch_label": "octopilot",
+    "engine": {
+      "mode": "on",
+      "state": "acting",
+      "since_s": 40,
+      "last": {
+        "at": 1795615550.4,
+        "verb": "tick",
+        "lines": ["acme/widgets#402: started go", "3 rows left for the next tick"]
+      }
+    },
     "paused": false,
     "wind_down": {
       "state": "no",
@@ -83,7 +92,7 @@
               "id": "remove",
               "key": "Delete",
               "label": "remove",
-              "confirm": "⚠ its agent is working -- remove widgets#452? (workspace and worktree deleted, untracked)"
+              "confirm": "⚠ its agent is working -- press del (⌫) again to remove widgets#452 (workspace and worktree deleted, untracked)"
             }
           ],
           "driver": "agent"
@@ -107,6 +116,7 @@
           "note": "re-review requested",
           "pick_kind": null,
           "session": "w52",
+          "space": "w52",
           "backend": "hc",
           "pane": "t12",
           "path": "/home/user/src/acme/gizmo-sdk/.worktrees/feat/export-pages",
@@ -207,6 +217,7 @@
           "note": "reboot for review",
           "pick_kind": null,
           "session": "hc-9",
+          "space": "hc-9",
           "backend": "hc",
           "pane": "t9",
           "path": "/home/user/src/acme/gizmo-sdk/.worktrees/work",
@@ -393,6 +404,7 @@
           "note": "agent not reporting",
           "pick_kind": null,
           "session": "hc-4",
+          "space": "hc-4",
           "backend": "hc",
           "pane": "t11",
           "path": "/home/user/src/acme/gizmo-sdk/.worktrees/work",
@@ -733,13 +745,13 @@
               "id": "go",
               "key": "g",
               "label": "go",
-              "confirm": "press g again to send 'go acme/widgets!457' to the orchestrator"
+              "confirm": "press g again to queue 'go acme/widgets!457'"
             },
             {
               "id": "no",
               "key": "n",
               "label": "no",
-              "confirm": "press n again to send 'no acme/widgets!457' to the orchestrator"
+              "confirm": "press n again to decline acme/widgets!457"
             },
             {
               "id": "browser",

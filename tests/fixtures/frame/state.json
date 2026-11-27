@@ -1,0 +1,96 @@
+{
+  "declined": [],
+  "handled_merges": [],
+  "items": {
+    "vocdoni/vocdoni-app#101": {
+      "branch": "feat/voting-ui", "driver": "agent", "last_seen": 1794300000,
+      "added": 1794200000, "mode": "fix", "pr": 101, "review_rounds": 1,
+      "reviewed_sha": "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
+      "session": "w9zz1"
+    },
+    "vocdoni/vocdoni-app#102": {
+      "branch": "fix/login-redirect", "driver": "agent", "feedback_seen": 1794100000,
+      "last_seen": 1794290000, "added": 1794150000, "mode": "fix", "pr": 102,
+      "review_rounds": 2, "reviewed_sha": "b2c3d4e5f60718293a4b5c6d7e8f9012345678a1",
+      "session": "w9zy2"
+    },
+    "vocdoni/vocdoni-app#103": {
+      "branch": "fix/tables", "driver": "agent", "last_seen": 1794305000,
+      "added": 1794304000, "mode": "fix", "phase": "booting", "pr": 103,
+      "review_rounds": 0, "session": "w9zx3"
+    },
+    "vocdoni/vocdoni-app#104": {
+      "branch": "feat/stack-top", "driver": "agent", "last_seen": 1794280000,
+      "added": 1794100000, "mode": "fix", "pr": 104, "review_rounds": 1,
+      "session": "w9zw4",
+      "stack": [
+        {"branch": "feat/stack-bottom", "pr": 100},
+        {"branch": "feat/stack-top", "pr": 104}
+      ]
+    },
+    "vocdoni/vocdoni-app#106": {
+      "branch": "feat/old-api", "driver": "agent", "last_seen": 1794200000,
+      "added": 1794100000, "mode": "fix", "pr": 106, "review_rounds": 1,
+      "session": "w9zu6"
+    },
+    "vocdoni/vocdoni-app#108": {
+      "branch": "fix/cache", "driver": "agent", "last_seen": 1794210000,
+      "added": 1794200000, "mode": "fix", "pr": 108, "review_rounds": 1,
+      "session": "w9zt8"
+    },
+    "vocdoni/vocdoni-app#109": {
+      "branch": "fix/x", "driver": "agent", "last_seen": 1794220000,
+      "added": 1794210000, "mode": "fix", "pr": 109, "review_rounds": 0,
+      "session": "w9zs9"
+    },
+    "vocdoni/vocdoni-integrator-sdk#7": {
+      "branch": "chore/deps", "driver": "agent", "last_seen": 1794250000,
+      "added": 1794200000, "mode": "fix", "pr": 7, "review_rounds": 1,
+      "session": "w9zv5"
+    },
+    "vocdoni/vocdoni.io#22": {
+      "branch": "review/faq", "driver": "agent", "last_seen": 1794240000,
+      "added": 1794200000, "mode": "comment", "pr": 22, "review_rounds": 3,
+      "reviewed_sha": "c3d4e5f60718293a4b5c6d7e8f9012345678a1b2",
+      "session": "w9zr1"
+    },
+    "vocdoni/vocdoni.io#23": {
+      "branch": "review/nav", "driver": "agent", "head_seen": "d4e5f60718293a4b5c6d7e8f9012345678a1b2c3",
+      "head_seen_at": 1794200000, "last_seen": 1794230000, "added": 1794190000,
+      "mode": "comment", "pr": 23, "review_rounds": 1,
+      "reviewed_sha": "e5f60718293a4b5c6d7e8f9012345678a1b2c3d4",
+      "session": "w9zq2"
+    },
+    "vocdoni/vocdoni.io#24": {
+      "branch": "review/search", "driver": "agent", "last_seen": 1794260000,
+      "added": 1794250000, "mode": "comment", "pr": 24, "review_rounds": 1,
+      "reviewed_sha": "f60718293a4b5c6d7e8f9012345678a1b2c3d4e5",
+      "session": "w9zp3"
+    },
+    "vocdoni/vocdoni.io#25": {
+      "branch": "review/footer", "driver": "agent", "last_seen": 1794270000,
+      "added": 1794260000, "mode": "comment", "pr": 25, "review_rounds": 1,
+      "reviewed_sha": "0718293a4b5c6d7e8f9012345678a1b2c3d4e5f6",
+      "session": "w9zo4"
+    },
+    "vocdoni/vocdoni-app!55": {
+      "branch": "feat/issue-55", "driver": "agent", "last_seen": 1794306000,
+      "added": 1794300000, "mode": "work", "review_rounds": 0,
+      "session": "w9zm6"
+    },
+    "vocdoni/vocdoni-app?12": {
+      "last_seen": 1794306500, "added": 1794300000, "mode": "investigate",
+      "question": "Why does the vote tally lag behind the relay?",
+      "read_only": true, "session": "w9zl7"
+    },
+    "vocdoni/vocdoni-app!62": {
+      "branch": "feat/issue-62", "driver": "agent", "added": 1794316000,
+      "mode": "work", "review_rounds": 0, "session": "w9zk8"
+    }
+  },
+  "last_tick": 1794315600,
+  "me": "octo-user",
+  "paused": false,
+  "registry": {},
+  "ignored_paths": []
+}

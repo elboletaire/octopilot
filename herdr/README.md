@@ -1,13 +1,64 @@
 # Octopilot in herdr
 
 A herdr plugin that gives octopilot a home: an **Octopilot** workspace with the
-orchestrator on the left and the live dashboard (`../dashboard.sh`) on the
-right. The dashboard updates by itself -- no asking the orchestrator for the
-table.
+prompter on the left and the live dashboard (`../dashboard.sh`) on the right.
+The dashboard updates by itself, and the engine acts on the table without anyone
+asking it to.
 
-Every work session is a herdr workspace on its worktree, grouped under its
-repo's workspace, with a claude agent named `ap-<repo>-<number>`. The
-orchestrator is the agent named `octopilot`.
+Every work session is a tab on its worktree, in the Octopilot space (herdr-app) or
+workspace (herdr TUI), with a claude agent named `ap-<repo>-<number>` (see Worker
+tabs). The engine is not an agent: the dashboard runs it as `scan.py tick` and
+`scan.py drain`.
+
+The prompter and the code agent start on `MODEL_PROMPTER` and `MODEL_CODE` (config.sh, passed
+to claude as `--model`), in both the TUI and the GUI launcher, not on the global default; a running
+one keeps its model.
+
+## Worker tabs
+
+`WORKER_HOST` (config.sh) picks where a worker opens. It is read from the environment when
+the process that spawns workers starts (the headless engine, which a launcher run starts with
+the value it was given), so restart the engine after changing it:
+
+- `tab` (the default): a tab of the Octopilot space or workspace. `scan.sh host-space`
+  prints the one it uses: the GUI's space where the headless, the code agent or the
+  prompter runs, or the TUI's workspace labelled `Octopilot`, else the prompter's. It prints
+  nothing with `space`, so a session brought back then opens as a space of its own.
+- `space`: a space or workspace of its own, as before. Sessions already open keep theirs.
+
+Without an Octopilot space or workspace (the launcher has not run), the worker opens as
+a space or workspace of its own, and the spawn prints `NOTE:` saying so. A remote
+Octopilot space (see `CONTRACT.md`) is not used: workers open on this computer.
+
+`SETTLE_WORKER_TABS` (GUI only; herdr has no settle, read at the same start as `WORKER_HOST`)
+settles each new worker tab at spawn: herdr-app's `tab.settle` takes it out of the lists, still running. It comes back
+when you open it from the dashboard (`⏎`) or when its agent needs you. `0`
+leaves the tab shown.
+
+A tab is named by its item's title. A title that is one of the launcher's tab names
+(`OCTOPILOT`, `engine`, `Octopilot (code changes)`, in any case) gets the agent's name
+after it: `engine (ap-<repo>-<number>)`.
+
+> **Closing the Octopilot space or workspace ends every worker tab.** Their worktrees
+> are kept, and their items show `GONE` and are untracked, freeing their slots. To end
+> one worker, use `z` or `del` on its row.
+
+A tab closed by hand does not end its session when its agent is live in another open
+tab or space (not held by another item; a tab is preferred): the session follows the
+agent there (re-homed), and the row stays. An agent herdr-app parked (`terminal.park`: its terminal is labelled with the agent's name,
+no open tab holds it, its claude still runs) keeps its item tracked: `WORKING` with its
+terminal's address and the `terminal.keep` command to show it, and no prompt is sent until then
+(feedback waits; new feedback on a parked PR is counted in the row, not sent or marked). A parked card you parked with `d` stays in Done; a parked PR that closed is
+`CLOSED`. Cleanup and detach (`z`) end the parked terminal (`hc kill`) first, and cleanup keeps the item
+tracked when the kill fails. Only an agent that is gone shows `GONE`.
+
+**Upgrading.** Sessions already in their own spaces or workspaces keep working; there is
+nothing to migrate. Both id shapes are read: tabs as `tb…` (GUI) or `w…:t…` (TUI), spaces
+and workspaces as `sp…` or `w…`.
+
+**Rolling back** past this step: first detach or finish the tab sessions (`z`, or `del`
+once their work is merged), or set `WORKER_HOST=space` and let the tab sessions drain.
+Older code cannot handle tab ids.
 
 ## Setup
 
@@ -37,14 +88,14 @@ The workspace has two tabs: **OCTOPILOT**, described below, and **Octopilot
 (`octopilot-code`). In OCTOPILOT, the dashboard pane is titled
 `dashboard`.
 
-`open` starts the orchestrator as a fresh claude in `OCTOPILOT_ORCH_CWD`
-(`~/src`) in a small **messenger** pane, which starts ticking by itself
-(`/octopilot:messenger`), and the **prompter** below it, a second claude running
-`/octopilot:prompter`. Type in the prompter: it answers from octopilot's state
-and queues your commands in the orchestrator's inbox. Agent reports and the
-dashboard's keys go to that inbox too, so nothing is ever typed into a pane
-you are writing in. On an existing workspace, `open` adds whichever of the prompter and the
-code-changes tab is missing, and names the first tab OCTOPILOT.
+`open` starts the **prompter** as a fresh claude in `OCTOPILOT_ORCH_CWD` (`~/src`),
+running `/octopilot:prompter`, in a pane on the left, with the **dashboard** beside
+it. Type in the prompter: it answers from octopilot's state and queues your commands
+for the engine. The dashboard's keys are queued for the engine too, so nothing is
+ever typed into a pane you are writing in. On an existing workspace, `open` adds
+whichever of the prompter and the code-changes tab is missing, and names the first
+tab OCTOPILOT. A retired `octopilot` agent still running there is left alone, and
+`open` says so: close its pane.
 
 Show octopilot's state on each worker's row in the herdr sidebar (the
 dashboard publishes these tokens; they expire ten minutes after it stops):
@@ -56,14 +107,16 @@ status_indicators = "symbols"
 sidebar_width = 34
 
 [ui.sidebar.agents]
-rows = [["state_icon", "workspace"],
+rows = [["state_icon", "workspace", "tab"],
         ["$ap_kind", "$ap_pr", "$ap_rounds", "$ap_ci"],
         ["$ap_note"]]
 ```
 
+`tab` shows each worker's tab name beside its workspace.
+
 Notifications: the dashboard sends a desktop notification (`notify-send`) when
 an item enters 🔴 Needs you -- once per item and reason, never on repeats --
-and the orchestrator and its agents send none of their own. Keep herdr's own
+and the engine and its agents send none of their own. Keep herdr's own
 per-turn notifications inside herdr so they do not drown it out:
 
 ```toml
@@ -77,6 +130,10 @@ claude = "off"       # no state-change sounds from Claude agents (all of them)
 The dashboard also runs outside herdr: `~/src/octopilot/dashboard.sh`.
 It needs `uv` (which provides `rich`); there is nothing else to install.
 
+The takoyaki band in the prompter's claude (`plugin/hooks/register.tsx`) follows the
+engine: it is busy while the engine acts (`header.engine.state` is `acting`), and
+falls back to the prompter's own turns when there is no fresh view.
+
 ## GUI (herdr-app)
 
 `herdr/open-gui.sh` builds Octopilot in the Herdr app (`herdr-app`, its
@@ -86,23 +143,27 @@ terminals run in herdr-core) as one space with three tabs, in this order:
 |---|---|
 | **OCTOPILOT** | the `octopilot-kitchen` mod, a pane 300 px tall, on the left, over the `octopilot-chat` mod (the prompter as a chat, its input at the bottom); on the right the `octopilot-dashboard` mod (the table below), full height (`props`: `dir`, `state_dir`; its pane is named by `pane.rename`, the mod reads no name) |
 | **Octopilot (code changes)** | the code agent's own claude (`octopilot-code`, a claude started in this checkout, an hc terminal that is never parked) |
-| **engine** | the orchestrator (`octopilot`, `/octopilot:messenger`), the prompter (`octopilot-prompter`) and `dashboard.sh --headless` (`octopilot-headless`), each an hc terminal. Shown by default; `--hide-engine` parks them (see below) |
+| **engine** | the prompter (`octopilot-prompter`, `/octopilot:prompter`) and `dashboard.sh --headless` (`octopilot-headless`, the engine's host: it runs `scan.py tick` and `drain`), each an hc terminal. Shown by default; `--hide-engine` parks them (see below) |
+
+Every GUI run keeps OCTOPILOT, code and engine at tabs 1-3 in that order (`place_tabs`), so
+worker tabs opened later land after them. The `--terminals` layout keeps OCTOPILOT and the code tab
+in the same order.
 
 The space is named `Octopilot` (`LABEL`): `space.new` does not keep the name it
 is given here, so the run calls `space.rename` when the space is not named so (best
 effort: a refusal is warned about). A remote herdr-app lists a new terminal a moment
 after it is made, so the run waits up to 15 s for each one it locates.
 
-The engine is shown by default. `--hide-engine` parks its three terminals after
+The engine is shown by default. `--hide-engine` parks its two terminals after
 building (`herdr-app do terminal.park`): the pane goes, the process keeps
 running and core keep is off, so the empty engine tab goes too. They are found
 by their `octopilot.agent` labels, not by panes, so a rerun finds them parked.
-A parked orchestrator keeps its space in an `octopilot.space` label (parking
+A parked headless keeps its space in an `octopilot.space` label (parking
 removes `herdr.space`). A parked terminal is shown with `terminal.peek` (the
 chef in the kitchen, the chat's Terminal button, the dashboard's `v` and `a`),
 which works on it. A rerun without `--hide-engine` shows parked engine terminals
 again (`terminal.keep`: the first takes a tab named `engine`, the others go
-beside it) and puts the engine tab third. `--show-engine` is accepted and does
+beside it) and, as every GUI run does, keeps the engine tab third. `--show-engine` is accepted and does
 nothing, since the engine is shown by default. `--terminals` refuses on a parked
 engine and lists the parked terminals, each to show with `herdr-app do terminal.keep`.
 
@@ -118,13 +179,19 @@ Viewed from another computer (the Octopilot space is on a remote machine, see
 from their `dir` and `state_dir` props, and poll it every 2 s (no folder watch).
 Their headers say `· on <machine>`.
 
-Rerunning finds what is there. A parked orchestrator whose space is closed means
+Rerunning finds what is there. A parked headless whose space is closed means
 octopilot was closed with it: its engine terminals of this checkout are ended,
 and it is built again. After a core restart the parked engine is gone, but the
-space and its code agent are back: the orchestrator starts in the space named
+space and its code agent are back: the engine's terminals start in the space named
 `Octopilot` (or the code agent's), in a new tab that the run parks. An engine
 terminal not running its claude (or the headless's uv) is ended and started again.
 The launcher never ends the code agent: it is your own claude session.
+
+An `octopilot` agent from before the engine (the old messenger) in this checkout is
+retired by the next `open-gui.sh` run: its chat and kitchen labels move to the prompter
+(or the code agent), its headless and any old curses dashboard are ended, and the
+headless starts again. The prompter keeps running: `/clear` it, then run
+`/octopilot:prompter`.
 
 The code agent is not an engine terminal: its claude is the terminal of the code
 tab, so its pickers and sub-agents are Claude's own, and the engine flags do not
@@ -139,15 +206,14 @@ agent (its label `octopilot.side=<tab>:<pane>`) is closed when that label names 
 tab and `pane.rename` finds the pane, and the label is removed. A tab that holds a
 terminal other than the agent's is refused, never closed.
 
-In the `--terminals` layout, the dashboard's `a` peeks the prompter (or the
-orchestrator), as the GUI layout does, and the code agent stays a terminal in its
+In the `--terminals` layout, the dashboard's `a` peeks the prompter, as the GUI layout does, and the code agent stays a terminal in its
 own "Octopilot (code changes)" tab (the TUI layout has no mods).
 
 Every engine terminal starts through the user's interactive shell (`$SHELL -ic
 'exec "$@"'`), so the gateway env in `~/.zshrc.local` reaches claude. herdr-app
 already runs the argv of `space.new` and `tab.new` in the shell (and keeps the
 shell open after the program), but runs `pane.split` argv as given, so the
-helpers beside the orchestrator are wrapped by open-gui.sh (`shell_argv`). It
+helpers beside the engine's host are wrapped by open-gui.sh (`shell_argv`). It
 uses `exec`, not herdr's keep-shell form: a shell left behind would keep a dead
 agent's terminal alive and labelled, and the reruns would never restart it.
 
@@ -155,7 +221,7 @@ The headless dashboard runs the loops and writes `view.json`; the mods only
 render it and send actions. The kitchen is the `octopilot-kitchen` mod, a pane
 split down from the chat (`pane.split`), moved above it (`pane.swap`), then sized to 300 px
 with `pane.resize` (both only when it is created; a rerun never moves or resizes it).
-The run records the chat's pane on the orchestrator (`octopilot.chat=<tab>:<pane>`)
+The run records the chat's pane on the headless (`octopilot.chat=<tab>:<pane>`)
 and the kitchen's (`octopilot.kitchen=<tab>:<pane>`). A record counts only when its
 tab is this space's OCTOPILOT tab, and a rerun keeps the kitchen while its pane
 exists (a `pane.rename` probe), else splits a new one. The
@@ -163,7 +229,7 @@ steps are best effort: a failure is warned about and the run goes on. A tab from
 an earlier run has no `octopilot.chat` record, so a rerun cannot split its kitchen:
 it says so and leaves the tab as it is. Add it once by hand: focus the chat pane,
 take its id (`herdr-app status` `focused_pane`) and the OCTOPILOT tab's id
-(`herdr-app ls`), record `octopilot.chat=<tab>:<pane>` on the orchestrator, and
+(`herdr-app ls`), record `octopilot.chat=<tab>:<pane>` on the headless terminal, and
 rerun `open-gui.sh`.
 
 Each claude starts with `claude --session-id <uuid>` and is labelled
@@ -171,7 +237,7 @@ Each claude starts with `claude --session-id <uuid>` and is labelled
 is found from the claude in the terminal's foreground, through its
 `~/.claude/sessions/<pid>.json` (which follows `/clear`); the label is only the
 fallback when no claude runs there. `scan.sh speech --json` reads the
-orchestrator's last message, `scan.sh chat --json [--after <id>]` the prompter's
+engine's last lines (`header.engine.last`), `scan.sh chat --json [--after <id>]` the prompter's
 conversation, and `scan.sh chat-send <text>` / `chat-keys <keys>` type into the
 prompter. Under the TUI backend, or with nothing running, they report
 `"status": "offline"`.
@@ -205,8 +271,8 @@ it, the app is switched to `main` first. A layout of that name that is not ours 
 left alone. `open-gui.sh --no-layout` is accepted and does nothing.
 
 **Fallback.** `open-gui.sh --terminals` builds the TUI-style layout instead:
-one OCTOPILOT tab with the messenger, the curses dashboard and the prompter as
-terminal panes, plus the code-changes tab as a terminal tab. On a space that already has the GUI
+one OCTOPILOT tab with the prompter on the left of the curses dashboard (the engine's
+host, labelled `octopilot-headless`), plus the code-changes tab as a terminal tab. On a space that already has the GUI
 layout it refuses, and a rerun on a space with the curses dashboard of that
 layout refuses too, so two dashboard loops never run.
 
@@ -222,9 +288,9 @@ HOME_REPOS="<owner/repo>" ISSUE_ORGS="<org>" \
 
 `HOME_REPOS`, `ISSUE_ORGS` and `CLONE_ROOTS` narrow what the test scans; only
 the values you set are passed on, so config.sh's defaults keep applying to
-everything else. The script refuses to run when the orchestrator labelled
-`octopilot.agent=octopilot` runs from another checkout (`octopilot.dir` label,
-since labels are global). Its own sessions (the engine tab, the headless
+everything else. The launcher only touches this checkout's terminals (matched by their
+`octopilot.dir` label, since labels are global): an `octopilot` agent from another
+checkout is left as it is. Its own sessions (the engine tab, the headless
 dashboard and the code tab) get `OCTOPILOT_BACKEND=hc`, `OCTOPILOT_DIR` and
 `OCTOPILOT_STATE_DIR` from this script. The workers that scan.py spawns get them
 from scan.py, so the test is only isolated as far as that hand-off goes.
@@ -243,46 +309,101 @@ kept, or nothing on the live checkout. Checked with `claude --settings
 the worktree, and `arxiu-bibliotecaria@inline` and `taller@inline` remain.
 
 Only the GUI spawns carry `OCTOPILOT_DIR`, `OCTOPILOT_STATE_DIR` and the
-`--settings` override. TUI workers spawned by a worktree's octopilot get
-neither, so they run the live scan.sh and plugin.
+`--settings` override. A TUI worker opened as a workspace (`WORKER_HOST=space`) gets
+neither, so it runs the live scan.sh and plugin. A TUI tab worker gets the two
+variables (`tab create --env`), but not the `--settings` override, so it loads the
+installed plugin.
 
 Close the test space with `herdr-app do space.close --id <space> --confirmed true`.
+
+## Upgrading from the orchestrator
+
+The engine replaces the messenger (the `octopilot` agent). Before switching, clear
+the old requests: `scan.sh inbox` lists them, and the engine runs them on its first
+drain. Either let them run, or remove the stale `REQUEST` entries from the `inbox`
+list of `state.json` while the dashboards are stopped (there is no command for that).
+
+Stage the switch while the orchestrator still runs (layers 1-3): run with
+`OCTOPILOT_ENGINE=plan` first, which logs what the engine would do, and
+`scan.py drain --plan` shows what a drain would do with each request. Set `on` once
+that looks right. Under this layer the orchestrator is retired, so `plan` leaves
+nobody acting: deploy with the engine already `on`.
+
+Rerun the launcher right after pulling this layer. Until it runs, the old headless
+keeps its code and engine mode: with the engine off nothing drains the requests, and
+the old orchestrator's doorbell exits at once.
+
+- **GUI**: run Open Octopilot (or `herdr/open-gui.sh`). When an orchestrator is still
+  running, it retires it and restarts the headless. If you closed the orchestrator
+  yourself before pulling, nothing restarts the headless: end the old
+  `octopilot-headless` terminal first (`hc kill`, or close its tab), then rerun the
+  launcher. Then `/clear` the prompter and run `/octopilot:prompter`, and reload the
+  mods (or restart herdr-app) so the new mod code reads `view.json`.
+- **TUI**: close the old `octopilot` pane (the messenger). Restart the dashboard pane:
+  `q`, then reopen it (`prefix+a`). The curses dashboard is the engine's host and keeps
+  running the old code until it is restarted. Then `/clear` the prompter and run
+  `/octopilot:prompter` in it.
+
+To change `OCTOPILOT_ENGINE` later, end the `octopilot-headless` terminal and then rerun
+the launcher (GUI) or reopen the dashboard pane (TUI): a rerun keeps a running headless
+as it is, so the mode it started with stays. The TUI dashboard pane is a herdr plugin
+pane and takes the herdr server's environment (`open.sh` passes none), so for the TUI
+the variable must be set in the shell that starts herdr, and changing it means
+restarting the herdr server, not just the pane.
+
+**Rollback.** Previous main with `OCTOPILOT_ENGINE=off` is not enough: the previous
+launcher never restarts a running headless, which keeps acting, and it starts a new
+messenger. End the `octopilot-headless` terminal first (GUI: `hc kill` it, or close its
+tab; TUI: `q` in the dashboard pane). Unset any `OCTOPILOT_ENGINE=on` override (for the
+TUI, in the shell that starts herdr, then restart herdr), then rerun the old launcher
+(GUI) or reopen the dashboard pane with the old code (TUI). The old launcher may warn
+that the prompter pane is not recorded in the tab (`octopilot.chat`): the chat and
+kitchen records lived on the killed headless. The existing tab and kitchen stay, and
+the warning is harmless.
 
 ## What it shows
 
 | Section | Rows |
 |---|---|
 | 🔴 Needs you | `CAPPED`, `READY`, `PUSHED`, `STALLED`, `CLOSED`, agents waiting on a question, and agents whose last report was `blocked`/`failed`/`stalled`/`capped` |
-| ⏭ Next tick | `MERGED`, `REVIEW`, `FEEDBACK`, `BOOTING` -- what the orchestrator will do on its next tick |
+| ⏭ Next tick | `MERGED`, `REVIEW`, `FEEDBACK`, `BOOTING` -- what the engine does on its next tick |
 | 🟡 Running | `WORKING`, and anything spawned since the last GitHub refresh |
-| ✔ Done | `DONE`, `GONE`, and cards you parked with `d` (they keep their workspace and hold no slot; new feedback or a re-requested review brings them back). Done rows without a workspace are hidden; `D` shows them |
+| ✔ Done | `DONE`, `GONE`, and cards you parked with `d` (they keep their tab or workspace and hold no slot; new feedback or a re-requested review brings them back). Done rows without a tab or workspace are hidden; `D` shows them |
 | ⚪ Pick next | `PROPOSE` |
 
 Agent state comes from herdr every 3s, heartbeats, rounds and reports the moment
 they are written, and GitHub (PR state, CI) every `DASHBOARD_REFRESH_SECS`
 (config.sh, 120s) or right after an event that changes the table. Several open
 dashboards share one refresh. GitHub notifications are polled every 60s
-(`NOTIFY_POLL_SECS`) and trigger an early refresh; a new Next tick row rings the
-orchestrator's doorbell once (`request tick`).
+(`NOTIFY_POLL_SECS`) and trigger an early refresh. Each GitHub pass runs `scan.py tick`
+(`snapshot`, which saves nothing, where the engine may not run), and the engine acts on
+the Next tick rows itself. `OCTOPILOT_ENGINE` picks what it does: `on` (the default,
+set in config.sh) acts; `plan` logs the tick's row actions as "would ..." without acting,
+and `off` acts on nothing. It is read when open-gui.sh (or the TUI dashboard pane)
+starts; to change it, see Upgrading from the orchestrator. The dashboard drains the inbox only under `on`, so under
+`plan` and `off` requests wait there (`scan.py drain --plan` prints what a drain would
+do). Under `on`, the dashboard runs `scan.py drain` at once on each request it sees, and
+at least every 60s (`DRAIN_EVERY`). The `g`/`n`/`i` keys and the prompter's commands are
+requests, queued for the engine.
 
 ## Keys
 
 | Key | Does |
 |---|---|
 | `↑↓` / `jk` | move |
-| `⏎` | go to the agent, in its own workspace |
+| `⏎` | go to the agent: in the GUI, its space, then its tab (a settled one comes back), then the agent's terminal; in the TUI, the agent's pane |
 | `v` | the agent in a popup over the dashboard; `ctrl+b q` closes it and leaves the agent running |
-| `a` | go to the prompter (the orchestrator if there is none) |
-| `t` | shell in the item's worktree |
+| `a` | go to the prompter (refused when none runs) |
+| `t` | shell in the item's worktree: in the GUI, a new tab in its space (the Octopilot space for a worker tab) |
 | `o` | PR or issue in the browser, opened on the computer you are at (the mod runs `xdg-open`, `open` or `start`), not on the octopilot's machine; no URL: `dashboard.sh --action browser` |
-| `g` / `n` | on a Pick next row: queue `go <key>` / `no <key>` for the orchestrator (press twice; past `WIND_DOWN_AT` the second press confirms starting anyway) |
+| `g` / `n` | on a Pick next row: queue `go <key>` / `no <key>` for the engine (press twice; past `WIND_DOWN_AT`, or with the slots full (`ACTIVE + UNTRACKED` at `MAX_ACTIVE`), the second press confirms starting anyway, and the alert's `g` sends it with `(confirmed past wind-down)` and/or `(confirmed over cap)`) |
 | `R` | on a CAPPED row: grant another `MAX_REVIEW_ROUNDS` review rounds (press twice) |
 | `e` / `x` | on a PUSHED (stale) row: queue a re-review / ack the new commits (press twice) |
-| `i` | start an investigation: type the repo, the question, and whether it is read-only |
+| `i` | start an investigation: type the repo, the question, and whether it is read-only. Past `WIND_DOWN_AT` or with the slots full, the second press confirms starting anyway, as for `g` |
 | `P` | pause / resume octopilot (press twice) |
-| `z` | detach a tracked item: closes its workspace, keeps the worktree, stops tracking it (press twice) |
-| `del` / `⌫` | remove a tracked item: deletes its workspace and worktree, stops tracking it (press twice). Not on MERGED rows: the orchestrator cleans those up |
+| `z` | detach a tracked item: closes its tab (or its workspace or space), keeps the worktree, stops tracking it (press twice) |
+| `del` / `⌫` | remove a tracked item: deletes its tab (or its workspace or space) and worktree, stops tracking it (press twice). The confirm says what goes: `tab and worktree deleted`, `workspace and worktree deleted`, or `worktree kept` for an item with no session. Refused on MERGED and RESTACK rows: the engine handles those |
 | `r` | refresh from GitHub now |
-| `d` | on a tracked card: move it to Done / back (press twice). It keeps its workspace and holds no slot; the orchestrator still merges and cleans up |
+| `d` | on a tracked card: move it to Done / back (press twice). It keeps its tab or workspace and holds no slot; the engine still merges and cleans up |
 | `D` | show / hide done rows (DONE, GONE) |
 | `q` | quit |
