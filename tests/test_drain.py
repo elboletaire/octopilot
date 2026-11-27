@@ -141,6 +141,30 @@ class DrainTest(RequestCase):
             f"would refuse (already tracked as {PR}): go {PR}",
             f"would hold (cap): go {ISSUE}"])
 
+    def test_plan_logs_hold_and_unhold_without_acting(self):
+        self.save({PR: {"mode": "fix", "branch": "feat/b", "session": "w9",
+                        "phase": "working", "pr": 31}},
+                  inbox=inbox(f"REQUEST hold {PR} later", f"REQUEST park {PR}",
+                              f"REQUEST unhold {PR}"))
+        before = scan.load()
+        self.assertEqual(self.drain(mode="plan"), [
+            f"would handle: hold {PR} later",
+            f"would handle: park {PR}",
+            f"would handle: unhold {PR}"])
+        self.assertEqual(scan.load(), before)
+        self.assertFalse(os.path.exists(scan.EVENTS_FILE))
+
+    def test_the_drain_runs_hold_then_unhold_in_order(self):
+        self.save({PR: {"mode": "fix", "branch": "feat/b", "session": "w9",
+                        "phase": "working", "pr": 31}},
+                  inbox=inbox(f"REQUEST hold {PR} later", f"REQUEST unhold {PR}",
+                              f"REQUEST unhold {PR}"))
+        lines = self.drain()
+        self.assertIn("kept, holds no slot", lines[0])
+        self.assertIn("holds a slot again", lines[1])
+        self.assertIn("refused:", lines[2])
+        self.assertEqual(self.inbox_texts(), [])
+
     def test_plan_shows_a_paused_hold(self):
         self.save({}, paused=True, inbox=inbox(f"REQUEST go {ISSUE}"))
         self.assertEqual(self.drain(mode="plan"),

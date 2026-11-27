@@ -750,7 +750,10 @@ Request = namedtuple("Request", "verb args confirmed over_cap")
 CONFIRMED_PAST = "(confirmed past wind-down)"
 CONFIRMED_OVER = "(confirmed over cap)"
 
-ONE_TARGET = ("go", "no", "detach", "re-review", "ack")
+ONE_TARGET = ("go", "no", "detach", "re-review", "ack", "unhold")
+# The older names of hold and unhold, which the prompter and the dashboard may
+# still queue. They run as the new verbs.
+REQUEST_ALIASES = {"park": "hold", "unpark": "unhold"}
 NO_ARGS = ("pause", "resume", "tick")
 INVESTIGATE = re.compile(r"/investigate\s+(--read-only\s+)?(\S+)\s+(.+)", re.DOTALL)
 CODE = re.compile(r"/octopilot-code\s+(.+)", re.DOTALL)
@@ -798,7 +801,13 @@ def parse_request(text):
     words = line.split(maxsplit=1)
     if not words:
         return unknown
-    verb, rest = words[0], (words[1] if len(words) > 1 else "")
+    verb = REQUEST_ALIASES.get(words[0], words[0])
+    rest = words[1] if len(words) > 1 else ""
+    # hold <target> [reason]: the reason is free text, so only the target is split off.
+    if verb == "hold" and rest:
+        parts = rest.split(maxsplit=1)
+        return Request(verb, (parts[0], parts[1] if len(parts) > 1 else ""),
+                       confirmed, over_cap)
     if verb in ONE_TARGET and len(rest.split()) == 1:
         return Request(verb, (rest,), confirmed, over_cap)
     if verb in NO_ARGS and not rest:
@@ -1225,10 +1234,37 @@ def do_ack(req, ctx):
     if key is None:
         return line
     with scan.locked():
-        r = scan.ack_push(scan.load(), key)
+        r = scan.ack_item(scan.load(), key)
     if not r["ok"]:
         return _refuse(ctx, req.verb, key, r["error"])
     return f"{key}: acked"
+
+
+def do_hold(req, ctx):
+    """hold <target> [reason]: the user holds the item: no slot, and no prompt
+    goes out until it wakes (scan.hold_item)."""
+    import scan
+    key, line = _target_of(req, ctx)
+    if key is None:
+        return line
+    with scan.locked():
+        r = scan.hold_item(scan.load(), key, req.args[1])
+    if not r["ok"]:
+        return _refuse(ctx, req.verb, key, r["error"])
+    return r["msg"]
+
+
+def do_unhold(req, ctx):
+    """unhold <target>: the user lets a held item go again. Not held is refused."""
+    import scan
+    key, line = _target_of(req, ctx)
+    if key is None:
+        return line
+    with scan.locked():
+        r = scan.unhold_item(scan.load(), key)
+    if not r["ok"]:
+        return _refuse(ctx, req.verb, key, r["error"])
+    return r["msg"]
 
 
 def do_pause(req, ctx):
@@ -1284,6 +1320,7 @@ def _unknown(req, ctx):
 
 
 HANDLERS = {"go": do_go, "no": do_no, "detach": do_detach, "ack": do_ack,
+            "hold": do_hold, "unhold": do_unhold,
             "pause": do_pause, "resume": do_pause, "re-review": do_re_review,
             "investigate": do_investigate, "investigate-read-only": do_investigate,
             "code": do_code, "tick": do_tick}

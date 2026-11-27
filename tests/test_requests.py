@@ -1,5 +1,6 @@
 """The request handlers other than go: each request run against a scratch state,
 with GitHub, herdr and git faked (tests/stand.py)."""
+import os
 import unittest
 from unittest import mock
 
@@ -55,6 +56,67 @@ class NoDetachAckTest(RequestCase):
                                             {"pr": 31, "branch": "feat/b"}]}})
         self.assertEqual(self.handle(f"no {PR}"), f"{REPO}#30: declined")
         self.assertEqual(scan.load()["declined"], [f"{REPO}#30"])
+
+    def test_hold_keeps_its_multi_word_reason_and_holds_no_slot(self):
+        self.save({PR: {"mode": "fix", "branch": "feat/b", "session": "w9",
+                        "phase": "working", "pr": 31}})
+        out = self.handle(f"hold {PR} waiting on the db")
+        self.assertIn("kept, holds no slot", out)
+        self.assertEqual(scan.hold_of(scan.load()["items"][PR])["reason"],
+                         "waiting on the db")
+        self.assertIn('"kind": "hold"', self.events())
+
+    def test_park_and_unpark_run_as_hold_and_unhold(self):
+        self.assertEqual(parse_request(f"park {PR}").verb, "hold")
+        self.assertEqual(parse_request(f"park {PR}").args, (PR, ""))
+        self.assertEqual(parse_request(f"unpark {PR}").verb, "unhold")
+        self.save({PR: {"mode": "fix", "branch": "feat/b", "session": "w9",
+                        "phase": "working", "pr": 31}})
+        self.handle(f"park {PR}")
+        self.assertIsNotNone(scan.hold_of(scan.load()["items"][PR]))
+        self.handle(f"unpark {PR}")
+        self.assertIsNone(scan.hold_of(scan.load()["items"][PR]))
+
+    def test_hold_works_for_an_item_without_a_pr(self):
+        issue = f"{REPO}!12"
+        self.save({issue: {"mode": "fix", "branch": "feat/i", "session": "w9",
+                           "phase": "working"}})
+        self.assertIn("kept, holds no slot", self.handle(f"hold {issue} later"))
+        self.assertEqual(scan.hold_of(scan.load()["items"][issue])["reason"], "later")
+
+    def test_unhold_of_an_item_not_on_hold_is_refused_and_logs_no_unhold(self):
+        self.save({PR: {"mode": "fix", "branch": "feat/b", "session": "w9",
+                        "phase": "working", "pr": 31}})
+        out = self.handle(f"unhold {PR}")
+        self.assertIn(f"refused: {PR} is not on hold", out)
+        self.assertEqual([k for k, _, _ in self.logs], ["request-refused"])
+        self.assertFalse(os.path.exists(scan.EVENTS_FILE))
+
+    def test_unhold_lets_a_held_item_go(self):
+        self.save({PR: {"mode": "fix", "branch": "feat/b", "session": "w9",
+                        "phase": "working", "pr": 31}})
+        self.handle(f"hold {PR}")
+        self.assertIn("holds a slot again", self.handle(f"unhold {PR}"))
+        self.assertIn('"kind": "unhold"', self.events())
+
+    def test_hold_by_bare_number_names_the_tracked_row(self):
+        self.save({PR: {"mode": "fix", "branch": "feat/b", "session": "w9",
+                        "phase": "working", "pr": 31}})
+        self.snapshot(rows=[{"key": PR, "kind": "HOLD"}])
+        self.assertIn("kept, holds no slot", self.handle("hold 31"))
+        self.assertIsNotNone(scan.hold_of(scan.load()["items"][PR]))
+
+    def test_ack_on_a_read_only_report_marks_it_read(self):
+        self.save({PR: {"mode": "fix", "branch": "feat/b", "session": "w9",
+                        "phase": "working", "pr": 31, "read_only": True,
+                        "last_report": {"state": "ready", "sha": HEAD,
+                                        "msg": "done", "at": 1234}}})
+        self.assertEqual(self.handle(f"ack {PR}"), f"{PR}: acked")
+        self.assertEqual(scan.load()["items"][PR]["report_acked"], 1234)
+
+    def test_bare_hold_and_unhold_are_unknown_requests(self):
+        for text in ("hold", "park", "unhold a b", "unpark"):
+            self.assertEqual(parse_request(text).verb, "unknown", text)
 
     def test_pause_and_resume_set_the_flag(self):
         self.assertEqual(self.handle("pause"), "paused")
