@@ -57,7 +57,7 @@ case "$1 $2" in
     # ls --label <label> reads ls-<label>.json, a plain ls reads ls.json; none means no terminals.
     if [ "$3" = --label ]; then f="$SHIM/ls-$4.json"; else f="$SHIM/ls.json"; fi
     if [ -f "$f" ]; then cat "$f"; else echo '{"terminals": []}'; fi ;;
-  "get "*) cat "$SHIM/get-$2.json" 2>/dev/null || echo '{}' ;;
+  "get "*) [ -f "$SHIM/get-$2.gone" ] && exit 1; cat "$SHIM/get-$2.json" 2>/dev/null || echo '{}' ;;
 esac
 ''',
     # hc run: the address is t-<agent> for a labelled agent, else t-<n>. Each run is kept in runs.jsonl.
@@ -836,6 +836,24 @@ class OpenGuiWindowTest(unittest.TestCase):
         self.assertLess(started, trace.index("herdr-app do terminal.keep --terminal th"), trace)
         self.assertIn("herdr-app do terminal.keep --terminal th", trace)
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+
+
+    def test_a_code_tab_listing_a_gone_terminal_does_not_refuse_the_run(self):
+        self.shown_host()
+        # The code tab still lists a terminal that hc no longer knows: it is not in the way.
+        def tab(tid, name, terminal, pane):
+            return {"id": tid, "name": name, "folder": None, "terminals": [
+                {"terminal": terminal, "pane": pane, "name": None}], "mods": []}
+        self.write("core-layout.json", json.dumps([{"id": "s1", "name": "Octopilot", "folder": None, "tabs": [
+            {"id": "t1", "name": "OCTOPILOT", "terminals": [{"terminal": "th", "pane": "p1", "name": None}],
+             "mods": []},
+            {"id": "t6", "name": "Octopilot (code changes)", "terminals": [
+                {"terminal": "tg", "pane": "p6", "name": None}], "mods": []}]}]))
+        self.write("get-tg.gone", "")
+        res = self.launch()
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertNotIn("which is not the", res.stdout + res.stderr)
+        self.assertIn("hc get tg --json", self.trace())
 
 
 if __name__ == "__main__":

@@ -789,6 +789,8 @@ add_code_tab() {
   if [ -n "$old" ]; then
     for t in $(tab_terminals "$old"); do
       if [ "$t" = "$code" ]; then continue; fi
+      # Still listed by the tab, but gone to hc (ended by hand): not in the way.
+      if ! "$HC" get "$t" --json >/dev/null 2>&1; then continue; fi
       if is_code_shell "$t"; then
         # Its claude is elsewhere: the shell is ended, as reap_dead would. Else the claude starts here.
         if [ -n "$code" ]; then end_terminal "$t"; else shells+="$t "; fi
