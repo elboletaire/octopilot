@@ -1,5 +1,7 @@
 """The return-value functions the CLI and the executor share: the state they
 leave behind and what they return, with the GitHub, herdr and git calls faked."""
+import contextlib
+import io
 import json
 import unittest
 from unittest import mock
@@ -159,12 +161,14 @@ class SpawnItemTest(unittest.TestCase):
         state["items"] = {}
         return state
 
-    def host(self, warning=None):
+    def host(self, warning=None, note=None):
         def spawn_host(key, path, base, branch, title, new_branch, model):
             host = {"backend": "herdr", "session": "w7", "agent": "ap-app-1",
                     "worktree": "/repo/app/.worktrees/feat-x"}
             if warning:
                 host["warning"] = warning
+            if note:
+                host["note"] = note
             return host
         return spawn_host
 
@@ -178,9 +182,19 @@ class SpawnItemTest(unittest.TestCase):
         self.assertEqual(r, {"ok": True, "error": None, "key": "octo/app!40",
                              "template": "work", "base": "main", "slug": "octo/app",
                              "prev": None, "stack": None, "warning": None,
-                             "model": scan.MODEL_FOR.get("work", "")})
+                             "note": None, "model": scan.MODEL_FOR.get("work", "")})
         item = state["items"]["octo/app!40"]
         self.assertEqual((item["mode"], item["branch"], item["session"]), ("fix", "feat/x", "w7"))
+
+    def test_note_comes_back_and_is_not_saved_on_the_item(self):
+        state = self.registry_state()
+        note = "no Octopilot workspace: the worker opens as its own workspace"
+        with fake.fake_world(), \
+                mock.patch.object(scan, "find_session", return_value=None), \
+                mock.patch.object(scan, "spawn_host", side_effect=self.host(note=note)):
+            r = scan.spawn_item(state, "octo/app!40", "feat/x", "Title", True)
+        self.assertEqual((r["note"], r["warning"]), (note, None))
+        self.assertNotIn("note", state["items"]["octo/app!40"])
 
     def test_warning_comes_back_and_the_item_is_still_tracked(self):
         state = self.registry_state()
@@ -333,6 +347,21 @@ class StateFunctionsTest(unittest.TestCase):
             self.assertEqual(scan.set_paused(state, False)["paused"], False)
             self.assertFalse(state["paused"])
             self.assertEqual(events(), ["pause", "resume"])
+
+
+class SpawnNoteTest(unittest.TestCase):
+    def test_the_spawn_command_prints_the_note_and_not_as_a_warning(self):
+        state = {"items": {"octo/app!40": {"mode": "fix", "agent": "ap-app-1",
+                                           "worktree": "/wt", "session": "w7"}}}
+        r = {"template": "work", "prev": None, "base": "main", "slug": "octo/app",
+             "stack": None, "warning": None, "note": "no Octopilot workspace",
+             "model": "m"}
+        out = io.StringIO()
+        with mock.patch.object(scan, "spawn_item", return_value=r), \
+                contextlib.redirect_stdout(out):
+            scan.spawn(state, "octo/app!40", "feat/x", "T", True)
+        self.assertIn("NOTE: no Octopilot workspace", out.getvalue())
+        self.assertNotIn("WARNING", out.getvalue())
 
 
 if __name__ == "__main__":
