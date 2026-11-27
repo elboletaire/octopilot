@@ -59,18 +59,19 @@ export function engineLabel(engine, view, now) {
   return { text: "engine on", tone: "dim" };
 }
 
-// Board columns with the rows they show (Done hides closed rows unless asked),
-// and the Pick next tree as the lines it draws, plus every key the cursor can
-// stand on, in the order j/k walk them.
+// The board's columns in this order, found by id; a column with any other id is skipped
+// (CONTRACT.md).
+const COLUMN_ORDER = ["running", "needs", "hold", "done"];
+
+// Board columns with the rows they show, and the Pick next tree as the lines it draws, plus
+// every key the cursor can stand on, in the order j/k walk them. Done shows none of its entries
+// until D toggles it; `hidden` counts them.
 export function arrange(view, { showDone, expanded }) {
-  const columns = view.columns.map((c) => {
-    if (c.id !== "done") return { ...c, shown: c.entries, hidden: 0 };
-    const open = c.entries.filter((e) => e.open);
-    return {
-      ...c,
-      shown: showDone ? c.entries : open,
-      hidden: showDone ? 0 : c.entries.length - open.length,
-    };
+  const columns = COLUMN_ORDER.flatMap((id) => {
+    const c = view.columns.find((x) => x.id === id);
+    if (!c) return [];
+    if (id !== "done") return [{ ...c, shown: c.entries, hidden: 0 }];
+    return [{ ...c, shown: showDone ? c.entries : [], hidden: showDone ? 0 : (c.hidden ?? c.entries.length) }];
   });
   const order = columns.flatMap((c) => c.shown.map((e) => e.key));
   const repoOf = {};
@@ -97,6 +98,18 @@ export function resolveSel(sel, arr) {
   const header = arr.repoOf[sel];
   if (header && arr.selectable.includes(header)) return header;
   return arr.selectable[0] ?? null;
+}
+
+// The engine's next action on a card (CONTRACT.md, Engine badge), or null when none is pending.
+export function engineBadge(engine) {
+  if (!engine) return null;
+  return engine.paused ? "⏭ held: paused" : `⏭ ${engine.label}`;
+}
+
+// A card's hold line (CONTRACT.md, hold): who holds it and why, the reason left out when none was given.
+export function holdLabel(hold) {
+  if (!hold) return null;
+  return hold.reason ? `on hold: ${hold.by} — ${hold.reason}` : `on hold: ${hold.by}`;
 }
 
 // The pane of a mod when it is the only one in the window, else null (several copies
@@ -177,7 +190,7 @@ export const actionKey = (k) => (k.length === 1 ? k : k.toLowerCase());
 // Why a parsed view.json can't be drawn, or null when it can.
 export function viewError(v) {
   if (!v || typeof v !== "object" || v.v !== 1) return "view.json is not version 1";
-  if (!Array.isArray(v.columns) || v.columns.length !== 4) return "view.json has no four columns";
+  if (!Array.isArray(v.columns)) return "view.json has no columns";
   if (!v.header || typeof v.header !== "object") return "view.json has no header";
   return null;
 }

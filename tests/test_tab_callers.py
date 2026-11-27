@@ -8,7 +8,7 @@ from unittest import mock
 
 from tests import fake
 import scan
-from tests.test_rerequest import KEY, new_state, pr_detail
+from tests.test_rerequest import HEAD, KEY, new_state, pr_detail
 from tests.test_returns import FakeHost
 from tests.test_tick import events, run_tick
 
@@ -198,14 +198,28 @@ class RehomeTest(unittest.TestCase):
         self.assertEqual([r[0] for r in rows], ["CLOSED"])
         self.assertIn(KEY, state["items"])
 
-    def test_a_parked_item_you_parked_is_done_and_holds_no_slot(self):
-        state = tab_item(parked={"at": 1, "requested": False, "head": ""})
+    def test_a_held_item_you_held_is_on_hold_and_holds_no_slot(self):
+        # Already requested at this head: a re-request would wake it.
+        state = tab_item(hold={"by": "you", "reason": "", "since": 1,
+                               "requested": True, "head": HEAD})
         parked = {"session": None, "ids": [], "agent": "ap-app-5", "pane": "t9"}
         with fake.fake_world(all_sessions=([], {"hc"}, {SPACE}), backend_for=scan.HC,
                              parked_agent=parked, pr_detail=pr_detail):
             rows = scan.scan(state)[0]
-        self.assertEqual([r[0] for r in rows], ["DONE"])
+        self.assertEqual([r[0] for r in rows], ["HOLD"])
         self.assertIn(KEY, state["items"])
+
+    def test_a_held_item_whose_terminal_was_parked_still_wakes(self):
+        state = tab_item(hold={"by": "you", "reason": "", "since": 1,
+                               "requested": False, "head": ""})
+        parked = {"session": None, "ids": [], "agent": "ap-app-5", "pane": "t9"}
+        with fake.fake_world(all_sessions=([], {"hc"}, {SPACE}), backend_for=scan.HC,
+                             parked_agent=parked, pr_detail=pr_detail):
+            info = {}
+            rows = scan.scan(state, info=info)[0]
+        self.assertEqual(info["revived"], [(KEY, "re-requested")])
+        self.assertNotIn("hold", state["items"][KEY])
+        self.assertEqual([r[0] for r in rows], ["WORKING"])
 
     def test_a_parked_agent_shown_in_a_tab_is_rehomed(self):
         state = tab_item()

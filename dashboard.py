@@ -58,6 +58,8 @@ SNAPSHOT_LOCK = SNAPSHOT_FILE + ".lock"
 # dashboard so only one of them notifies.
 NOTIFIED_FILE = os.path.join(STATE_DIR, "notified.json")
 NOTIFIED_LOCK = NOTIFIED_FILE + ".lock"
+# The format of notified.json: {"v": 2, "seen": {item: [cause, ...]}}.
+NOTIFIED_VERSION = 2
 # GitHub notifications watermark, shared so whichever dashboard polls next
 # carries on from it; only the lock holder polls.
 NOTIFY_WATCH_FILE = os.path.join(STATE_DIR, "notifications.json")
@@ -66,9 +68,12 @@ NOTIFY_WHY = {"READY": "ready to merge", "overdue": "re-review overdue",
               "CAPPED": "out of review rounds",
               "PUSHED": "stale: pushed, never re-requested",
               "STALLED": "agent not reporting", "stalled": "agent not reporting",
-              "CLOSED": "closed without merging", "blocked": "agent is blocked",
-              "failed": "agent's CI is failing", "capped": "out of review rounds",
-              "asking": "agent is asking something"}
+              "CLOSED": "closed without merging",
+              "BLOCKED": "agent blocked, failed or stalled",
+              "blocked": "agent is blocked", "failed": "agent reported failed",
+              "capped": "out of review rounds", "asking": "agent is asking something",
+              "ready": "report to read", "woke": "back from hold",
+              "engine_error": "engine failed", "send_failed": "engine failed"}
 REFRESH_SECS = int(os.environ.get("DASHBOARD_REFRESH_SECS", "120"))
 NOTIFY_POLL_SECS = int(os.environ.get("NOTIFY_POLL_SECS", "60"))
 MAX_REVIEW_ROUNDS = int(os.environ.get("MAX_REVIEW_ROUNDS", "3"))
@@ -106,12 +111,14 @@ ROW_ACTIONS = (
     ("focus", "\r", "open"), ("peek", "v", "agent"), ("shell", "t", "shell"),
     ("browser", "o", "browser"), ("go", "g", "go"), ("no", "n", "no"),
     ("grant", "R", "another round"), ("rereview", "e", "re-review"),
-    ("ack", "x", "ack"), ("detach", "z", "detach"), ("park", "d", "done"),
-    ("unpark", "d", "undone"), ("remove", "\x1b[3~", "remove"),
+    ("ack", "x", "ack"), ("detach", "z", "detach"), ("hold", "d", "hold"),
+    ("unhold", "d", "resume"), ("remove", "\x1b[3~", "remove"),
 )
 ROW_KEYS = {aid: key for aid, key, _ in ROW_ACTIONS}
-ROW_IDS = set(ROW_KEYS)
-# The TUI keys that map straight to a row action (d picks park or unpark).
+# The older names of hold and unhold, still accepted by --action.
+ROW_ALIASES = {"park": "hold", "unpark": "unhold"}
+ROW_IDS = set(ROW_KEYS) | set(ROW_ALIASES)
+# The TUI keys that map straight to a row action (d picks hold or unhold).
 KEY_ROW = {"\r": "focus", "\n": "focus", "v": "peek", "t": "shell",
            "o": "browser", "g": "go", "n": "no", "R": "grant", "e": "rereview",
            "x": "ack", "z": "detach", "\x1b[3~": "remove"}
@@ -119,25 +126,23 @@ KEY_NAMES = {"\r": "Enter", "\x1b[3~": "Delete"}
 # Terminals send Backspace (Shift+Backspace too) as these bytes; Macs have no Delete key.
 KEY_ALIASES = {"\x7f": "\x1b[3~", "\x08": "\x1b[3~"}
 
-# Rows by who has the next move. Agent reports and blocked agents are moved
-# into NEEDS on top of these; see build().
-NEEDS_ROWS = {"CAPPED", "READY", "PUSHED", "STALLED", "CLOSED"}
-# Rows the engine acts on at its next tick, not the user (the note says what).
-ORCH_ROWS = {"MERGED": "cleanup + rebase fan-out",
-             "RESTACK": "restack + rebase-stack",
-             "REVIEW": "reboot for review",
-             "FEEDBACK": "send address-feedback", "BOOTING": "send review prompt"}
+# Rows by who has the next move: column_of() places them. A live report is
+# read by scan.live_report(), the rule the scan itself uses.
+NEEDS_ROWS = {"CAPPED", "READY", "PUSHED", "STALLED", "BLOCKED", "CLOSED"}
 RUN_ROWS = {"WORKING"}
-DONE_ROWS = {"DONE", "GONE"}
-# Rows that keep a parked card out of Done, whatever the snapshot's age: each
-# needs the engine or the user now.
-PARK_EXEMPT = {"MERGED", "RESTACK", "CLOSED", "GONE", "FEEDBACK"}
+# The engine's next action on a card: the ⏭ badge (herdr-app/CONTRACT.md).
+ENGINE_ACTIONS = {"MERGED": ("cleanup", "cleaning up"),
+                  "RESTACK": ("restack", "restacking"),
+                  "REVIEW": ("review", "starting review"),
+                  "BOOTING": ("boot", "sending review"),
+                  "FEEDBACK": ("feedback", "sending feedback")}
 PICK_ROWS = {"PROPOSE"}
 NOTE_ROWS = {"UNCLONED", "STALE", "UNKNOWN"}
 REPORT_NEEDS = {"blocked", "failed", "stalled", "capped"}
 # Events after which the GitHub view is worth refreshing early.
 KICK_EVENTS = {"report", "spawn", "sent", "cleanup", "track", "detach",
-               "park", "unpark", "untrack", "decline", "merged", "tick-asked"}
+               "hold", "unhold", "park", "unpark", "untrack", "decline",
+               "merged", "tick-asked"}
 # Events that wake the engine's drain: a request queued.
 DRAIN_EVENTS = {"request"}
 # The drain runs at once on those, and at least this often otherwise.
@@ -205,6 +210,21 @@ def desktop(title, body):
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except OSError:
         pass
+
+
+def notify_text(e):
+    """The headline of a desktop notification for a card in Needs you."""
+    why = e["why"] or "needs you"
+    note = e["note"] or ""
+    if why == "woke" and "back from hold" in note:
+        return note[note.index("back from hold"):]
+    if why in ("engine_error", "send_failed"):
+        eng = e["engine"] or {}
+        subject = eng.get("label") if eng.get("action") == "send" \
+            else eng.get("action")
+        if subject:
+            return f"engine: {subject} failed"
+    return NOTIFY_WHY.get(why, why)
 
 
 def poll_notifications(watch):
@@ -328,6 +348,8 @@ class Model:
         self.snap_started = 0
         self.state = read_json(STATE_FILE, {}) or {}
         self.state_mtime = 0
+        # The cards in Needs you at the last notify(), for its tick-to-tick check.
+        self.needs_before = set()
         self.events = []
         self.events_size = 0
         self.live = {}
@@ -524,7 +546,7 @@ class Model:
             data, _ = self.build()
             self.notify(data)
             cur = {}
-            for section in ("needs", "orch", "running", "done"):
+            for section in ("needs", "running", "hold", "done"):
                 for e in data[section]:
                     # The sidebar is herdr's TUI: herdr-app agents have none.
                     if e["pane"] and \
@@ -539,25 +561,56 @@ class Model:
             last = cur
 
     def notify(self, data):
-        """A desktop notification when an item enters Needs you, once per
-        item and reason; herdr's own toasts stay inside herdr. The first run
-        only records what is already there, so a fresh dashboard does not
-        replay old news."""
+        """A desktop notification when a card enters Needs you for a cause it
+        has not notified for. Once per (item, cause): a card that bounces out
+        of Needs and back with the same cause stays quiet, and a new cause
+        (a new head, a new report) notifies again. The first run, with no
+        notified.json or one of an older format, only records the causes
+        already there, so a fresh dashboard does not replay old news. The
+        file's "needs" list (missing: empty) is the Needs set at the last
+        write, which the wait guard reads across a restart."""
+        needs_now = {e["key"] for e in data["needs"]}
+        before, self.needs_before = self.needs_before, needs_now
         if self.snap is None or not shutil.which("notify-send"):
             return
-        now_needs = {e["key"]: e for e in data["needs"]}
+        with self.lock:
+            items = dict((self.state or {}).get("items") or {})
+        # An empty read is no reason to forget every item: skip it.
+        if not items:
+            return
+        tracked = set(items)
+        for it in items.values():
+            tracked.update(it.get("prev_keys") or [])
         with open(NOTIFIED_LOCK, "w") as lk:
             fcntl.flock(lk.fileno(), fcntl.LOCK_EX)
-            first = not os.path.exists(NOTIFIED_FILE)
-            sent = read_json(NOTIFIED_FILE) or {}
-            out = {}
-            for k, e in now_needs.items():
-                why = e["why"] or "needs you"
-                out[k] = why
-                if not first and sent.get(k) != why:
-                    desktop(f"🔴 {short(k)}: {NOTIFY_WHY.get(why, why)}",
+            sent = read_json(NOTIFIED_FILE)
+            first = not (isinstance(sent, dict)
+                         and sent.get("v") == NOTIFIED_VERSION)
+            seen = {} if first else {k: set(c) for k, c in
+                                     (sent.get("seen") or {}).items()}
+            # Still in Needs you since the last tick, before or across a
+            # restart: the same wait, however its last_seen moved.
+            kept = set() if first else set(sent.get("needs") or [])
+            stayed = needs_now & (before | kept)
+            for e in data["needs"]:
+                causes = seen.setdefault(e["key"], set())
+                cause = e["cause"] or e["why"] or "needs you"
+                if cause in causes:
+                    continue
+                if cause.startswith("asking:") and e["key"] in stayed and \
+                        any(c.startswith("asking:") for c in causes):
+                    # A heartbeat moved last_seen mid-wait: keep one notice.
+                    causes -= {c for c in causes if c.startswith("asking:")}
+                    causes.add(cause)
+                    continue
+                causes.add(cause)
+                if not first:
+                    desktop(f"🔴 {short(e['key'])}: {notify_text(e)}",
                             f"{e['title']}\n{(e['note'] or '')[:200]}")
-            if out != sent or first:
+            out = {"v": NOTIFIED_VERSION, "needs": sorted(needs_now),
+                   "seen": {k: sorted(c) for k, c in seen.items()
+                            if k in tracked}}
+            if first or out != sent:
                 tmp = f"{NOTIFIED_FILE}.tmp.{os.getpid()}"
                 with open(tmp, "w") as fh:
                     json.dump(out, fh)
@@ -579,7 +632,7 @@ class Model:
         return key, None
 
     def build(self):
-        """Snapshot rows + live state -> {needs, orch, running, pick, done,
+        """Snapshot rows + live state -> {running, needs, hold, done, pick,
         notes} lists of entry dicts, plus the header numbers."""
         with self.lock:
             snap = self.snap or {}
@@ -590,10 +643,33 @@ class Model:
         items = state.get("items", {}) or {}
         declined = set(state.get("declined", []) or [])
         me = state.get("me")
-        out = {s: [] for s in ("needs", "orch", "running", "pick", "done",
+        out = {s: [] for s in ("running", "needs", "hold", "done", "pick",
                                "notes")}
         seen = set()
-        snap_at = snap.get("generated_at") or 0
+        # A queued send sits on the item it resolves to, if the item is there.
+        sends = collections.defaultdict(list)
+        for p in state.get("pending_sends") or []:
+            _, owner = self.item_for(items, p.get("key"))
+            if owner is not None:
+                sends[id(owner)].append(p)
+        paused = bool(state.get("paused"))
+
+        def place(row, key, it):
+            """A tracked row's entry, and the column it sits in."""
+            e = self.entry(row, key, it, live, sessions, now, me)
+            ctx = {"live": live, "paused": paused, "stalled": e["stalled"],
+                   "sends": sends.get(id(it), [])}
+            section, extras = column_of(row, it,
+                                        live.get(e["session"], {}), ctx)
+            e.update(extras, section=section, needs=section == "needs")
+            # herdr's live state is seconds old; the snapshot can be minutes
+            # old. An agent at work is running whatever its last row or
+            # report says, and the note says what it was.
+            kind = row.get("kind")
+            if section == "running" and e["agent"] == "running" and \
+                    kind not in RUN_ROWS | {"NEW", "GONE"} | set(ENGINE_ACTIONS):
+                e["note"] = f"working again · was {kind.lower()}"
+            return section, e
 
         for row in snap.get("rows", []):
             kind, key = row.get("kind"), row.get("key")
@@ -606,47 +682,21 @@ class Model:
             # an issue re-keyed to its PR is only in its item's prev_keys.
             if kind in PICK_ROWS and (it is not None or key in declined):
                 continue
-            parked = self.parked_done(row, it, snap_at)
-            e = self.entry(row, cur_key, it, live, sessions, now, me, parked)
             seen.add(cur_key)
-            if kind in NOTE_ROWS:
-                out["notes"].append(e)
-            elif kind in PICK_ROWS:
-                out["pick"].append(e)
-            # herdr's live state is seconds old; the snapshot can be minutes
-            # old. A tracked item's agent mid-turn -- prompted by the
-            # engine or by hand -- is running, whatever its last report
-            # or row says, DONE included.
-            elif it is not None and e["agent"] == "running" \
-                    and kind not in ORCH_ROWS and kind != "GONE":
-                e["needs"] = False
-                if kind not in RUN_ROWS:
-                    e["note"] = f"working again · was {kind.lower()}"
-                out["running"].append(e)
-            elif parked:
-                out["done"].append(e)
-            elif kind in DONE_ROWS:
-                out["done"].append(e)
-            elif e["needs"]:
-                out["needs"].append(e)
-            elif kind in ORCH_ROWS:
-                out["orch"].append(e)
-            elif kind in NEEDS_ROWS:
-                out["needs"].append(e)
+            if kind in NOTE_ROWS or kind in PICK_ROWS:
+                e = self.entry(row, cur_key, it, live, sessions, now, me)
+                out["notes" if kind in NOTE_ROWS else "pick"].append(e)
             else:
-                out["running"].append(e)
+                section, e = place(row, cur_key, it)
+                out[section].append(e)
 
         # Spawned or tracked since the last snapshot: show them right away.
         for k, it in items.items():
             if k in seen:
                 continue
-            row = {"kind": "NEW", "key": k, "title": it.get("question")}
-            parked = self.parked_done(row, it, snap_at)
-            e = self.entry(row, k, it, live, sessions, now, me, parked)
-            if parked and e["agent"] != "running":
-                out["done"].append(e)
-            else:
-                (out["needs"] if e["needs"] else out["running"]).append(e)
+            section, e = place({"kind": "NEW", "key": k,
+                                "title": it.get("question")}, k, it)
+            out[section].append(e)
 
         # Oldest wait first: the longer something has waited on you, the
         # more it is costing.
@@ -686,19 +736,7 @@ class Model:
         return {"mode": mode, "state": state,
                 "since_s": int(now - since) if since else None, "last": last}
 
-    def parked_done(self, row, it, snap_at):
-        """Whether a parked card (`d`) sits in Done. An older row predates the
-        park; a newer one counts only while its snapshot item is still parked
-        (a revival clears it). PARK_EXEMPT kinds never do.
-        """
-        at = ((it or {}).get("parked") or {}).get("at")
-        if not at or row.get("kind") in PARK_EXEMPT:
-            return False
-        if snap_at < at:
-            return True
-        return bool((row.get("item") or {}).get("parked"))
-
-    def entry(self, row, key, it, live, sessions, now, me, parked=False):
+    def entry(self, row, key, it, live, sessions, now, me):
         it = it or {}
         kind = row.get("kind")
         sess = it.get("session")
@@ -706,49 +744,29 @@ class Model:
         agent_state = ag.get("state")
         last = it.get("last_seen") or it.get("added")
         quiet = (now - last) if last else None
-        rep = it.get("last_report") or {}
-        # A report is current until the agent shows a later sign of life.
-        rep_live = bool(rep) and rep.get("at", 0) >= (it.get("last_seen") or 0)
+        rep = scan.live_report(it, live)
         # scan.py's STALLED rule, applied live: the snapshot can be two
         # minutes behind, and the red Quiet column used to say "stalled"
         # while the row still sat under Running.
         # An agent that reported and stopped is not stalled, it is done.
         stalled = (it.get("driver") == "agent" and kind in RUN_ROWS | {"NEW"}
                    and quiet is not None and quiet >= AGENT_STALL_MIN * 60
-                   and agent_state != "running" and not rep_live)
-        # A read-only investigation never gets a PR, so no READY row: its
-        # `ready` report is the moment the user has something to read.
-        rep_needs = REPORT_NEEDS | ({"ready"} if it.get("read_only")
-                                    else set())
-        needs = (kind in NEEDS_ROWS or stalled
-                 or (rep_live and rep.get("state") in rep_needs)
-                 or (agent_state == "waiting" and kind not in DONE_ROWS))
-        if parked:
-            needs = False
-        # Why it needs the user, for the desktop notification: one per reason.
-        # An overdue re-review is a READY row with its own reason, so its
-        # notification and a later plain READY one are told apart.
-        overdue = kind == "READY" and \
-            (row.get("fields") or {}).get("wait") == "overdue"
-        why = ("overdue" if overdue else kind) if kind in NEEDS_ROWS \
-            else "stalled" if stalled else rep.get("state") if rep_live \
-            and rep.get("state") in rep_needs \
-            else "asking" if agent_state == "waiting" else None
-        if rep_live:
+                   and agent_state != "running" and not rep)
+        hold = scan.hold_of(it) or {}
+        if rep:
             note = f"{rep.get('state')}: {rep.get('msg') or ''}"
         elif stalled:
             note = "agent not reporting"
-        elif parked:
-            note = "parked"
+        elif hold.get("by") == "you":
+            note = (f"held: {hold['reason']}" if hold.get("reason")
+                    else "held by you")
         elif it.get("engine_error"):
             note = it["engine_error"]
-        elif kind in ORCH_ROWS:
-            note = f"next tick: {ORCH_ROWS[kind]}"
         elif kind == "NEW":
             note = "spawned, waiting for the next GitHub refresh"
         else:
             note = row.get("note") or it.get("last_note") or ""
-        if agent_state == "waiting" and not rep_live:
+        if agent_state == "waiting" and not rep:
             note = "agent is asking something" + (f" · {note}" if note else "")
         mode = it.get("mode") or row.get("mode") or \
             (row.get("fields") or {}).get("mode")
@@ -768,18 +786,20 @@ class Model:
                      or (None if scan.is_tab(sess) else sess))
         pr = it.get("pr") or (split_key(key)[1] if split_key(key)[2] == "pr"
                               else None)
+        # build() places the card: its section, needs, engine, cause, report.
         return {"kind": kind, "key": key, "title": row.get("title") or
                 it.get("branch") or "", "url": row.get("url"),
                 "checks": row.get("checks"), "draft": row.get("draft"),
                 "session": sess, "space": space, "agent": agent_state,
                 "stalled": stalled,
                 "rounds": it.get("review_rounds"), "driver": it.get("driver"),
-                "quiet": quiet, "note": note, "needs": needs,
+                "quiet": quiet, "note": note, "needs": False,
                 "pick_kind": pick_kind, "path": sinfo.get("path"),
                 "branch": it.get("branch"), "pr": pr,
                 "stack": len(it.get("stack") or []),
                 "pane": ag.get("pane"), "open": bool(sess and sess in sessions),
-                "why": why}
+                "why": None, "hold": hold_view(row, it),
+                "engine": None, "cause": None, "report": None}
 
 
 def sidebar_tokens(e, section):
@@ -792,6 +812,130 @@ def sidebar_tokens(e, section):
             "ap_rounds": rnd,
             "ap_ci": CI_GLYPH.get(e["checks"] or "", ("", ""))[0],
             "ap_note": (e["note"] or "")[:48]}
+
+
+def held_by_you(it):
+    """Whether the user holds the item (`d`): its hold is by you."""
+    return (scan.hold_of(it) or {}).get("by") == "you"
+
+
+def hold_view(row, it):
+    """The entry's hold, whatever its section: the item's, else the row's (a
+    reviewer or author hold, its note as the reason). None when there is none."""
+    hold = scan.hold_of(it) or row.get("hold")
+    if not hold:
+        return None
+    return {"by": hold.get("by"), "reason": hold.get("reason") or ""}
+
+
+def send_failed(p):
+    """A queued send that went out and failed. A blocked one is waiting on
+    the agent, not failed."""
+    return bool(p.get("error")) and p["error"] != engine.BLOCKED
+
+
+def engine_badge(kind, sends, paused, failed=None):
+    """The ⏭ badge: the row's own engine action, then the action that failed
+    (a send's reason fails as a send), then a queued send (the failing one
+    first). None when nothing is pending."""
+    if kind in ENGINE_ACTIONS:
+        action, label = ENGINE_ACTIONS[kind]
+    elif failed:
+        labels = dict(ENGINE_ACTIONS.values())
+        action, label = (failed, labels[failed]) if failed in labels \
+            else ("send", failed)
+    elif sends:
+        first = next((p for p in sends if send_failed(p)), sends[0])
+        action, label = "send", first["reason"]
+    else:
+        return None
+    return {"action": action, "label": label, "paused": bool(paused)}
+
+
+def column_of(row, it, ag, ctx):
+    """Where a tracked row sits on the board: (section, extras). The first
+    placement rule that matches wins (herdr-app/CONTRACT.md, Placement).
+    extras: engine (the ⏭ badge), why (the reason a Needs card gives, for the
+    notification's text), cause (the key a notification is once per, or None)
+    and report (the live report state behind a BLOCKED or HOLD card, or None).
+    ctx: live (the scan's agents), sends (the item's queued sends), paused,
+    stalled (the dashboard's live check)."""
+    kind = row.get("kind")
+    it = it or {}
+    sends = ctx.get("sends") or []
+    failing = next((p for p in sends if send_failed(p)), None)
+    rep = scan.live_report(it, ctx["live"])
+    state = rep.get("state")
+    failed = it.get("engine_error_action") if it.get("engine_error") else None
+    extras = {"engine": engine_badge(kind, sends, ctx.get("paused"), failed),
+              "why": None, "cause": None, "report": None}
+    agent = ag.get("state")
+
+    def needs(why, cause):
+        extras.update(why=why, cause=cause)
+        return "needs", extras
+
+    if kind in ("MERGED", "RESTACK"):
+        return "running", extras
+    if kind == "GONE":
+        return "done", extras
+    if kind == "CLOSED":
+        return needs("CLOSED", f"CLOSED:{row.get('head') or ''}")
+    if it.get("engine_error"):
+        return needs("engine_error", f"engine-error:{it['engine_error']}:"
+                                     f"{it.get('engine_error_at')}")
+    if failing:
+        return needs("send_failed",
+                     f"send:{failing['reason']}:{failing['at']}")
+    if agent == "waiting":
+        # The episode: the last sign of life before the question.
+        return needs("asking", f"asking:{it.get('last_seen') or it.get('added')}")
+    if kind in ("REVIEW", "BOOTING", "FEEDBACK") or agent == "running":
+        return "running", extras
+    hold = scan.hold_of(it) or {}
+    last = it.get("last_report") or {}
+    newer = last.get("state") in REPORT_NEEDS and \
+        last.get("at", 0) > hold.get("since", 0)
+    if hold.get("by") == "you" and not newer:
+        return "hold", extras
+    if state in REPORT_NEEDS:
+        if state != "capped":
+            extras["report"] = state
+        return needs(state, f"report:{state}:{rep.get('at')}")
+    if state == "held":
+        extras["report"] = state
+        return "hold", extras
+    if state == "ready" and it.get("read_only"):
+        if it.get("report_acked") == rep.get("at"):
+            return "done", extras
+        return needs("ready", f"report:ready:{rep.get('at')}")
+    if kind in NEEDS_ROWS:
+        fields = row.get("fields") or {}
+        why = "overdue" if kind == "READY" and \
+            fields.get("wait") == "overdue" else kind
+        if kind == "BLOCKED" and fields.get("report") in REPORT_NEEDS:
+            why = fields["report"]
+        # Each kind's episode: the head of a READY or PUSHED card, the head
+        # and rounds of a CAPPED one, the last sign of life of a STALLED one
+        # and the report's time of a BLOCKED one.
+        episode = {"READY": row.get("head"), "PUSHED": row.get("head"),
+                   "CAPPED": f"{row.get('head')}:{it.get('review_rounds')}",
+                   "STALLED": it.get("last_seen") or it.get("added"),
+                   "BLOCKED": (it.get("last_report") or {}).get("at")}
+        cause = f"{why}:{episode[kind] or ''}" if kind in episode else why
+        # A card the user woke from a hold notifies once for its wake.
+        if "back from hold" in (row.get("note") or ""):
+            since = (it.get("woke") or {}).get("since")
+            return needs("woke", f"woke:{cause}:{since}")
+        return needs(why, cause)
+    if kind == "HOLD":
+        return "hold", extras
+    if kind == "DONE":
+        return "done", extras
+    if ctx.get("stalled"):
+        return needs("stalled",
+                     f"stalled:{it.get('last_seen') or it.get('added')}")
+    return "running", extras
 
 
 # ---------------------------------------------------------------- actions
@@ -997,6 +1141,25 @@ def browse_row(e):
     return Result(True, f"opening {short(e['key'])} in the browser")
 
 
+def agent_holds(model, it):
+    """Whether the item's agent reported held: its hold is the agent's, and
+    only the agent resumes it (by a message)."""
+    with model.lock:
+        live = dict(model.live)
+    return scan.live_report(it or {}, live).get("state") == "held"
+
+
+def unread_report(model, it):
+    """Whether a read-only investigation's ready report is still to be read:
+    the report `x` acknowledges."""
+    if not (it or {}).get("read_only"):
+        return False
+    with model.lock:
+        live = dict(model.live)
+    rep = scan.live_report(it, live)
+    return rep.get("state") == "ready" and it.get("report_acked") != rep.get("at")
+
+
 def row_refusal(model, aid, e):
     """Why the TUI refuses aid on this row, as its message; None when it runs."""
     kind = e["kind"]
@@ -1014,23 +1177,32 @@ def row_refusal(model, aid, e):
             "go/no only applies to Pick next rows"
     if aid == "grant":
         return None if kind == "CAPPED" else "R only applies to CAPPED rows"
-    if aid in ("rereview", "ack"):
+    if aid == "rereview":
         return None if kind == "PUSHED" else \
-            "e/x only apply to PUSHED (stale) rows"
+            "e only applies to PUSHED (stale) rows"
+    if aid == "ack":
+        if kind == "PUSHED" or unread_report(model, it):
+            return None
+        return "x only applies to PUSHED (stale) rows and reports to read"
     if aid == "detach":
         return None if it is not None else \
             "detach only applies to tracked items"
-    if aid in ("park", "unpark"):
+    if aid in ("hold", "unhold"):
         if it is None:
             return "d only applies to tracked items"
-        if kind in ("MERGED", "RESTACK", "CLOSED", "GONE", "BOOTING"):
-            return f"{kind} rows can't be parked now"
+        if aid == "unhold":
+            if held_by_you(it):
+                return None
+            if agent_holds(model, it):
+                return "the agent is holding it; message it to resume"
+            return f"{e['key']} is not on hold"
+        if kind in ("MERGED", "RESTACK", "CLOSED", "GONE", "DONE", "BOOTING"):
+            return f"{kind} rows can't be held now"
         # Its pending feedback would revive the card on the next tick.
         if kind == "FEEDBACK":
-            return "FEEDBACK rows can't be parked: the feedback is pending"
-        if (aid == "unpark") != bool(it.get("parked")):
-            return (f"{e['key']} is {'not in' if aid == 'unpark' else 'already in'}"
-                    " Done")
+            return "FEEDBACK rows can't be held: the feedback is pending"
+        if held_by_you(it):
+            return f"{e['key']} is already on hold"
         return None
     if aid == "peek":
         if scan.backend_for(e["session"]) is scan.HC:
@@ -1069,13 +1241,13 @@ def row_confirm(model, aid, e):
     if aid == "rereview":
         return f"press e again to ask for a re-review of {key}"
     if aid == "ack":
-        return f"press x again to ack the new commits on {key}"
+        return f"press x again to ack {key}"
     if aid == "detach":
         return f"press z again to detach {key} (worktree kept, untracked)"
-    if aid == "park":
-        return f"press d again to move {key} to Done (session kept, slot freed)"
-    if aid == "unpark":
-        return f"press d again to move {key} out of Done"
+    if aid == "hold":
+        return f"press d again to put {key} on hold (session kept, slot freed)"
+    if aid == "unhold":
+        return f"press d again to take {key} off hold"
     if aid == "remove":
         busy = ("⚠ its agent is working -- " if e["kind"] in
                 ("WORKING", "BOOTING", "REVIEW", "FEEDBACK") else "")
@@ -1112,7 +1284,7 @@ def perform(model, aid, e, confirmed=False, suspend=None):
         return scan_run(["ack-push", key])
     if aid == "detach":
         return scan_run(["detach", key])
-    if aid in ("park", "unpark"):
+    if aid in ("hold", "unhold"):
         return scan_run([aid, key])
     if aid == "remove":
         return scan_run(["cleanup", key], timeout=400)
@@ -1199,11 +1371,23 @@ def kitchen_reaction(ev):
             return rx("happy", 4000, "sparkle", True, line, True)
         if state == "capped":
             return rx("happy", 3000, "steam", True, line)
+        if state == "held":
+            return rx("flip", 2000, "zzz", True, line)
         if state == "stalled":
             return rx("worried", 3000, "smoke", True, line, bad=True)
         return rx("sad", 4500, "smoke", True, line, bad=True)
     if kind == "request":
         return rx("surprised", 2000, "bang", line=f"asked: {text('text')}")
+    if kind in ("hold", "park"):
+        reason = text("reason")
+        return rx("flip", 1500, "zzz", True,
+                  f"on hold {k}" + (f": {reason}" if reason else ""))
+    if kind in ("unhold", "unpark"):
+        reason = text("reason")
+        if reason:
+            return rx("surprised", 2000, "bang", True,
+                      f"back from hold {k}: {reason}", True)
+        return rx("flip", 1500, None, True, f"unhold {k}")
     if kind in ("cleanup", "merged"):
         return rx("serve", 3500, "heart", True, f"served {k} (merged)", True)
     if kind == "pause":
@@ -1242,10 +1426,12 @@ def kitchen_view(evs):
 
 
 def ball_state(item, done_kind):
-    """readKitchen's ballState: the snapshot's READY, CAPPED and DONE, else the
-    agent's last report, else cooking once a session exists."""
-    if done_kind in ("READY", "CAPPED", "DONE"):
-        return {"READY": "ready", "CAPPED": "capped", "DONE": "done"}[done_kind]
+    """readKitchen's ballState: the snapshot's READY and CAPPED, else the
+    agent's last report, else cooking once a session exists. A DONE row is
+    not a ball: the board keeps Done items off the pan, and a DONE row whose
+    agent runs is drawn by its agent."""
+    if done_kind in ("READY", "CAPPED"):
+        return {"READY": "ready", "CAPPED": "capped"}[done_kind]
     report = item.get("last_report") or {}
     state = report.get("state") if isinstance(report, dict) else None
     if state in ("ready", "capped", "stalled"):
@@ -1255,31 +1441,41 @@ def ball_state(item, done_kind):
     return "cooking" if item.get("session") else "raw"
 
 
-def kitchen_pan(model, hdr, evs, now, busy):
-    """The pan and the chef: readKitchen() over the tracked items, the focus
-    of the newest event on the pan, and the chef's mood (register.tsx's
-    frame() and resting())."""
+def kitchen_pan(model, hdr, evs, now, busy, data):
+    """The pan and the chef: the tracked items, the focus of the newest event
+    on the pan, and the chef's mood (register.tsx's frame() and resting()).
+    This pan is the reference: the board decides where an item sits (the pan
+    holds the items in neither On hold nor Done, the shelf is Done's, and On
+    hold has its own list). The plugin's band approximates it from the
+    snapshot rows and may differ (a held card with a running agent, an
+    engine_error card)."""
     state = model.state or {}
     items = state.get("items") or {}
     snap_kinds = {r.get("key"): r.get("kind")
                   for r in (model.snap or {}).get("rows") or []
                   if isinstance(r, dict)}
+    section = {e["key"]: sec for sec in ("hold", "done") for e in data[sec]}
 
     def added_of(item):
         v = item.get("added")
         return float(v) if isinstance(v, (int, float)) else 0.0
 
     holes = hdr["max_active"] or 6
+    ordered = sorted(items.items(), key=lambda kv: added_of(kv[1]))
     balls = []
-    for key, item in sorted(items.items(), key=lambda kv: added_of(kv[1])):
+    for key, item in ordered:
+        if section.get(key) in ("hold", "done"):
+            continue
         added = added_of(item)
         age = max(0.0, (now - added) / 60) if added else 0.0
         balls.append({"key": key, "label": short(key),
                       "state": ball_state(item, snap_kinds.get(key)),
                       "heat": round(min(1.0, age / 25), 2)})
-    served = [{"key": b["key"], "label": b["label"]}
-              for b in balls if b["state"] == "done"]
-    on_pan = [b for b in balls if b["state"] != "done"][:holes]
+    on_hold = [{"key": k, "label": short(k)} for k, _ in ordered
+               if section.get(k) == "hold"]
+    served = [{"key": k, "label": short(k)} for k, _ in ordered
+              if section.get(k) == "done"]
+    on_pan = balls[:holes]
     on_pan_keys = {b["key"] for b in on_pan}
     focus = next((r["key"] for r in map(kitchen_reaction, reversed(evs))
                   if r["key"] in on_pan_keys), None)
@@ -1307,7 +1503,8 @@ def kitchen_pan(model, hdr, evs, now, busy):
                         "resting": rest}
             break
     return {"holes": holes, "paused": paused, "busy": busy, "balls": on_pan,
-            "shelf": served[:8], "shelf_total": len(served), "chef": chef}
+            "shelf": served[:8], "shelf_total": len(served),
+            "hold": on_hold[:8], "hold_total": len(on_hold), "chef": chef}
 
 
 def row_actions(model, e):
@@ -1353,14 +1550,17 @@ def entry_view(model, e, section, index=None):
         "agent": e["agent"], "rounds": rounds,
         "max_rounds": MAX_REVIEW_ROUNDS, "driver": e["driver"],
         "quiet_s": None if e["quiet"] is None else int(e["quiet"]),
-        "stalled": e["stalled"], "needs": e["needs"], "why": e["why"],
+        "stalled": e["stalled"], "needs": e["needs"],
+        "why": notify_text(e) if e["why"] else None,
         "note": e["note"], "pick_kind": e["pick_kind"],
         "session": e["session"], "space": e["space"],
         "backend": backend.name if backend else None,
         "pane": e["pane"], "path": e["path"], "branch": e["branch"],
         "pr": int(pr) if str(pr or "").isdigit() else None,
         "stack": layers, "open": e["open"],
-        "parked": bool((it or {}).get("parked")),
+        "parked": held_by_you(it),
+        "hold": e["hold"], "engine": e["engine"], "cause": e["cause"],
+        "report": e["report"],
         "tracked": it is not None, "actions": row_actions(model, e),
     }
     if index is not None:
@@ -1382,7 +1582,6 @@ def view_for(model):
         age = now - gen
         github = ("ok" if age < REFRESH_SECS * 1.5 else
                   "stale" if age < REFRESH_SECS * 4 else "old")
-    done_open = [e for e in data["done"] if e["open"]]
     last_tick = hdr["last_tick"]
 
     def column(cid, title, section, rows, **extra):
@@ -1399,7 +1598,8 @@ def view_for(model):
         "generated_at": now,
         "header": {
             "needs": len(data["needs"]),
-            "running": len(data["running"]) + len(data["orch"]),
+            "running": len(data["running"]),
+            "hold": len(data["hold"]),
             "pick": len(data["pick"]),
             "active": hdr["active"], "max_active": hdr["max_active"],
             "untracked": hdr["untracked"],
@@ -1413,11 +1613,15 @@ def view_for(model):
                           "at": scan.WIND_DOWN_AT or None},
         },
         "columns": [
-            column("running", "🟡 Running", "running", data["running"]),
-            column("orch", "⏭ Next tick", "orch", data["orch"]),
-            column("needs", "🔴 Needs you", "needs", data["needs"]),
-            column("done", "💤 Done", "done", data["done"],
-                   hidden=len(data["done"]) - len(done_open)),
+            column("running", "🟡 Running", "running", data["running"],
+                   hint="agents at work, their own CI waits and review loops "
+                        "included; ⏭ = the engine acts on it next"),
+            column("needs", "🔴 Needs you", "needs", data["needs"],
+                   hint="waiting on you"),
+            column("hold", "💤 On hold", "hold", data["hold"],
+                   hint="waiting on someone else, or held by you; holds no slot"),
+            column("done", "✔ Done", "done", data["done"],
+                   hint="finished; holds no slot", hidden=len(data["done"])),
         ],
         "pick": [{"repo": slug,
                   "entries": [entry_view(model, e, "pick", i + 1)
@@ -1426,7 +1630,7 @@ def view_for(model):
         "notes": [{"kind": e["kind"], "key": e["key"]} for e in data["notes"]],
         "activity": activity_rows(model),
         "kitchen": kitchen_view(evs),
-        "pan": kitchen_pan(model, hdr, evs, now, busy),
+        "pan": kitchen_pan(model, hdr, evs, now, busy, data),
         "global_actions": global_actions(model),
     }
 
@@ -1453,6 +1657,7 @@ def run_action(model, aid, key, args):
     code path. The mod asks the second press (`confirm`), so this runs at
     once; confirmed=1 with holds=<the shown names> is the kitchen alert's
     second press."""
+    aid = ROW_ALIASES.get(aid, aid)
     if aid == "refresh":
         # Only a running headless dashboard rewrites view.json; it watches the
         # kick file's mtime (see headless()).
@@ -1526,15 +1731,12 @@ class Dashboard:
         if hdr["paused"]:
             head.append(Text(" ⏸  PAUSED — octopilot starts and acts on nothing "
                              "until resumed (P)", style="bold black on yellow"))
-        # Done rows that still hold a workspace or session stay on the board,
-        # so they can be opened or detached (z) without toggling D first.
-        still_open = [e for e in data["done"] if e["open"]]
-        self.hidden_done = 0 if self.show_done else \
-            len(data["done"]) - len(still_open)
+        # Done is hidden until D shows it; the footer counts what D would show.
+        self.hidden_done = 0 if self.show_done else len(data["done"])
         columns = [("🟡 Running", data["running"], "yellow"),
-                   ("⏭ Next tick", data["orch"], "blue"),
                    ("🔴 Needs you", data["needs"], "red"),
-                   ("💤 Done", data["done"] if self.show_done else still_open,
+                   ("💤 On hold", data["hold"], "blue"),
+                   ("✔ Done", data["done"] if self.show_done else [],
                     "green")]
         # The selection state first: the footer reads it, and it needs no
         # heights, so it is settled before anything is measured.
@@ -1596,8 +1798,10 @@ class Dashboard:
         t.append(f"🔴 {len(data['needs'])} needs you", style="bold red"
                  if data["needs"] else "dim")
         t.append(" · ")
-        t.append(f"🟡 {len(data['running']) + len(data['orch'])} running",
+        t.append(f"🟡 {len(data['running'])} running",
                  style="yellow")
+        t.append(" · ")
+        t.append(f"💤 {len(data['hold'])} on hold")
         t.append(" · ")
         t.append(f"⚪ {len(data['pick'])} to pick")
         if hdr["active"] is not None:
@@ -1716,8 +1920,16 @@ class Dashboard:
             status.append(f" {e['rounds'] or 0}/{MAX_REVIEW_ROUNDS}")
         stalled = e["stalled"] or e["kind"] == "STALLED"
         status.append(f" {ago(e['quiet'])}", style="red" if stalled else "")
-        return (self.two_lines(title, width) + [status]
-                + self.two_lines(e["note"] or "", width, "dim"))
+        badge = []
+        if e.get("engine"):
+            eng = e["engine"]
+            label = "held: paused" if eng["paused"] else eng["label"]
+            badge = [Text(f"⏭ {label}", no_wrap=True, overflow="ellipsis",
+                          style="cyan")]
+        # An empty note under a badge is a blank line: leave it out.
+        note = [] if badge and not e["note"] else \
+            self.two_lines(e["note"] or "", width, "dim")
+        return self.two_lines(title, width) + [status] + badge + note
 
     def card(self, e, color, body):
         sel = e["key"] == self.sel_key
@@ -1846,8 +2058,8 @@ class Dashboard:
         kind = sel["kind"] if sel else None
         items = (self.m.state or {}).get("items") or {}
         tracked = sel and sel["key"] in items
-        parked = tracked and items[sel["key"]].get("parked")
         repo = self.sel_repo()
+        acts = {a["id"] for a in row_actions(self.m, sel)} if sel else set()
         keys = []
         if repo:
             keys.append(("spc", "fold" if repo in self.expanded else "open"))
@@ -1856,13 +2068,16 @@ class Dashboard:
         keys += [("g/n", "go/no")] if kind == "PROPOSE" else []
         if kind == "CAPPED":
             keys.append(("R", "another round"))
-        if kind == "PUSHED":
-            keys += [("e", "re-review"), ("x", "ack")]
+        if "rereview" in acts:
+            keys.append(("e", "re-review"))
+        if "ack" in acts:
+            keys.append(("x", "ack"))
         if tracked:
             keys.append(("z", "detach"))
             if kind not in ("MERGED", "RESTACK"):
                 keys.append(("del/⌫", "remove"))
-            keys.append(("d", "undone" if parked else "done"))
+        if acts & {"hold", "unhold"}:
+            keys.append(("d", "resume" if "unhold" in acts else "hold"))
         if not repo:
             keys += [("v", "agent"), ("t", "shell"), ("o", "browser")]
         keys += [("i", "investigate"), ("a", "prompter"),
@@ -2057,7 +2272,7 @@ class Dashboard:
             return True
         elif key == "d":
             it = tracked_item(self.m, e["key"])
-            self.row_action("unpark" if it and it.get("parked") else "park",
+            self.row_action("unhold" if held_by_you(it) else "hold",
                             e, live, term)
         elif key in KEY_ROW:
             self.row_action(KEY_ROW[key], e, live, term)

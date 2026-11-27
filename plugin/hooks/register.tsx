@@ -46,7 +46,7 @@ const DEMO: Omit<OctopilotEvent, 'at'>[] = [
 const k = {
   active: false,
   bandId: undefined as string | undefined,
-  kitchen: { balls: [], boxed: [], paused: false, holes: 6 } as Kitchen,
+  kitchen: { balls: [], boxed: [], held: [], paused: false, holes: 6 } as Kitchen,
   mood: 'idle' as Mood,
   moodUntil: 0,
   focus: -1,
@@ -152,9 +152,10 @@ async function apply($: EngineInterface, events: OctopilotEvent[], isReplay: boo
 }
 
 async function refreshHeader($: EngineInterface) {
-  const { balls, boxed, holes, paused } = k.kitchen
+  const { balls, boxed, held, holes, paused } = k.kitchen
   const served = boxed.length > 0 ? ` · ${boxed.length} on the shelf` : ''
-  const label = `${served}${paused ? ' · paused' : ''}${k.demo ? ' · demo' : ''}`
+  const onHold = held.length > 0 ? ` · ${held.length} on hold` : ''
+  const label = `${served}${onHold}${paused ? ' · paused' : ''}${k.demo ? ' · demo' : ''}`
   await update($, header, () => `🐙 takoyaki kitchen · ${balls.length}/${holes} on the pan${label}`)
 }
 
@@ -219,6 +220,7 @@ async function playDemo($: EngineInterface) {
   k.kitchen = {
     balls: demo.balls.filter(b => b.state !== 'done'),
     boxed: demo.balls.filter(b => b.state === 'done'),
+    held: [],
     paused: ev.kind === 'pause',
     holes: 6,
   }
@@ -332,7 +334,7 @@ export const register: Register = on => {
       k.demo = k.demo ? undefined : { step: 0, balls: [] }
       if (!k.demo) {
         k.mtimes = { state: 0, events: 0, snapshot: 0, view: 0 }
-        k.kitchen = { balls: [], boxed: [], paused: false, holes: 6 }
+        k.kitchen = { balls: [], boxed: [], held: [], paused: false, holes: 6 }
       }
       await activate($, true)
       return {

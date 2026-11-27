@@ -394,7 +394,7 @@ Every stop ends with exactly one report, on the bottom key. Its `<sha>` is the
 octopilot compares a stack's `ready` report against the top layer's head.
 
 ```
-$A report "{{KEY}}" <ready|capped|blocked|failed|stalled> <sha> "<one line>"
+$A report "{{KEY}}" <ready|capped|blocked|failed|stalled|held> <sha> "<one line>"
 ```
 
 It records the report on your item, and the dashboard shows it to the user. The
@@ -403,6 +403,10 @@ detail on the lines after it, inside the same quotes. Never type into the
 octopilot panes: that types over whatever the user is writing there. Never send
 desktop notifications (`PushNotification`) either: the dashboard tells the user
 when your item needs them.
+
+If the user tells you to wait (for a reviewer, a decision, another PR), report
+`held` with what you wait on and stop. The card goes On hold and frees your slot;
+a new prompt or heartbeat brings it back.
 
 If you are going to be working for more than half an hour without pushing and
 without a CI wait in flight, call

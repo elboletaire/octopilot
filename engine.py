@@ -25,8 +25,9 @@ PLANNED = {"MERGED": "cleanup", "RESTACK": "restack", "REVIEW": "review",
 Action = namedtuple("Action", "kind key data")
 
 # Rows built from a tracked item. GONE is left out: its item was just dropped.
-TRACKED = {"BOOTING", "CAPPED", "CLOSED", "DONE", "FEEDBACK", "MERGED", "PUSHED",
-           "READY", "RESTACK", "REVIEW", "STALLED", "UNKNOWN", "WORKING"}
+TRACKED = {"BLOCKED", "BOOTING", "CAPPED", "CLOSED", "DONE", "FEEDBACK", "HOLD",
+           "MERGED", "PUSHED", "READY", "RESTACK", "REVIEW", "STALLED", "UNKNOWN",
+           "WORKING"}
 
 
 def locate_item(state, key):
@@ -62,6 +63,12 @@ def revalidate_row(row, state):
     it = find_item(state, key)
     if kind in TRACKED and it is None:
         return False
+    # A held card is not the engine's to act on, whatever the row said when it
+    # was built: a hold that landed after the scan wins the race.
+    if kind in ("REVIEW", "BOOTING", "FEEDBACK"):
+        import scan
+        if scan.hold_of(it):
+            return False
     # A restack leaves the old key in handled_merges and keeps the item's
     # stack, so the merge check has to come before the stack check.
     if kind in ("MERGED", "RESTACK") and key in state.get("handled_merges", []):
@@ -358,6 +365,8 @@ def _note(state, ctx, key, field, event, msg, **fields):
         it[field] = msg
         if field == "engine_error":
             it["last_note"] = msg
+            it["engine_error_action"] = fields.get("action")
+            it["engine_error_at"] = int(time.time())
     ctx.log(event, key, msg=msg, **fields)
 
 
@@ -382,6 +391,8 @@ def _clear_notes(it):
     if it.get("engine_error") and it.get("last_note") == it["engine_error"]:
         it.pop("last_note")
     it.pop("engine_error", None)
+    it.pop("engine_error_action", None)
+    it.pop("engine_error_at", None)
     it.pop("engine_wait", None)
 
 
@@ -749,7 +760,10 @@ Request = namedtuple("Request", "verb args confirmed over_cap")
 CONFIRMED_PAST = "(confirmed past wind-down)"
 CONFIRMED_OVER = "(confirmed over cap)"
 
-ONE_TARGET = ("go", "no", "detach", "re-review", "ack")
+ONE_TARGET = ("go", "no", "detach", "re-review", "ack", "unhold")
+# The older names of hold and unhold, which the prompter and the dashboard may
+# still queue. They run as the new verbs.
+REQUEST_ALIASES = {"park": "hold", "unpark": "unhold"}
 NO_ARGS = ("pause", "resume", "tick")
 INVESTIGATE = re.compile(r"/investigate\s+(--read-only\s+)?(\S+)\s+(.+)", re.DOTALL)
 CODE = re.compile(r"/octopilot-code\s+(.+)", re.DOTALL)
@@ -797,7 +811,13 @@ def parse_request(text):
     words = line.split(maxsplit=1)
     if not words:
         return unknown
-    verb, rest = words[0], (words[1] if len(words) > 1 else "")
+    verb = REQUEST_ALIASES.get(words[0], words[0])
+    rest = words[1] if len(words) > 1 else ""
+    # hold <target> [reason]: the reason is free text, so only the target is split off.
+    if verb == "hold" and rest:
+        parts = rest.split(maxsplit=1)
+        return Request(verb, (parts[0], parts[1] if len(parts) > 1 else ""),
+                       confirmed, over_cap)
     if verb in ONE_TARGET and len(rest.split()) == 1:
         return Request(verb, (rest,), confirmed, over_cap)
     if verb in NO_ARGS and not rest:
@@ -1224,10 +1244,37 @@ def do_ack(req, ctx):
     if key is None:
         return line
     with scan.locked():
-        r = scan.ack_push(scan.load(), key)
+        r = scan.ack_item(scan.load(), key)
     if not r["ok"]:
         return _refuse(ctx, req.verb, key, r["error"])
     return f"{key}: acked"
+
+
+def do_hold(req, ctx):
+    """hold <target> [reason]: the user holds the item: no slot, and no prompt
+    goes out until it wakes (scan.hold_item)."""
+    import scan
+    key, line = _target_of(req, ctx)
+    if key is None:
+        return line
+    with scan.locked():
+        r = scan.hold_item(scan.load(), key, req.args[1])
+    if not r["ok"]:
+        return _refuse(ctx, req.verb, key, r["error"])
+    return r["msg"]
+
+
+def do_unhold(req, ctx):
+    """unhold <target>: the user lets a held item go again. Not held is refused."""
+    import scan
+    key, line = _target_of(req, ctx)
+    if key is None:
+        return line
+    with scan.locked():
+        r = scan.unhold_item(scan.load(), key)
+    if not r["ok"]:
+        return _refuse(ctx, req.verb, key, r["error"])
+    return r["msg"]
 
 
 def do_pause(req, ctx):
@@ -1283,6 +1330,7 @@ def _unknown(req, ctx):
 
 
 HANDLERS = {"go": do_go, "no": do_no, "detach": do_detach, "ack": do_ack,
+            "hold": do_hold, "unhold": do_unhold,
             "pause": do_pause, "resume": do_pause, "re-review": do_re_review,
             "investigate": do_investigate, "investigate-read-only": do_investigate,
             "code": do_code, "tick": do_tick}

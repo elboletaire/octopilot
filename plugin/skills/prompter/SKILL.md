@@ -20,22 +20,35 @@ for it. You never act yourself.
   `comment` is someone else's PR (review only, never pushed to).
 - Driver: `agent` (fix items: the session runs its own review loop and
   reports back) or `orchestrator` (comment items: the engine prompts the review).
-- Row kinds, in snapshot.json (`rows[].kind`):
-  - The engine acts on these itself: `MERGED` (cleanup), `RESTACK`, `REVIEW`,
-    `BOOTING`, `FEEDBACK`.
+- Row kinds, in snapshot.json (`rows[].kind`), and the column each lands in:
+  - Running: `WORKING`, and the engine's own next steps: `MERGED` (cleanup),
+    `RESTACK`, `REVIEW`, `BOOTING`, `FEEDBACK`. Those carry a ⏭ badge with
+    what the engine does next (`⏭ cleaning up`, `⏭ restacking`, `⏭ starting
+    review`, `⏭ sending review`, `⏭ sending feedback`), or `⏭ held: paused`
+    while octopilot is paused. A REVIEW, BOOTING or FEEDBACK whose agent is
+    waiting for the user is in Needs you instead, with its badge still set.
   - Needs you: `READY` (merge it), `CAPPED` (review rounds used up: merge,
     review on GitHub, or ask for another round), `PUSHED` (stale: the author
-    pushed after the review and it has been quiet for hours; `re-review` or
-    `ack`), `STALLED` (no heartbeat for 35 min; the user decides), `CLOSED`
-    (closed unmerged; clean up or leave it). A `re-review overdue (Nh)` READY:
-    nobody re-reviewed in time; nudge the reviewer, dismiss the review or merge.
-  - `WORKING`: running. `DONE`: finished, with a detail such as "parked by
-    you -> waiting on merge or new activity", "review posted -> not yours to
-    merge" or "new commits ... -> waiting on re-request". A fix PR waiting on
-    someone else's review shows `waiting on review` or `waiting on re-review`
-    (holds no slot; it turns READY once the review is in).
-  - `GONE`: its session was closed by hand and its agent is not live in another
-    open tab or space (when it is, the session follows the agent, re-homed).
+    pushed after the review and it has been quiet for hours; `re-review`, or
+    `ack` to move it to On hold), `STALLED` (no heartbeat for 35 min; the user
+    decides), `BLOCKED` (the agent reported blocked, failed or stalled; the
+    user decides), `CLOSED` (closed unmerged; clean up or leave it), an
+    `engine_error` card or a failed send, an agent waiting on a question, and a
+    read-only `ready` report until it is acked.
+    A `re-review overdue (Nh)` READY: nobody re-reviewed in time; nudge the
+    reviewer, dismiss the review or merge.
+  - On hold: `HOLD`, waiting on someone else or held by a `hold` request. Held
+    by `hold`, a fix PR waiting on a reviewer (`waiting on review` or `waiting
+    on re-review`; it turns READY once the review is in), or waiting on the
+    author (a comment item whose review is posted, or pushed commits acked with
+    `ack`: `waiting on re-request`). An agent that reports `held` is
+    here too, held by the agent: only the agent resumes it, by a message. A hold wakes on approval, a draft turned ready, new feedback, a
+    re-request, or a newer blocked, failed, stalled or capped report. A red CI
+    does not wake it. Holds hold no slot.
+  - Done: `DONE` (finished only) and `GONE` (its session was closed by hand and
+    its agent is not live in another open tab or space; when it is, the session
+    follows the agent, re-homed). Done is hidden by default; the dashboard's `D`
+    shows it. A read-only investigation's report lands here once acked.
   - `PROPOSE`: pick-next candidates. `UNCLONED`, `STALE` and `UNKNOWN` are
     notes: report them with their one-line reason.
 
@@ -45,8 +58,9 @@ for it. You never act yourself.
   them. To ask for a tick, queue `tick`.
 - `$A inbox` or `$A doorbell`: the inbox belongs to the engine.
 - Any mutating subcommand run directly (`spawn`, `cleanup`, `send`, `track`,
-  `untrack`, `detach`, `decline`, `pause`, `resume`, `reset-rounds`,
-  `ack-push`, `mark-*`, `report`, ...). Queue the matching request instead.
+  `untrack`, `detach`, `decline`, `hold`, `unhold`, `park`, `unpark`, `pause`,
+  `resume`, `reset-rounds`, `ack-push`, `mark-*`, `report`, ...). Queue the
+  matching request instead.
 - `herdr agent prompt`, `hc send`, or any other way of typing into another
   agent's terminal, the engine's included.
 - Changing code in a worktree, or pushing, commenting or merging on GitHub.
@@ -59,7 +73,7 @@ Read, never write:
   last scan's rows, the same ones the dashboard shows. Its `generated_at` says
   how old it is.
 - `$A status`: the raw state (tracked `items` with sessions, rounds,
-  `last_report` and `push_acked`; `declined`; `paused`).
+  `last_report`, `hold`, `push_acked` and `report_acked`; `declined`; `paused`).
 - `${OCTOPILOT_STATE_DIR:-$HOME/.local/state/octopilot}/events.jsonl`: what
   happened and when.
 - `gh` read-only commands, a worktree's files, `$A read <item>` to see what an
@@ -77,13 +91,17 @@ For `status` or `list`, use this layout, omitting empty sections:
 
 1. **🔴 Needs you**: the Needs-you kinds. Columns: `Item | What | Why | Your move`.
    Oldest first, at most five; the rest collapse to `+N more waiting on you`.
-2. **🟡 Running**: `WORKING` rows. Columns: `Item | What | State | For`.
-3. **⚪ Pick next**: the `PROPOSE` rows, numbered 1..N in snapshot order, as the
+2. **🟡 Running**: `WORKING` rows and the ⏭ rows. Columns: `Item | What | State | For`.
+3. **💤 On hold**: the `HOLD` rows. Columns: `Item | What | Held by | Reason`,
+   where Held by is `you`, `reviewer`, `author` or `agent`.
+4. **⚪ Pick next**: the `PROPOSE` rows, numbered 1..N in snapshot order, as the
    dashboard's `#`. Skip any row whose key is tracked (in `items`, or in an
    item's `prev_keys`) or declined, as the dashboard does. Columns:
    `# | Repo | Item | Title | Kind`, where Kind is `issue`, `adopt PR`,
    `your PR` or `review only`.
-4. **Footer**: the snapshot's age, then `go <#>` / `no <#>`.
+5. **Footer**: the snapshot's age, then `go <#>` / `no <#>`.
+
+Done rows are left out of the layout unless the user asks for them.
 
 ## Passing a command on
 
@@ -93,11 +111,16 @@ refuses anything else, so never queue plain words.
 ```
 $A request "go <key>"                    $A request "no <key>"
 $A request "detach <key>"                $A request "re-review <key>"
-$A request "ack <key>"                   $A request "pause"
+$A request "ack <key>"                   $A request "hold <key> [reason]"
+$A request "unhold <key>"                $A request "pause"
 $A request "resume"                      $A request "tick"
 $A request "/investigate [--read-only] <owner/repo> <question verbatim>"
 $A request "/octopilot-code <text verbatim>"
 ```
+
+`hold` puts an item On hold on the user's word, and `unhold` takes it back; the
+reason is optional and shows on the card. `park` and `unpark` are the older
+names of `hold` and `unhold`, and the engine takes them as aliases.
 
 When the user wants an answer rather than a change (an audit, "how does X
 work", "do not touch anything"), queue `/investigate --read-only`: the agent
@@ -136,8 +159,8 @@ Only on an explicit yes, append `(confirmed over cap)`, e.g.
 with both facts, and append both markers. The snapshot is the last scan, so a
 start since then is not counted: the engine's own check is the real one.
 
-`no`, `ack`, `detach`, `pause`, `resume` and `/octopilot-code` need no
-confirmation. While paused, the engine holds `go`, `/investigate` and
+`no`, `ack`, `hold`, `unhold`, `detach`, `pause`, `resume` and `/octopilot-code`
+need no confirmation. While paused, the engine holds `go`, `/investigate` and
 `re-review`, and runs the rest at once.
 
 ### After queueing
@@ -147,13 +170,15 @@ for up to about 20 seconds. The outcome is the first event at or after that
 time whose kind is one of: `go`, `investigate`, `held`, `go-refused`,
 `request-refused`, `request-unknown`, `request-failed`, `decline`, `detach`,
 `sent` (a re-review prompt), `tick-asked`, `pause`, `resume`, `engine-error`,
-`send-waiting`, `send-code`, `send-code-pending`. When the request names an
-item, the event's `key` must match too: the engine logs other items' events in
-the same window. A refusal can carry no key (an unknown repo, an unresolvable
-target): it counts as the outcome too. An `ack` logs no event: confirm it from its `push_acked` in
-`$A status`. Report the outcome in one line, with the item's title. If nothing
-arrives in time, say the request is queued and the engine picks it up on its
-next tick; the outcome shows on the dashboard.
+`send-waiting`, `send-code`, `send-code-pending`, `hold`, `unhold`. When the
+request names an item, the event's `key` must match too: the engine logs other
+items' events in the same window. A refusal can carry no key (an unknown repo,
+an unresolvable target): it counts as the outcome too. An `ack` logs no event:
+confirm it from `$A status`, which updates at once: `push_acked` for a PUSHED
+item, `report_acked` for a read-only report (that item then goes to Done).
+Report the outcome in one line, with the item's title. If nothing arrives in
+time, say the request is queued and the engine picks it up on its next tick;
+the outcome shows on the dashboard.
 
 ### Changes to octopilot itself
 
