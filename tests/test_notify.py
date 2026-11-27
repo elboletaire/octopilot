@@ -8,6 +8,7 @@ import unittest
 from unittest import mock
 
 from tests import fake  # noqa: F401  (sets the scratch environment)
+import scan
 
 try:
     import dashboard
@@ -43,6 +44,7 @@ class NotifyBase(unittest.TestCase):
         self.model.lock = threading.Lock()
         self.model.snap = {"generated_at": NOW, "rows": []}
         self.model.state = {"items": {"o/r#1": {}, "o/r#2": {}}}
+        self.model.needs_before = set()
 
     def run_notify(self, *needs):
         self.model.notify({"needs": list(needs)})
@@ -150,6 +152,39 @@ class EpisodeTest(NotifyBase):
                                head="bbb2222"))
         self.assertEqual(self.desktop.call_count, 2)
 
+    def test_a_wait_whose_last_seen_moves_notifies_once(self):
+        """A heartbeat mid-wait moves the asking cause, not the question."""
+        self.write_file({"v": 2, "seen": {}})
+        self.run_notify(placed(episode_item(NOW - 600), ag={"state": "waiting"}))
+        self.run_notify(placed(episode_item(NOW - 300), ag={"state": "waiting"}))
+        self.assertEqual(self.desktop.call_count, 1)
+        self.assertEqual(self.saved()["seen"]["o/r#1"],
+                         [f"asking:{NOW - 300}"])
+        self.run_notify()  # answered
+        self.run_notify(placed(episode_item(NOW - 60), ag={"state": "waiting"}))
+        self.assertEqual(self.desktop.call_count, 2)
+
+    def test_a_second_hold_and_wake_at_the_same_head_notifies(self):
+        self.write_file({"v": 2, "seen": {}})
+
+        def woken(since):
+            it = episode_item(NOW - 60, woke={"reason": "approved", "kind": None,
+                                             "since": since})
+            row = {"kind": "READY", "key": "o/r#1", "head": "abc",
+                   "note": "you merge; back from hold: approved"}
+            section, extras = dashboard.column_of(row, it, {},
+                {"live": {}, "sends": [], "paused": False, "stalled": False})
+            assert section == "needs", section
+            return card("o/r#1", extras["cause"], why=extras["why"])
+
+        self.run_notify(woken(NOW - 900))
+        self.run_notify()
+        self.run_notify(woken(NOW - 100))
+        self.assertEqual(self.desktop.call_count, 2)
+        self.run_notify()
+        self.run_notify(woken(NOW - 100))  # the same wake again: quiet
+        self.assertEqual(self.desktop.call_count, 2)
+
     def test_an_empty_read_neither_prunes_nor_writes(self):
         self.write_file({"v": 2, "seen": {"o/r#1": ["READY:abc"]}})
         before = self.saved()
@@ -157,6 +192,15 @@ class EpisodeTest(NotifyBase):
         self.run_notify(card("o/r#1", "READY:abc"))
         self.assertEqual(self.saved(), before)
         self.desktop.assert_not_called()
+
+
+@unittest.skipIf(dashboard is None, "dashboard needs rich")
+class WakeStampTest(unittest.TestCase):
+    def test_a_wake_keeps_the_holds_since(self):
+        it = {"hold": {"by": "you", "reason": "", "since": NOW - 900}}
+        scan.wake_item(it, "approved")
+        self.assertNotIn("hold", it)
+        self.assertEqual(it["woke"]["since"], NOW - 900)
 
 
 @unittest.skipIf(dashboard is None, "dashboard needs rich")

@@ -348,6 +348,8 @@ class Model:
         self.snap_started = 0
         self.state = read_json(STATE_FILE, {}) or {}
         self.state_mtime = 0
+        # The cards in Needs you at the last notify(), for its tick-to-tick check.
+        self.needs_before = set()
         self.events = []
         self.events_size = 0
         self.live = {}
@@ -565,6 +567,11 @@ class Model:
         (a new head, a new report) notifies again. The first run, with no
         notified.json or one of an older format, only records the causes
         already there, so a fresh dashboard does not replay old news."""
+        needs_now = {e["key"] for e in data["needs"]}
+        # Still in Needs you since the last tick: the same wait, however its
+        # last_seen moved.
+        stayed = needs_now & self.needs_before
+        self.needs_before = needs_now
         if self.snap is None or not shutil.which("notify-send"):
             return
         with self.lock:
@@ -586,6 +593,12 @@ class Model:
                 causes = seen.setdefault(e["key"], set())
                 cause = e["cause"] or e["why"] or "needs you"
                 if cause in causes:
+                    continue
+                if cause.startswith("asking:") and e["key"] in stayed and \
+                        any(c.startswith("asking:") for c in causes):
+                    # A heartbeat moved last_seen mid-wait: keep one notice.
+                    causes -= {c for c in causes if c.startswith("asking:")}
+                    causes.add(cause)
                     continue
                 causes.add(cause)
                 if not first:
@@ -909,7 +922,8 @@ def column_of(row, it, ag, ctx):
         cause = f"{why}:{episode[kind] or ''}" if kind in episode else why
         # A card the user woke from a hold notifies once for its wake.
         if "back from hold" in (row.get("note") or ""):
-            return needs("woke", f"woke:{cause}")
+            since = (it.get("woke") or {}).get("since")
+            return needs("woke", f"woke:{cause}:{since}")
         return needs(why, cause)
     if kind == "HOLD":
         return "hold", extras

@@ -1574,9 +1574,10 @@ def hold_wake(it, d, me, detail_of):
 
 
 def wake_item(it, reason):
-    """Clear the hold; the card says 'back from hold' until it moves kind."""
-    it.pop("hold")
-    it["woke"] = {"reason": reason, "kind": None}
+    """Clear the hold; the card says 'back from hold' until it moves kind. The
+    hold's since stamps the wake, so a later hold and wake is a new cause."""
+    since = it.pop("hold").get("since")
+    it["woke"] = {"reason": reason, "kind": None, "since": since}
 
 
 def woke_note(it, kind, extra):
