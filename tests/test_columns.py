@@ -2,6 +2,7 @@
 Placement), the ⏭ engine badge table, and build()'s sections."""
 import threading
 import unittest
+from unittest import mock
 
 from tests import fake  # noqa: F401  (sets the scratch environment)
 import engine
@@ -52,11 +53,12 @@ class PlacementTest(unittest.TestCase):
         self.assertEqual(section_of("CLOSED", item()), "needs")
 
     def test_3_engine_error_needs_you_with_a_cause(self):
-        it = item(engine_error="cleanup failed: no worktree")
+        it = item(engine_error="cleanup failed: no worktree",
+                  engine_error_at=NOW - 5)
         section, extras = place("WORKING", it)
         self.assertEqual(section, "needs")
         self.assertEqual(extras["cause"],
-                         "engine-error:cleanup failed: no worktree")
+                         f"engine-error:cleanup failed: no worktree:{NOW - 5}")
 
     def test_3_engine_error_keeps_its_failed_action_as_the_badge(self):
         it = item(engine_error="restack failed: boom",
@@ -269,6 +271,13 @@ class EngineErrorActionTest(unittest.TestCase):
         engine._clear_notes(it)
         self.assertNotIn("engine_error_action", it)
         self.assertNotIn("engine_error", it)
+
+    def test_the_error_is_stamped_when_it_is_set(self):
+        state = {"items": {"o/r#1": {"session": "tb1"}}}
+        with mock.patch.object(engine.time, "time", return_value=NOW):
+            engine._note(state, self.Ctx(), "o/r#1", "engine_error",
+                         "engine-error", "boom", action="boot")
+        self.assertEqual(state["items"]["o/r#1"]["engine_error_at"], int(NOW))
 
 
 if __name__ == "__main__":

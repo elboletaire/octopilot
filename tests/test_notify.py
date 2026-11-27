@@ -23,7 +23,7 @@ def card(key, cause, why="READY", note="", engine=None):
 
 
 @unittest.skipIf(dashboard is None, "dashboard needs rich")
-class NotifyTest(unittest.TestCase):
+class NotifyBase(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.mkdtemp()
         self.addCleanup(lambda: __import__("shutil").rmtree(tmp, True))
@@ -55,6 +55,8 @@ class NotifyTest(unittest.TestCase):
         with open(self.file, "w") as fh:
             json.dump(doc, fh)
 
+@unittest.skipIf(dashboard is None, "dashboard needs rich")
+class NotifyTest(NotifyBase):
     def test_first_run_is_silent_and_records_every_cause(self):
         self.run_notify(card("o/r#1", "READY:abc"))
         self.desktop.assert_not_called()
@@ -97,6 +99,81 @@ class NotifyTest(unittest.TestCase):
         titles = [c.args[0] for c in self.desktop.call_args_list]
         self.assertEqual(titles, ["🔴 r#1: ready to merge",
                                   "🔴 r#2: agent is blocked"])
+
+
+def placed(it, kind="WORKING", ag=None, stalled=False, head=None):
+    """A card as build() would hand notify(): its cause from column_of."""
+    row = {"kind": kind, "key": "o/r#1", "head": head}
+    ctx = {"live": {}, "sends": [], "paused": False, "stalled": stalled}
+    section, extras = dashboard.column_of(row, it, ag or {}, ctx)
+    assert section == "needs", section
+    return card("o/r#1", extras["cause"], why=extras["why"])
+
+
+def episode_item(last_seen, **kw):
+    base = {"session": "tb1", "added": NOW - 3600, "last_seen": last_seen}
+    base.update(kw)
+    return base
+
+
+@unittest.skipIf(dashboard is None, "dashboard needs rich")
+class EpisodeTest(NotifyBase):
+    """Causes without a report keep their episode: a second question or a
+    second stall is a new cause, and notifies, while a poll is not."""
+
+    def test_asks_answered_asks_again_notifies_twice(self):
+        waiting = {"tb1": {"state": "waiting"}}
+        self.run_notify(placed(episode_item(NOW - 600), ag=waiting["tb1"]))
+        self.run_notify(placed(episode_item(NOW - 600), ag=waiting["tb1"]))
+        self.desktop.assert_not_called()
+        self.run_notify()  # answered: the card leaves Needs you
+        self.run_notify(placed(episode_item(NOW - 60), ag=waiting["tb1"]))
+        self.assertEqual(self.desktop.call_count, 1)
+        self.assertEqual(self.desktop.call_args.args[0],
+                         "🔴 r#1: agent is asking something")
+
+    def test_stalls_twice_notify_twice(self):
+        self.write_file({"v": 2, "seen": {}})
+        self.run_notify(placed(episode_item(NOW - 3000), stalled=True))
+        self.run_notify()
+        self.run_notify(placed(episode_item(NOW - 900), stalled=True))
+        self.assertEqual(self.desktop.call_count, 2)
+
+    def test_capped_again_after_a_new_head_notifies_again(self):
+        self.write_file({"v": 2, "seen": {}})
+        self.run_notify(placed(episode_item(NOW - 60), kind="CAPPED",
+                               head="aaa1111"))
+        self.run_notify(placed(episode_item(NOW - 60), kind="CAPPED",
+                               head="aaa1111"))
+        self.assertEqual(self.desktop.call_count, 1)
+        self.run_notify(placed(episode_item(NOW - 60), kind="CAPPED",
+                               head="bbb2222"))
+        self.assertEqual(self.desktop.call_count, 2)
+
+    def test_an_empty_read_neither_prunes_nor_writes(self):
+        self.write_file({"v": 2, "seen": {"o/r#1": ["READY:abc"]}})
+        before = self.saved()
+        self.model.state = {"items": {}}
+        self.run_notify(card("o/r#1", "READY:abc"))
+        self.assertEqual(self.saved(), before)
+        self.desktop.assert_not_called()
+
+
+@unittest.skipIf(dashboard is None, "dashboard needs rich")
+class ViewWhyTest(unittest.TestCase):
+    def test_the_view_says_why_in_words(self):
+        m = dashboard.Model.__new__(dashboard.Model)
+        m.state = {"items": {}}
+        e = {"key": "o/r#1", "kind": "READY", "title": "t", "draft": False,
+             "url": None, "checks": "pass", "agent": None, "rounds": 1,
+             "driver": "agent", "quiet": 60, "stalled": False, "needs": True,
+             "why": "READY", "note": "", "pick_kind": "your PR",
+             "session": None, "space": None, "branch": "b", "pr": 1,
+             "stack": 0, "pane": None, "path": None, "open": False,
+             "engine": None, "cause": "READY:abc", "report": None,
+             "hold": None}
+        view = dashboard.entry_view(m, e, "needs")
+        self.assertEqual(view["why"], "ready to merge")
 
 
 @unittest.skipIf(dashboard is None, "dashboard needs rich")

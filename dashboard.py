@@ -574,6 +574,9 @@ class Model:
             return
         with self.lock:
             items = dict((self.state or {}).get("items") or {})
+        # An empty read is no reason to forget every item: skip it.
+        if not items:
+            return
         tracked = set(items)
         for it in items.values():
             tracked.update(it.get("prev_keys") or [])
@@ -868,14 +871,16 @@ def column_of(row, it, ag, ctx):
     if kind == "GONE":
         return "done", extras
     if kind == "CLOSED":
-        return needs("CLOSED", "CLOSED")
+        return needs("CLOSED", f"CLOSED:{row.get('head') or ''}")
     if it.get("engine_error"):
-        return needs("engine_error", f"engine-error:{it['engine_error']}")
+        return needs("engine_error", f"engine-error:{it['engine_error']}:"
+                                     f"{it.get('engine_error_at')}")
     if failing:
         return needs("send_failed",
                      f"send:{failing['reason']}:{failing['at']}")
     if agent == "waiting":
-        return needs("asking", "asking")
+        # The episode: the last sign of life before the question.
+        return needs("asking", f"asking:{it.get('last_seen')}")
     if kind in ("REVIEW", "BOOTING", "FEEDBACK") or agent == "running":
         return "running", extras
     hold = scan.hold_of(it) or {}
@@ -901,9 +906,14 @@ def column_of(row, it, ag, ctx):
             fields.get("wait") == "overdue" else kind
         if kind == "BLOCKED" and fields.get("report") in REPORT_NEEDS:
             why = fields["report"]
-        # A new head is a new reason to look at a READY or PUSHED card.
-        cause = f"{why}:{row.get('head') or ''}" \
-            if kind in ("READY", "PUSHED") else why
+        # Each kind's episode: the head of a READY or PUSHED card, the head
+        # and rounds of a CAPPED one, the last sign of life of a STALLED one
+        # and the report's time of a BLOCKED one.
+        episode = {"READY": row.get("head"), "PUSHED": row.get("head"),
+                   "CAPPED": f"{row.get('head')}:{it.get('review_rounds')}",
+                   "STALLED": it.get("last_seen"),
+                   "BLOCKED": (it.get("last_report") or {}).get("at")}
+        cause = f"{why}:{episode[kind] or ''}" if kind in episode else why
         # A card the user woke from a hold notifies once for its wake.
         if "back from hold" in (row.get("note") or ""):
             return needs("woke", f"woke:{cause}")
@@ -913,7 +923,7 @@ def column_of(row, it, ag, ctx):
     if kind == "DONE":
         return "done", extras
     if ctx.get("stalled"):
-        return needs("stalled", "stalled")
+        return needs("stalled", f"stalled:{it.get('last_seen')}")
     return "running", extras
 
 
@@ -1492,7 +1502,8 @@ def entry_view(model, e, section, index=None):
         "agent": e["agent"], "rounds": rounds,
         "max_rounds": MAX_REVIEW_ROUNDS, "driver": e["driver"],
         "quiet_s": None if e["quiet"] is None else int(e["quiet"]),
-        "stalled": e["stalled"], "needs": e["needs"], "why": e["why"],
+        "stalled": e["stalled"], "needs": e["needs"],
+        "why": notify_text(e) if e["why"] else None,
         "note": e["note"], "pick_kind": e["pick_kind"],
         "session": e["session"], "space": e["space"],
         "backend": backend.name if backend else None,

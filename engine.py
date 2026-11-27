@@ -360,6 +360,7 @@ def _note(state, ctx, key, field, event, msg, **fields):
         if field == "engine_error":
             it["last_note"] = msg
             it["engine_error_action"] = fields.get("action")
+            it["engine_error_at"] = int(time.time())
     ctx.log(event, key, msg=msg, **fields)
 
 
@@ -385,6 +386,7 @@ def _clear_notes(it):
         it.pop("last_note")
     it.pop("engine_error", None)
     it.pop("engine_error_action", None)
+    it.pop("engine_error_at", None)
     it.pop("engine_wait", None)
 
 
