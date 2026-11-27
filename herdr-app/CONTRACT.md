@@ -162,7 +162,8 @@ Engine badge (`engine`), the engine's next action on the card:
 | `send` | the queued send's reason, e.g. rebasing |
 
 The mod renders "⏭ held: paused" when `paused` is true, else "⏭ <label>". `engine` stays set when a REVIEW, BOOTING or
-FEEDBACK card moves to Needs you, so the card can still show what is pending. It is null when nothing is pending.
+FEEDBACK card moves to Needs you, so the card can still show what is pending. An `engine_error` card keeps `engine`
+set to the failing action, and its note carries the error. It is null when nothing is pending.
 
 A hold ends when its condition clears (approval, draft to ready, feedback, re-request, or a newer needs report). The
 card then says so in its note ("back from hold: <reason>"); `woke` is internal and not in the view.
