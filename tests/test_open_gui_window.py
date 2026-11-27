@@ -210,9 +210,10 @@ class OpenGuiWindowTest(unittest.TestCase):
             env["HOME"] = home  # where scan.py finds the claude transcripts
         return env
 
-    def launch(self, *args, home=None, checkout=None):
+    def launch(self, *args, home=None, checkout=None, extra_env=None):
         launcher = os.path.join(checkout or self.checkout, "herdr", "open-gui.sh")
-        return subprocess.run(["bash", launcher, *args], env=self.launcher_env(home), cwd=self.root,
+        env = {**self.launcher_env(home), **(extra_env or {})}
+        return subprocess.run(["bash", launcher, *args], env=env, cwd=self.root,
                               capture_output=True, text=True, timeout=120)
 
     def trace(self):
@@ -761,6 +762,80 @@ class OpenGuiWindowTest(unittest.TestCase):
         self.assert_no_window_calls(res)
         self.assertIn("skipped showing the engine terminals (--show-engine)", res.stdout + res.stderr)
         self.assert_restored_between_runs_and_tick(self.trace())
+
+
+    def code_tab_layout(self, shell_labels, claude=False):
+        """Space s1: OCTOPILOT (the headless th) and the code tab t5, holding the bare shell tshell.
+        With claude, a code claude (tclaude) runs in tab t3 instead."""
+        real = os.path.realpath(self.checkout)
+        tabs = [
+            {"id": "t1", "name": "OCTOPILOT", "terminals": [{"terminal": "th", "pane": "p1", "name": None}],
+             "mods": []},
+            {"id": "t5", "name": "Octopilot (code changes)",
+             "terminals": [{"terminal": "tshell", "pane": "p5", "name": None}], "mods": []},
+        ]
+        if claude:
+            tabs.append({"id": "t3", "name": "scratch",
+                         "terminals": [{"terminal": "tclaude", "pane": "p3", "name": None}], "mods": []})
+            self.write("ls-octopilot.agent=octopilot-code.json", json.dumps({"terminals": [
+                {"address": "tclaude"}, {"address": "tshell"}]}))
+            self.write("get-tclaude.json", json.dumps(terminal_json(
+                real, {"octopilot.agent": "octopilot-code"}, fg="claude")))
+        else:
+            self.write("ls-octopilot.agent=octopilot-code.json", json.dumps({"terminals": [{"address": "tshell"}]}))
+        self.write("core-layout.json", json.dumps([{"id": "s1", "name": "Octopilot", "folder": None, "tabs": tabs}]))
+        self.write("ls-octopilot.agent=octopilot-headless.json", json.dumps({"terminals": [{"address": "th"}]}))
+        self.write("get-th.json", json.dumps(terminal_json(
+            real, {"herdr.space": "s1", "octopilot.agent": "octopilot-headless"}, fg="uv")))
+        self.write("get-tshell.json", json.dumps(terminal_json(real, shell_labels, fg="zsh")))
+
+    def test_an_unlabelled_bare_shell_in_the_code_tab_is_refused_and_not_ended(self):
+        self.code_tab_layout({})
+        res = self.launch()
+        out = res.stdout + res.stderr
+        self.assertEqual(res.returncode, 1, out)
+        self.assertIn("holds tshell, which is not the octopilot-code agent", out)
+        trace = self.trace()
+        self.assertFalse([t for t in trace if t.startswith(("hc kill", "hc rm"))], trace)
+        self.assertFalse([t for t in trace if t.startswith("hc run") and "herdr.tab=" in t], trace)
+
+    def test_the_launchers_own_terminal_is_never_ended(self):
+        self.code_tab_layout({"octopilot.agent": "octopilot-code"})
+        res = self.launch(extra_env={"HC_TERMINAL_ID": "tshell"})
+        out = res.stdout + res.stderr
+        self.assertEqual(res.returncode, 1, out)
+        self.assertIn("holds tshell", out)
+        trace = self.trace()
+        self.assertFalse([t for t in trace if t.startswith(("hc kill tshell", "hc rm tshell"))], trace)
+
+    def test_a_labelled_code_shell_beside_a_running_code_claude_is_ended_silently(self):
+        self.code_tab_layout({"octopilot.agent": "octopilot-code"}, claude=True)
+        res = self.launch()
+        out = res.stdout + res.stderr
+        self.assertEqual(res.returncode, 0, out)
+        self.assertNotIn("holds tshell", out)
+        trace = self.trace()
+        self.assertIn("hc kill tshell", trace)
+        self.assertFalse([t for t in trace if t.startswith("hc run") and "herdr.tab=" in t], trace)
+
+    def test_show_engine_shows_the_engine_after_its_terminals_start(self):
+        # A parked headless (octopilot.space, no herdr.space, no pane) in a space that is open.
+        self.write("window", "")
+        self.write("space", "")
+        real = os.path.realpath(self.checkout)
+        self.write("core-layout.json", json.dumps([{"id": "s1", "name": "Octopilot", "folder": None, "tabs": [
+            {"id": "t1", "name": "OCTOPILOT", "terminals": [], "mods": []}]}]))
+        self.write("ls-octopilot.agent=octopilot-headless.json", json.dumps({"terminals": [{"address": "th"}]}))
+        self.write("get-th.json", json.dumps(terminal_json(
+            real, {"octopilot.space": "s1", "octopilot.agent": "octopilot-headless"}, fg="uv")))
+        res = self.launch("--show-engine")
+        trace = self.trace()
+        self.assertFalse([t for t in trace if t.startswith("herdr-app do pane.split")], trace)
+        started = trace.index(next(t for t in trace if t.startswith("hc run") and "octopilot-prompter" in t
+                                   or t.startswith("hc run") and "/octopilot:prompter" in t))
+        self.assertLess(started, trace.index("herdr-app do terminal.keep --terminal th"), trace)
+        self.assertIn("herdr-app do terminal.keep --terminal th", trace)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
 
 
 if __name__ == "__main__":
