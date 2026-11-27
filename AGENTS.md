@@ -11,17 +11,18 @@ dashboard as `scan.py tick` and `scan.py drain`) reads a table built from GitHub
 (PR state, CI) and from the herdr agents, and acts on its rows. It also acts on the
 user's requests: `go N` under "Pick next" spawns a worker, and `no`, re-review,
 investigate and the rest are queued the same way. A worker is a claude in its own
-git worktree, in a tab of the Octopilot space or workspace (`herdr/README.md`, Worker
-tabs), named `ap-<repo>-<number>`. It implements an issue
-or fixes a PR, then the review-fix loop runs. When a PR merges, the engine cleans up.
+git worktree, in a tab of the Octopilot space or workspace (`herdr/README.md`,
+Worker tabs), named `ap-<repo>-<number>`. It implements an issue or fixes a PR, then
+the review-fix loop runs. When a PR merges, the engine cleans up.
 
 The user watches the dashboard (TUI or GUI) and talks to a prompter chat. Both
 queue their commands for the engine, and agent reports are recorded on the item and
-shown on the cards, the kitchen and in notifications. The Octopilot workspace has three
-tabs: OCTOPILOT (kitchen, chat, dashboard), "Octopilot (code changes)", a claude started
-in this checkout for changing this code, and "engine" (the prompter and the headless
-dashboard, which hosts the engine), shown third unless the launcher runs with
-`--hide-engine` (see `herdr/README.md`).
+shown on the cards, the kitchen and in notifications. The GUI's Octopilot space has
+three tabs: OCTOPILOT (kitchen, chat, dashboard), "Octopilot (code changes)", a claude
+started in this checkout for changing this code, and "engine" (the prompter and the
+headless dashboard, which hosts the engine), shown third unless the launcher runs with
+`--hide-engine` (see `herdr/README.md`). The TUI's Octopilot workspace has the first
+two. Worker tabs open in either, after them.
 
 The GUI is native mods over the same Python backend. The decisions stay in
 `scan.py` and `dashboard.py`; the mods only render `view.json` and send actions

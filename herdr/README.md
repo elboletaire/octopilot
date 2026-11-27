@@ -29,7 +29,7 @@ Octopilot space (see `CONTRACT.md`) is not used: workers open on this computer.
 
 `SETTLE_WORKER_TABS` (GUI only; herdr has no settle) settles each new worker tab at
 spawn: herdr-app's `tab.settle` takes it out of the lists, still running. It comes back
-when you open it (`⏎`, or the dashboard's focus) or when its agent needs you. `0`
+when you open it from the dashboard (`⏎`) or when its agent needs you. `0`
 leaves the tab shown.
 
 A tab is named by its item's title. A title that is one of the launcher's tab names
@@ -40,9 +40,9 @@ after it: `engine (ap-<repo>-<number>)`.
 > are kept, and their items show `GONE` and are untracked, freeing their slots. To end
 > one worker, use `z` or `del` on its row.
 
-A tab closed by hand does not end its session when its agent is live in another tab of
-the Octopilot space: the session follows the agent to that tab (re-homed), and the row
-stays. Only an agent that is gone shows `GONE`.
+A tab closed by hand does not end its session when its agent is live in another open
+tab or space (not held by another item; a tab is preferred): the session follows the
+agent there (re-homed), and the row stays. Only an agent that is gone shows `GONE`.
 
 **Upgrading.** Sessions already in their own spaces or workspaces keep working; there is
 nothing to migrate. Both id shapes are read: tabs as `tb…` (GUI) or `w…:t…` (TUI), spaces
