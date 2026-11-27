@@ -156,12 +156,13 @@ test('a held report is resting, not a failure', () => {
   expect(react({ at: 1, kind: 'report', key: 'o/r#1', state: 'blocked' }).line?.tone).toBe('bad')
 })
 
-test('a held item rests in the pan, not burnt, and blocked still burns', () => {
+test('a held item leaves the pan for the held list, freeing its hole', () => {
   const state = JSON.stringify({
     items: {
       'o/r#1': { added: 1, session: 's1', last_report: { state: 'blocked' } },
       'o/r#2': { added: 2, last_report: { state: 'failed' } },
       'o/r#3': { added: 3, session: 's3', last_report: { state: 'held' } },
+      'o/r#4': { added: 4, session: 's4' },
     },
   })
   const snapshot = JSON.stringify({
@@ -170,9 +171,10 @@ test('a held item rests in the pan, not burnt, and blocked still burns', () => {
       { kind: 'BLOCKED', key: 'o/r#2' },
     ],
   })
-  const kitchen = readKitchen(state, 100, 6, snapshot)
+  // Two holes: the held one takes none, so o/r#2 and o/r#3 get them, not o/r#4.
+  const kitchen = readKitchen(state, 100, 2, snapshot)
+  expect(kitchen.held.map(b => [b.key, b.state])).toEqual([['o/r#1', 'cooking']])
   expect(kitchen.balls.map(b => [b.key, b.state])).toEqual([
-    ['o/r#1', 'cooking'],
     ['o/r#2', 'burnt'],
     ['o/r#3', 'cooking'],
   ])

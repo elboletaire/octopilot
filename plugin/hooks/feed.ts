@@ -20,15 +20,16 @@ export type Reaction = {
   line?: LogLine
 }
 
-// `balls` are on the pan, one per hole; `boxed` are done and out of it.
-export type Kitchen = { balls: Ball[]; boxed: Ball[]; paused: boolean; holes: number }
+// `balls` are on the pan, one per hole; `boxed` are done and out of it; `held`
+// are on hold, out of the pan and holding no hole.
+export type Kitchen = { balls: Ball[]; boxed: Ball[]; held: Ball[]; paused: boolean; holes: number }
 
 const str = (v: unknown) => (typeof v === 'string' ? v : '')
 
 // Scan rows (snapshot.json) that set a takoyaki's state. Only DONE (nothing
 // left for anyone, e.g. someone else's PR we approved) goes on the shelf;
 // READY and CAPPED wait for the user, so they stay in the pan, burning. HOLD
-// rests in the pan, not burnt, whatever report it last had.
+// goes to the On hold list, whatever report it last had.
 const STATE_KINDS = new Set(['READY', 'CAPPED', 'DONE', 'HOLD'])
 
 function stateKinds(snapshotText: string): Map<string, string> {
@@ -79,7 +80,7 @@ export function readKitchen(
   try {
     state = JSON.parse(stateText) as Record<string, unknown>
   } catch {
-    return { balls: [], boxed: [], paused: false, holes: maxActive }
+    return { balls: [], boxed: [], held: [], paused: false, holes: maxActive }
   }
   const done = stateKinds(snapshotText)
   const items = (state.items ?? {}) as Record<string, Record<string, unknown>>
@@ -91,10 +92,12 @@ export function readKitchen(
       state: ballState(item, done.get(key)),
       ageMin: added ? Math.max(0, (nowSec - added) / 60) : 0,
     }))
+  const onHold = (b: Ball) => done.get(b.key) === 'HOLD'
 
   return {
-    balls: all.filter(b => !isDone(b)).slice(0, maxActive),
+    balls: all.filter(b => !isDone(b) && !onHold(b)).slice(0, maxActive),
     boxed: all.filter(isDone),
+    held: all.filter(onHold),
     paused: state.paused === true,
     holes: maxActive,
   }
@@ -104,6 +107,7 @@ function ballState(item: Record<string, unknown>, doneKind?: string): BallState 
   if (doneKind === 'READY') return 'ready'
   if (doneKind === 'CAPPED') return 'capped'
   if (doneKind === 'DONE') return 'done'
+  // A held item is not drawn, but its state is never burnt.
   if (doneKind === 'HOLD') return item.session ? 'cooking' : 'raw'
   const report = (item.last_report ?? {}) as Record<string, unknown>
   switch (str(report.state)) {
