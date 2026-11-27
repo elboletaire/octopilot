@@ -1043,6 +1043,21 @@ class HcBackend:
         host["space"] = sp
         return host
 
+    def respawn_tab(self, sp, tab, key_, path, wt, model, name=None, resume=None,
+                    cont=False):
+        """A named claude started in a tab that already exists, beside its shells: the
+        tab keeps its name and place. resume or cont restores a conversation instead
+        of starting a new one. The terminal joins the tab through its labels."""
+        name = name or agent_name(key_)
+        session = None if resume or cont else str(uuid.uuid4())
+        argv = self.spawn_command(model, session=session, resume=resume, cont=cont)
+        term = hc_start(argv, wt, {"herdr.space": sp, "herdr.tab": tab,
+                                   "octopilot.agent": name}, keep=True)
+        warning = self.start_agent(term, wt, path, name, f"tab {tab}")
+        host = self.host_of(tab, name, wt, warning, session or resume)
+        host["space"] = sp
+        return host
+
     def start_agent(self, term, wt, path, name, where):
         """Answer the trust dialog of the named agent in term and wait for it to
         settle -> the warning when it is blocked, else None. The terminal carries
@@ -3752,6 +3767,12 @@ def session_terminals(spaces, session):
     return addresses
 
 
+def tab_space(spaces, tab):
+    """The id of the space the core document lists a tab in, or None."""
+    return next((sp.get("id") for sp in spaces for t in sp.get("tabs", [])
+                 if t.get("id") == tab), None)
+
+
 def worktree_has_transcript(wt):
     """Whether claude has a transcript for the worktree's folder, which --continue
     resumes. claude names the project folder after the path, non-alphanumerics as -."""
@@ -3813,6 +3834,7 @@ def restore_item(state, k, it, ctx):
     if parked:
         return (f"{k}: its agent is parked in terminal {parked['pane']}, "
                 "left alone"), None
+    shells = None   # the bare shells of an open tab, ended once its claude starts
     if sess in ctx["open"]:
         # Open with a live agent, the session is fine. Only bare shells are restored.
         if sess in ctx["live"]:
@@ -3829,14 +3851,20 @@ def restore_item(state, k, it, ctx):
                     "a shell: left alone"), None
         if "young" in states.values():
             return f"{k}: a shell in {sess} is still starting, left alone", None
-        for t in terms:
-            code, raw = end_terminal(t)
-            if code != 0:
-                return f"{k}: could not end terminal {t}: {raw}, left as it is", None
-        code, raw = HC.close(sess)
-        # A tab that is already gone (its shells ended it) is closed all the same.
-        if code != 0 and HC.gone(sess, 1) is not True:
-            return f"{k}: closing {sess} failed: {raw}, left as it is", None
+        if is_tab(sess):
+            # The tab stays: its claude starts beside the shells, which end after it.
+            if tab_space(ctx["spaces"], sess) is None:
+                return f"{k}: {sess} is in no space, left alone", None
+            shells = terms
+        else:
+            for t in terms:
+                code, raw = end_terminal(t)
+                if code != 0:
+                    return f"{k}: could not end terminal {t}: {raw}, left as it is", None
+            code, raw = HC.close(sess)
+            # A space that is already gone (its shells ended it) is closed all the same.
+            if code != 0 and HC.gone(sess, 1) is not True:
+                return f"{k}: closing {sess} failed: {raw}, left as it is", None
     name = it.get("agent") or agent_name(k)
     claude = it.get("claude_session")
     resume = claude if transcript_file(claude) else None
@@ -3851,14 +3879,25 @@ def restore_item(state, k, it, ctx):
     title = it.get("title") or name
     model = restore_model(k, it)
     try:
-        if worker_host() == "space":
+        if shells is not None:
+            host = HC.respawn_tab(tab_space(ctx["spaces"], sess), sess, k, repo, wt,
+                                  model, name=name, resume=resume, cont=cont)
+        elif worker_host() == "space":
             host = HC.spawn_space(k, repo, wt, title, model, name=name,
                                   resume=resume, cont=cont)
         else:
             host = HC.spawn_tab(ctx["space"], k, repo, wt, title, model, name=name,
                                 resume=resume, cont=cont)
     except SystemExit as err:
+        if shells is not None:
+            return (f"{k}: reopening in {sess} failed: {err}; its shells are left "
+                    "as they were"), None
         return f"{k}: reopening failed: {err}", None
+    notes = [host["warning"]] if host.get("warning") else []
+    for t in shells or []:
+        code, raw = end_terminal(t)
+        if code != 0:
+            notes.append(f"could not end shell {t}: {raw}")
     fields = {"session": host["session"], "backend": host["backend"],
               "space": host.get("space") or None,
               "claude_session": host.get("claude_session") or None}
@@ -3867,8 +3906,8 @@ def restore_item(state, k, it, ctx):
            if cont else f"started fresh, {claude} is open in another claude" if shared
            else "started fresh, no transcript to resume")
     line = f"{k}: restored in {host['session']} ({how})"
-    if host.get("warning"):
-        line += f"; WARNING: {host['warning']}"
+    if notes:
+        line += f"; WARNING: {'; '.join(notes)}"
     return line, fields
 
 

@@ -50,6 +50,9 @@ class RestoreTest(unittest.TestCase):
             scan.HC, "spawn_tab", side_effect=self.fake_spawn(NEW_TAB)).start()
         self.spawn_space = mock.patch.object(
             scan.HC, "spawn_space", side_effect=self.fake_spawn(NEW_SPACE)).start()
+        self.hc_start = mock.patch.object(
+            scan, "hc_start", side_effect=self.fake_hc_start).start()
+        mock.patch.object(scan.HC, "start_agent", return_value=None).start()
         self.addCleanup(mock.patch.stopall)
 
     def write_transcript(self, wt):
@@ -66,6 +69,10 @@ class RestoreTest(unittest.TestCase):
     def fake_end(self, term):
         self.order.append(("end", term))
         return 0, ""
+
+    def fake_hc_start(self, argv, cwd, labels, keep):
+        self.order.append(("start", labels["herdr.tab"]))
+        return "tnew"
 
     def fake_spawn(self, new_session):
         def spawn(*args, **kwargs):
@@ -208,12 +215,15 @@ class RestoreTest(unittest.TestCase):
         self.assertIn(f"a terminal is labelled for {OLD_TAB}", out)
         self.assertEqual(after["o/repo#1"], before)
 
-    def test_an_empty_tab_nothing_labelled_is_closed_and_reopened(self):
+    def test_an_empty_tab_nothing_labelled_gets_its_claude_in_place(self):
         self.spaces = [{"id": OPEN_SPACE, "tabs": [tab(OLD_TAB)]}]
-        self.run_restore(
+        _, out, after, _ = self.run_restore(
             {"o/repo#1": self.item("o/repo#1", OLD_TAB)},
             all_sessions=([], {"hc"}, {OLD_TAB, OPEN_SPACE}))
-        self.assertEqual(self.order, [("close", OLD_TAB), ("spawn", "o/repo#1")])
+        self.assertEqual(self.order, [("start", OLD_TAB)])
+        self.assertEqual(self.spawn_tab.call_count, 0)
+        self.assertIn(f"restored in {OLD_TAB}", out)
+        self.assertEqual(after["o/repo#1"]["session"], OLD_TAB)
 
     def test_a_rehomed_agent_is_skipped(self):
         before = self.item("o/repo#1", OLD_TAB)
@@ -237,17 +247,61 @@ class RestoreTest(unittest.TestCase):
         self.assertIn("parked in terminal t9, left alone", out)
         self.assertEqual(after["o/repo#1"], before)
 
-    def test_a_tab_of_bare_shells_is_ended_closed_then_reopened(self):
+    def test_a_tab_of_bare_shells_gets_its_claude_then_the_shells_end(self):
         self.spaces = [{"id": OPEN_SPACE, "tabs": [tab(OLD_TAB, "t1", "t2")]}]
+        self.transcripts = {"c-old"}
+        before = self.item("o/repo#1", OLD_TAB)
         code, out, after, _ = self.run_restore(
+            {"o/repo#1": before},
+            all_sessions=([], {"hc"}, {OLD_TAB, OPEN_SPACE}),
+            terminal_state=lambda term, now_ms: "bare",
+            end_terminal=self.fake_end)
+        self.assertEqual(self.order, [("start", OLD_TAB), ("end", "t1"), ("end", "t2")])
+        self.assertEqual(self.spawn_tab.call_count, 0)
+        argv, _, labels = self.hc_start.call_args.args[:3]
+        self.assertIn("--resume", argv)
+        self.assertEqual(labels["herdr.space"], OPEN_SPACE)
+        self.assertEqual(labels["herdr.tab"], OLD_TAB)
+        self.assertEqual(labels["octopilot.agent"], "ap-repo-1")
+        now = after["o/repo#1"]
+        self.assertEqual((now["session"], now["space"], now["claude_session"]),
+                         (OLD_TAB, OPEN_SPACE, "c-old"))
+        self.assertIn(f"restored in {OLD_TAB} (resumed c-old)", out)
+
+    def test_a_tab_of_bare_shells_is_never_closed(self):
+        self.spaces = [{"id": OPEN_SPACE, "tabs": [tab(OLD_TAB, "t1")]}]
+        self.run_restore(
             {"o/repo#1": self.item("o/repo#1", OLD_TAB)},
             all_sessions=([], {"hc"}, {OLD_TAB, OPEN_SPACE}),
             terminal_state=lambda term, now_ms: "bare",
             end_terminal=self.fake_end)
-        self.assertEqual(self.order, [("end", "t1"), ("end", "t2"),
-                                      ("close", OLD_TAB), ("spawn", "o/repo#1")])
-        self.assertEqual(after["o/repo#1"]["session"], NEW_TAB)
-        self.assertIn(f"restored in {NEW_TAB}", out)
+        self.assertNotIn("close", [step[0] for step in self.order])
+
+    def test_a_failed_start_in_a_tab_leaves_its_shells_and_the_item(self):
+        self.spaces = [{"id": OPEN_SPACE, "tabs": [tab(OLD_TAB, "t1")]}]
+        before = self.item("o/repo#1", OLD_TAB)
+        self.hc_start.side_effect = SystemExit("hc run failed: boom")
+        code, out, after, _ = self.run_restore(
+            {"o/repo#1": before},
+            all_sessions=([], {"hc"}, {OLD_TAB, OPEN_SPACE}),
+            terminal_state=lambda term, now_ms: "bare",
+            end_terminal=self.fake_end)
+        self.assertEqual(self.order, [])
+        self.assertIn(f"reopening in {OLD_TAB} failed: hc run failed: boom", out)
+        self.assertIn("its shells are left as they were", out)
+        self.assertEqual(after["o/repo#1"], before)
+
+    def test_a_shell_that_does_not_end_is_a_warning_and_the_item_is_restored(self):
+        self.spaces = [{"id": OPEN_SPACE, "tabs": [tab(OLD_TAB, "t1", "t2")]}]
+        self.transcripts = {"c-old"}
+        _, out, after, _ = self.run_restore(
+            {"o/repo#1": self.item("o/repo#1", OLD_TAB)},
+            all_sessions=([], {"hc"}, {OLD_TAB, OPEN_SPACE}),
+            terminal_state=lambda term, now_ms: "bare",
+            end_terminal=lambda term: (1, "busy") if term == "t1" else (0, ""))
+        self.assertIn(f"restored in {OLD_TAB}", out)
+        self.assertIn("WARNING: could not end shell t1: busy", out)
+        self.assertEqual(after["o/repo#1"]["claude_session"], "c-old")
 
     def test_a_tab_with_a_non_shell_terminal_is_left_alone(self):
         self.spaces = [{"id": OPEN_SPACE, "tabs": [tab(OLD_TAB, "t1", "t2")]}]
@@ -300,29 +354,6 @@ class RestoreTest(unittest.TestCase):
         self.assertEqual(self.spawn_space.call_args[1]["resume"], "c-old")
         self.assertEqual(after["o/repo#1"]["session"], NEW_SPACE)
         self.assertNotIn("space", after["o/repo#1"])
-
-    def test_a_tab_already_gone_at_close_is_restored_all_the_same(self):
-        self.spaces = [{"id": OPEN_SPACE, "tabs": [tab(OLD_TAB)]}]
-        mock.patch.object(scan.HC, "close", return_value=(1, "no such tab")).start()
-        mock.patch.object(scan.HC, "gone", return_value=True).start()
-        code, out, after, _ = self.run_restore(
-            {"o/repo#1": self.item("o/repo#1", OLD_TAB)},
-            all_sessions=([], {"hc"}, {OLD_TAB, OPEN_SPACE}))
-        self.assertEqual(self.spawn_tab.call_count, 1)
-        self.assertIn(f"restored in {NEW_TAB}", out)
-        self.assertEqual(after["o/repo#1"]["session"], NEW_TAB)
-
-    def test_a_failed_close_of_a_tab_still_open_is_left_alone(self):
-        self.spaces = [{"id": OPEN_SPACE, "tabs": [tab(OLD_TAB)]}]
-        before = self.item("o/repo#1", OLD_TAB)
-        mock.patch.object(scan.HC, "close", return_value=(1, "busy")).start()
-        mock.patch.object(scan.HC, "gone", return_value=False).start()
-        _, out, after, _ = self.run_restore(
-            {"o/repo#1": before},
-            all_sessions=([], {"hc"}, {OLD_TAB, OPEN_SPACE}))
-        self.assertEqual(self.spawn_tab.call_count, 0)
-        self.assertIn(f"closing {OLD_TAB} failed: busy", out)
-        self.assertEqual(after["o/repo#1"], before)
 
     def test_a_session_another_claude_has_open_starts_fresh_apart_from_it(self):
         self.transcripts = {"c-old"}
