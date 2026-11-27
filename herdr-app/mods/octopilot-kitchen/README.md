@@ -44,7 +44,7 @@ it or a `pane.split` puts it, so the same folder serves both.
 ## What it reads
 
 - `$STATE_DIR/view.json`, watched, and re-read every 2 s as a fallback: `pan` (holes,
-  balls, shelf, the chef's mood, `busy`, `paused`), `kitchen` (the log, and the newest
+  balls, shelf, hold, the chef's mood, `busy`, `paused`), `kitchen` (the log, and the newest
   event's burst) and `header`. A `generated_at` older than 15 s is an offline kitchen:
   dimmed, flames out, the chef dozing.
 - `$DIR/scan.sh speech --json` for the bubble's message, status and terminal (not while
@@ -60,6 +60,10 @@ it or a `pane.split` puts it, so the same folder serves both.
 | `capped` | the same with a red flag and a faster red glow |
 | `burnt` | charred, cracks glowing, smoking |
 | `stalled` | cold and frosted, no steam |
+
+Done items (`shelf`, the oldest 8) stand on the shelf as full boats; On hold items (`hold`, the oldest 8)
+sit in a tray under it as half-size faded boats, with a `+N` chip for the rest. The header counts
+`header.hold`. A view without `hold` has an empty tray.
 
 The focused ball has a ring and the chef's pick over it (the batter jug while he pours);
 while the engine is acting the pick walks along the pan. Flames roar while `busy`

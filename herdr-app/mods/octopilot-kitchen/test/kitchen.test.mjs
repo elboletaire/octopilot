@@ -1,8 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, existsSync } from "node:fs";
-import { derive, ballSprite, chefMood, focusIndex, armPiece, armReach, holeAt, spriteBox, boatBox, toneOf, logLines, headerLine, offlineReason, MOODS, BURSTS } from "../kitchen.js";
-import { PAN, ARM_POSES, COOK_STEPS } from "../atlas.js";
+import { derive, ballSprite, chefMood, focusIndex, armPiece, armReach, holeAt, spriteBox, boatBox, holdBox, HOLD_SLOTS, HOLD_MORE_INSET, toneOf, logLines, headerLine, offlineReason, MOODS, BURSTS } from "../kitchen.js";
+import { PAN, SCENE, BOX, ARM_POSES, COOK_STEPS } from "../atlas.js";
 
 const here = new URL(".", import.meta.url);
 const fixture = (name) => JSON.parse(readFileSync(new URL(`../../../fixtures/${name}`, here), "utf8"));
@@ -100,10 +100,52 @@ test("the log keeps the last lines in order, one line each, the older ones dim",
   assert.deepEqual(logLines(null), []);
 });
 
-test("the header counts the pan and the shelf", () => {
+test("the header counts the pan, the shelf and what is on hold", () => {
   assert.equal(headerLine({ onPan: 2, holes: 6, shelf: 0 }), "🐙 takoyaki kitchen · 2/6 on the pan");
   assert.equal(headerLine({ onPan: 2, holes: 6, shelf: 3, paused: true }),
     "🐙 takoyaki kitchen · 2/6 on the pan · 3 on the shelf · paused");
+  assert.equal(headerLine({ onPan: 2, holes: 6, shelf: 3, hold: 1 }),
+    "🐙 takoyaki kitchen · 2/6 on the pan · 3 on the shelf · 1 on hold");
+});
+
+test("the On hold tray: up to 8 faded boats under the shelf, then a +N for the rest", () => {
+  const view = fixture("kitchen-view.json");
+  const key = (n) => `acme/x#${n}`;
+  view.pan.hold = Array.from({ length: 10 }, (_v, n) => ({ key: key(n), label: `x#${n}` }));
+  view.pan.hold_total = 10;
+  view.header.hold = 10;
+  const m = derive(view, view.generated_at * 1000);
+  assert.equal(m.held, HOLD_SLOTS);
+  assert.equal(m.heldMore, 2);
+  assert.equal(m.boats, 3, "the shelf keeps its own boats");
+  assert.match(m.header, / · 10 on hold$/);
+  // The tray sits in the wall gap under the shelf's lower row, above the pan, inside the scene.
+  const lowerShelfBottom = boatBox(0)[1] + boatBox(0)[3];
+  for (let i = 0; i < HOLD_SLOTS; i++) {
+    const [x, y, w, h] = holdBox(i);
+    assert.ok(x >= BOX.shelf[0] && x + w <= SCENE.w, `slot ${i} x`);
+    assert.ok(y >= lowerShelfBottom && y + h <= BOX.pan[1], `slot ${i} y`);
+    if (i) assert.ok(x >= holdBox(i - 1)[0] + w, `slot ${i} overlaps the one before`);
+  }
+  // The "+N" chip hangs from the right edge by HOLD_MORE_INSET; node can't measure its width, so
+  // this only keeps the eighth boat clear of that edge (herdr-app check covers the render).
+  const [lastX, , lastW] = holdBox(HOLD_SLOTS - 1);
+  assert.ok(lastX + lastW <= SCENE.w - HOLD_MORE_INSET, "the eighth boat ends before the +N chip's edge");
+});
+
+test("a tray of fewer than 8 holds has no +N; the older view.json has an empty tray", () => {
+  const view = fixture("kitchen-view.json");
+  view.pan.hold = [{ key: "acme/x#1", label: "x#1" }];
+  view.pan.hold_total = 1;
+  const m = derive(view, view.generated_at * 1000);
+  assert.equal(m.held, 1);
+  assert.equal(m.heldMore, 0);
+  assert.equal(m.header, "🐙 takoyaki kitchen · 6/6 on the pan · 3 on the shelf · 1 on hold");
+  // view.json before On hold: no `hold`, no `hold_total`, no `header.hold`.
+  const old = derive(fixture("kitchen-view.json"), fixture("kitchen-view.json").generated_at * 1000);
+  assert.equal(old.held, 0);
+  assert.equal(old.heldMore, 0);
+  assert.equal(old.header, "🐙 takoyaki kitchen · 6/6 on the pan · 3 on the shelf");
 });
 
 test("the fixture kitchen: every ball state, a focus, a shelf and a live burst", () => {
