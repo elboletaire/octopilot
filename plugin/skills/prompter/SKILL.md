@@ -27,10 +27,13 @@ for it. You never act yourself.
     review on GitHub, or ask for another round), `PUSHED` (stale: the author
     pushed after the review and it has been quiet for hours; `re-review` or
     `ack`), `STALLED` (no heartbeat for 35 min; the user decides), `CLOSED`
-    (closed unmerged; clean up or leave it).
+    (closed unmerged; clean up or leave it). A `re-review overdue (Nh)` READY:
+    nobody re-reviewed in time; nudge the reviewer, dismiss the review or merge.
   - `WORKING`: running. `DONE`: finished, with a detail such as "parked by
     you -> waiting on merge or new activity", "review posted -> not yours to
-    merge" or "new commits ... -> waiting on re-request".
+    merge" or "new commits ... -> waiting on re-request". A fix PR waiting on
+    someone else's review shows `waiting on review` or `waiting on re-review`
+    (holds no slot; it turns READY once the review is in).
   - `GONE`: its session was closed by hand and its agent is not live in another
     open tab or space (when it is, the session follows the agent, re-homed).
   - `PROPOSE`: pick-next candidates. `UNCLONED`, `STALE` and `UNKNOWN` are

@@ -368,7 +368,7 @@ the warning is harmless.
 | 🔴 Needs you | `CAPPED`, `READY`, `PUSHED`, `STALLED`, `CLOSED`, agents waiting on a question, and agents whose last report was `blocked`/`failed`/`stalled`/`capped` |
 | ⏭ Next tick | `MERGED`, `REVIEW`, `FEEDBACK`, `BOOTING` -- what the engine does on its next tick |
 | 🟡 Running | `WORKING`, and anything spawned since the last GitHub refresh |
-| ✔ Done | `DONE`, `GONE`, and cards you parked with `d` (they keep their tab or workspace and hold no slot; new feedback or a re-requested review brings them back). Done rows without a tab or workspace are hidden; `D` shows them |
+| ✔ Done | `DONE` (including a fix PR waiting on a review: `waiting on review`, or `waiting on re-review` after requested changes; past `RE_REVIEW_QUIET_HOURS` that re-review shows as READY, `re-review overdue`), `GONE`, and cards you parked with `d` (they keep their tab or workspace and hold no slot; new feedback or a re-requested review brings them back). Done rows without a tab or workspace are hidden; `D` shows them |
 | ⚪ Pick next | `PROPOSE` |
 
 Agent state comes from herdr every 3s, heartbeats, rounds and reports the moment

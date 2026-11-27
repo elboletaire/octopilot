@@ -1263,7 +1263,7 @@ def pr_detail(slug, number):
     d = gh_json(["pr", "view", str(number), "-R", slug, "--json",
                  "number,state,mergedAt,headRefOid,headRefName,baseRefName,"
                  "statusCheckRollup,isDraft,url,title,reviews,comments,"
-                 "reviewRequests"],
+                 "reviewRequests,reviewDecision"],
                 default=None)
     return d
 
@@ -1290,6 +1290,51 @@ def review_requested(detail, me):
     """Whether `me` has a review request pending on the PR in `detail`."""
     return me in [(r.get("login") or r.get("name"))
                   for r in (detail or {}).get("reviewRequests") or []]
+
+
+def review_blocks(detail, me):
+    """Reviews by others that still block: each author's latest APPROVED,
+    CHANGES_REQUESTED or DISMISSED review is the one that counts for them."""
+    latest = {}
+    for r in sorted((detail or {}).get("reviews") or [],
+                    key=lambda r: r.get("submittedAt") or ""):
+        if r.get("state") in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED"):
+            latest[(r.get("author") or {}).get("login")] = r
+    return [r for who, r in latest.items()
+            if who != me and r.get("state") == "CHANGES_REQUESTED"]
+
+
+def review_wait(detail, me):
+    """The row note for a review `me` waits on in `detail`, or None.
+    A set reviewDecision decides; without one only others' pending requests count.
+    """
+    d = detail or {}
+    decision = d.get("reviewDecision")
+    asked = [r for r in d.get("reviewRequests") or []
+             if (r.get("login") or r.get("name")) != me]
+    if decision == "REVIEW_REQUIRED":
+        # Asked alone, `me` is the one who must review: not a wait.
+        if not asked and d.get("reviewRequests"):
+            return None
+        return "waiting on review"
+    if decision == "CHANGES_REQUESTED":
+        # Only `me` still asking for changes: the user must act, not wait.
+        return "waiting on re-review" if review_blocks(d, me) else None
+    if decision:
+        return None
+    return "waiting on review" if asked else None
+
+
+def rereview_hours(it, head, review):
+    """Hours the PR has waited on a re-review of the blocking review at `review`
+    on `head`, or None before RE_REVIEW_QUIET_HOURS. The clock starts at the
+    first scan that sees that pair, not when the reviewer asked."""
+    wait = it.get("rereview_wait") or {}
+    if (wait.get("head"), wait.get("review")) != (head, review):
+        wait = it["rereview_wait"] = {"head": head, "review": review,
+                                      "at": int(time.time())}
+    hours = (time.time() - wait["at"]) / 3600
+    return hours if hours >= RE_REVIEW_QUIET_HOURS else None
 
 
 def pr_review_comments(detail):
@@ -1784,6 +1829,7 @@ def scan(state, refresh=False, info=None):
             else:
                 layer, fb = None, new_feedback(d, it.get("feedback_seen"))
             if fb:
+                it.pop("rereview_wait", None)
                 who, when, kind, snippet = fb[-1]
                 # since= is the newest feedback's timestamp: mark-feedback
                 # needs it to move the watermark past this feedback.
@@ -1952,8 +1998,39 @@ def scan(state, refresh=False, info=None):
             checks = worst_checks([layer_detail(k, it, layer["pr"])
                                    for layer in it["stack"]]) \
                 if it.get("stack") else checks_of(d)
-            rows.append(("READY", k, f"mode=fix {smeta} checks={checks} "
-                                     "-> you merge"))
+            # The PR that merges first is the one that needs the review. Until
+            # it lands the user cannot merge, so the card holds no slot, as a
+            # comment PR waiting on its author does.
+            first = layer_detail(k, it, it["stack"][0]["pr"]) \
+                if it.get("stack") else d
+            if it.get("stack") and not first:
+                rows.append(("WORKING", k, f"mode=fix {smeta} "
+                                           f"layer=#{it['stack'][0]['pr']} "
+                                           "detail unavailable"))
+                continue
+            note = review_wait(first, me)
+            overdue = None
+            if note == "waiting on re-review":
+                blocked = max(r.get("submittedAt") or ""
+                              for r in review_blocks(first, me))
+                overdue = rereview_hours(it, cmp_head, blocked)
+            else:
+                it.pop("rereview_wait", None)
+            if overdue is not None:
+                # Nothing re-requests a review by itself: once it has waited
+                # too long, the user is asked to nudge, dismiss or merge. The
+                # wait marker tells the dashboard to notify it on its own.
+                rows.append(("READY", k, f"mode=fix {smeta} checks={checks} "
+                                         "wait=overdue -> re-review overdue "
+                                         f"({overdue:.0f}h): nudge the reviewer, "
+                                         "dismiss the review or merge"))
+            elif note:
+                active -= 1
+                rows.append(("DONE", k, f"mode=fix {smeta} checks={checks} "
+                                        f"-> {note}"))
+            else:
+                rows.append(("READY", k, f"mode=fix {smeta} checks={checks} "
+                                         "-> you merge"))
 
     # ---- candidates
     # prev_keys too: an issue re-keyed to its PR is still being worked on, and

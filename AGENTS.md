@@ -91,7 +91,10 @@ git worktree add --no-track -b feat/x .worktrees/feat-x origin/main
   state through `tick`, so never run them there without `OCTOPILOT_STATE_DIR`. A
   scratch-state tick still makes read-only `gh search prs` queries against the
   whole real account: `HOME_REPOS` and `CLONE_ROOTS` don't narrow those (only
-  `ISSUE_ORGS` narrows the issue search).
+  `ISSUE_ORGS` narrows the issue search). `scan.py` and `dashboard.py` ignore
+  `OCTOPILOT_STATE_DIR` and read `STATE_FILE` (default
+  `~/.local/state/octopilot/state.json`), so when you run or import them
+  directly, set `STATE_FILE=<scratch>/state.json` first.
 - **Unit tests**: `python3 -m unittest discover -s tests -v` from the repo root.
 - **GUI test space**: `open-gui.sh` refuses without `OCTOPILOT_STATE_DIR`. Run it
   from your worktree, then close the test space with
