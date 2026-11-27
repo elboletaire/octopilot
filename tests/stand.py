@@ -50,6 +50,7 @@ class RequestCase(unittest.TestCase):
         self.behind = False
         self.reply = (True, None)     # what send_to answers
         self.mode, self.template, self.prev, self.warning = "fix", "work", None, None
+        self.note = None
         world = fake_world(
             backend_for=lambda session: BACKEND,
             send_to=lambda address, text: self.reply,
@@ -110,7 +111,7 @@ class RequestCase(unittest.TestCase):
         scan.save(state)
         return {"ok": True, "error": None, "key": key_, "template": template,
                 "base": "main", "slug": REPO, "prev": self.prev, "stack": stack,
-                "warning": self.warning, "model": ""}
+                "warning": self.warning, "note": self.note, "model": ""}
 
     def log(self, kind, key, **fields):
         self.logs.append((kind, key, fields))

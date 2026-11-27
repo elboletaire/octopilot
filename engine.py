@@ -1134,7 +1134,9 @@ def _send_first(state, ctx, start, r, title, tmpl, subs, mark, failure, rendered
         scan.save(state)
         ctx.log("go", k, title=title, template=tmpl, queued=True, warning=r["warning"])
         return f"{k}: {tmpl} queued, the host warned: {r['warning']}"
-    ctx.log("go", k, title=title, template=tmpl)
+    # A note (the host did something else) is logged; the prompt still goes out.
+    fields = {"note": r["note"]} if r["note"] else {}
+    ctx.log("go", k, title=title, template=tmpl, **fields)
     return _send_in(state, ctx, k, tmpl, subs, "go", mark, rendered)
 
 

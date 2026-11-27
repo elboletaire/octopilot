@@ -242,6 +242,15 @@ class GoTest(RequestCase):
                          (ISSUE, "work", "go"))
         self.assertIs(self.logs[-1][2].get("queued"), True)
 
+    def test_a_host_note_sends_the_prompt_now_and_is_logged(self):
+        self.note = "no Octopilot workspace: the worker opens as its own workspace"
+        self.handle(f"go {ISSUE}")
+        self.assertEqual(len(self.addresses()), 1)
+        self.assertEqual(scan.load()["pending_sends"], [])
+        kind, _, fields = self.logs[-1]
+        self.assertEqual((kind, fields.get("note")), ("go", self.note))
+        self.assertNotIn("queued", fields)
+
 
 if __name__ == "__main__":
     unittest.main()
