@@ -41,7 +41,9 @@ after it: `engine (ap-<repo>-<number>)`.
 
 > **Closing the Octopilot space or workspace ends every worker tab.** Their worktrees
 > are kept, and their items show `GONE` and are untracked, freeing their slots. To end
-> one worker, use `z` or `del` on its row.
+> one worker, use `z` or `del` on its row. The exception is the GUI with its engine
+> parked (the default): while its Octopilot space is closed, the ticks and drains do
+> nothing and the rows stay as they are, with no `GONE`.
 
 A tab closed by hand does not end its session when its agent is live in another open
 tab or space (not held by another item; a tab is preferred): the session follows the

@@ -33,6 +33,8 @@ EMPTY = {
     "send_to": (True, None),
     "backend_for": None,
     "record_launcher_sessions": None,
+    "octopilot_closed": False,
+    "octopilot_reopened": False,
 }
 
 
@@ -66,6 +68,7 @@ def fake_world(**answers):
         "EVENTS_FILE": os.path.join(files, "events.jsonl"),
         "SNAPSHOT_FILE": os.path.join(files, "snapshot.json"),
         "TICK_LOCK": os.path.join(files, "tick.lock"),
+        "CLOSED_FILE": os.path.join(files, "space-closed"),
         "EXEC_LOCK": os.path.join(files, "exec.lock"),
     }
     with contextlib.ExitStack() as stack:

@@ -67,6 +67,8 @@ VIEW_FILE = os.path.join(os.path.dirname(STATE_FILE), "view.json")
 VIEW_STALE_SECS = 15  # three times dashboard.py's VIEW_EVERY
 # One tick at a time: a tick that finds it held returns at once.
 TICK_LOCK = os.path.join(os.path.dirname(STATE_FILE), "tick.lock")
+# Present while the GUI's Octopilot space is closed (see octopilot_closed()).
+CLOSED_FILE = os.path.join(os.path.dirname(STATE_FILE), "space-closed")
 # Held by each engine phase that acts (engine.run_rows), taken after the state
 # lock is released: its steps take that lock one at a time.
 EXEC_LOCK = os.path.join(os.path.dirname(STATE_FILE), "exec.lock")
@@ -1012,6 +1014,21 @@ def octopilot_space():
         if space in local:
             return space
     return None
+
+
+def octopilot_closed():
+    """True when this checkout's headless runs here but its Octopilot space is
+    gone: the space was closed, and octopilot with it. False when herdr-app does
+    not answer, so nothing is taken for closed."""
+    if OCTOPILOT_BACKEND != "hc" or HC.spaces() is None:
+        return False
+    return own_labels(HEADLESS_AGENT) is not None and octopilot_space() is None
+
+
+def octopilot_reopened():
+    """True when herdr-app answers and the Octopilot space is listed again. False
+    when it does not answer, so a flap is not taken for the space back."""
+    return HC.spaces() is not None and octopilot_space() is not None
 
 
 def octopilot_workspace():
@@ -3864,6 +3881,19 @@ def tick(args):
         except OSError:
             print("tick already running")
             return 0
+        if octopilot_closed():
+            # Every worker tab is gone with the space: keep the rows, untouched.
+            # The check calls herdr-app, so it runs outside the state lock.
+            with locked():
+                entered = not os.path.exists(CLOSED_FILE)
+                if entered:
+                    open(CLOSED_FILE, "w").close()
+                    log_event("closed")
+            if entered and "--quiet" not in args:
+                print("octopilot closed: its space is gone; run Open Octopilot")
+            return 0
+        if os.path.exists(CLOSED_FILE) and octopilot_reopened():
+            os.remove(CLOSED_FILE)
         with locked():
             state = load()
             info = {}
@@ -3925,6 +3955,10 @@ def drain(args):
     """drain [--quiet] [--plan]: handle the inbox's requests in order, then the
     queued sends. The dashboard runs it quiet when a request lands; --quiet
     hides only the off and busy notices, never the outcome lines."""
+    if octopilot_closed():
+        if "--quiet" not in args:
+            print("octopilot closed: nothing drained")
+        return 0
     mode = engine_mode(args)
     if mode == "off":
         if "--quiet" not in args:
