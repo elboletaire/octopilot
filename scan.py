@@ -1516,6 +1516,16 @@ def rehome_of(it, sessions, live, open_ws, held):
     return home, rows[home].get("space")
 
 
+def live_report(it, live):
+    """The item's last report while its agent has shown no sign of life since,
+    else {}: a later heartbeat, or a running agent, makes it history."""
+    rep = it.get("last_report") or {}
+    if rep.get("at", 0) < int(it.get("last_seen") or 0) or \
+            live.get(it.get("session"), {}).get("state") == "running":
+        return {}
+    return rep
+
+
 def scan(state, refresh=False, info=None):
     """Reconcile and return the table rows.
 
@@ -1776,6 +1786,17 @@ def scan(state, refresh=False, info=None):
             if parked_term:
                 parked_row(k)
                 continue
+            rep = live_report(it, live)
+            if rep.get("state") in ("blocked", "failed", "stalled"):
+                active += 1
+                rows.append(("BLOCKED", k, f"mode={it['mode']} {smeta} "
+                                           f"report={rep['state']} "
+                                           f"-> {rep.get('msg', '')[:80]}"))
+                continue
+            if rep.get("state") == "held":
+                rows.append(("HOLD", k, f"mode={it['mode']} {smeta} hold=you -> "
+                                        f"{rep.get('msg', '')[:80] or 'held as you asked'}"))
+                continue
             st = live.get(sess, {}).get("state", "?")
             age = live.get(sess, {}).get("age_secs")
             if age is None:
@@ -1866,15 +1887,27 @@ def scan(state, refresh=False, info=None):
         # head means it is done (the agent never calls mark-reviewed). A
         # report is current until the agent shows a later sign of life.
         if it.get("driver") == "agent":
-            rep = it.get("last_report") or {}
-            if rep.get("at", 0) < int(it.get("last_seen") or 0) or \
-                    live.get(sess, {}).get("state") == "running":
-                rep = {}
+            rep = live_report(it, live)
             if rep.get("state") == "capped" or it.get("capped_at"):
                 rows.append(("CAPPED", k,
                              f"mode={it['mode']} {smeta} head={head[:7]} "
                              f"rounds={rounds}/{MAX_REVIEW_ROUNDS} "
                              "-> agent stopped at the cap; you decide"))
+                continue
+            # A blocked or failed agent says so instead of going quiet: it keeps
+            # its slot. Held is the user's pause, so it gives the slot back.
+            if rep.get("state") in ("blocked", "failed", "stalled"):
+                rows.append(("BLOCKED", k,
+                             f"mode={it['mode']} {smeta} head={head[:7]} "
+                             f"report={rep['state']} "
+                             f"rounds={rounds}/{MAX_REVIEW_ROUNDS} "
+                             f"-> {rep.get('msg', '')[:80]}"))
+                continue
+            if rep.get("state") == "held":
+                active -= 1
+                rows.append(("HOLD", k,
+                             f"mode={it['mode']} {smeta} hold=you -> "
+                             f"{rep.get('msg', '')[:80] or 'held as you asked'}"))
                 continue
             if rep.get("state") == "ready" and rep.get("sha") \
                     and cmp_head.startswith(rep["sha"]):
@@ -2850,7 +2883,8 @@ def set_paused(state, paused):
 
 
 ORDER = ["MERGED", "RESTACK", "REVIEW", "FEEDBACK", "BOOTING", "WORKING",
-         "STALLED", "READY", "CAPPED", "PUSHED", "DONE", "CLOSED", "GONE",
+         "STALLED", "BLOCKED", "READY", "CAPPED", "PUSHED", "HOLD", "DONE",
+         "CLOSED", "GONE",
          "PROPOSE", "UNCLONED", "STALE", "UNKNOWN"]
 
 
@@ -2929,6 +2963,8 @@ def snapshot_doc(state, work, rows, active, nrepos, untracked, info):
     for kind, k, extra in sorted(rows, key=row_order):
         r = {"kind": kind, "key": k, "extra": extra}
         r.update(parse_extra(extra))
+        if "hold" in r["fields"]:
+            r["hold"] = {"by": r["fields"]["hold"], "reason": r.get("note", "")}
         it = items.get(k)
         if it:
             r["item"] = {f: it[f] for f in SNAPSHOT_ITEM_FIELDS
@@ -3057,7 +3093,7 @@ def focus_item(state, k):
     return 0
 
 
-REPORT_STATES = ("ready", "capped", "blocked", "failed", "stalled")
+REPORT_STATES = ("ready", "capped", "blocked", "failed", "stalled", "held")
 
 
 def report(state, args):
