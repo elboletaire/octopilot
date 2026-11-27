@@ -16,7 +16,9 @@ one keeps its model.
 
 ## Worker tabs
 
-`WORKER_HOST` (config.sh, read at each spawn) picks where a worker opens:
+`WORKER_HOST` (config.sh) picks where a worker opens. It is read from the environment when
+the process that spawns workers starts (the headless engine, which a launcher run starts with
+the value it was given), so restart the engine after changing it:
 
 - `tab` (the default): a tab of the Octopilot space or workspace. `scan.sh host-space`
   prints the one it uses: the GUI's space where the headless, the code agent or the
@@ -27,8 +29,8 @@ Without an Octopilot space or workspace (the launcher has not run), the worker o
 a space or workspace of its own, and the spawn prints `NOTE:` saying so. A remote
 Octopilot space (see `CONTRACT.md`) is not used: workers open on this computer.
 
-`SETTLE_WORKER_TABS` (GUI only; herdr has no settle) settles each new worker tab at
-spawn: herdr-app's `tab.settle` takes it out of the lists, still running. It comes back
+`SETTLE_WORKER_TABS` (GUI only; herdr has no settle, read at the same start as `WORKER_HOST`)
+settles each new worker tab at spawn: herdr-app's `tab.settle` takes it out of the lists, still running. It comes back
 when you open it from the dashboard (`⏎`) or when its agent needs you. `0`
 leaves the tab shown.
 
@@ -42,9 +44,12 @@ after it: `engine (ap-<repo>-<number>)`.
 
 A tab closed by hand does not end its session when its agent is live in another open
 tab or space (not held by another item; a tab is preferred): the session follows the
-agent there (re-homed), and the row stays. An agent herdr-app parked (`terminal.park`: no tab, its claude still
-running) keeps its item tracked as `WORKING`, noting its terminal; `herdr-app do terminal.keep`
-shows it again and the next tick re-homes it. Only an agent that is gone shows `GONE`.
+agent there (re-homed), and the row stays. An agent herdr-app parked (`terminal.park`: its terminal is labelled with the agent's name,
+no open tab holds it, its claude still runs) keeps its item tracked: `WORKING` with its
+terminal's address and the `terminal.keep` command to show it, and no prompt is sent until then
+(feedback waits). A parked card you parked with `d` stays in Done; a parked PR that closed is
+`CLOSED`. Cleanup ends the parked terminal (`hc kill`) before it removes the worktree, and keeps
+the item tracked when the kill fails. Only an agent that is gone shows `GONE`.
 
 **Upgrading.** Sessions already in their own spaces or workspaces keep working; there is
 nothing to migrate. Both id shapes are read: tabs as `tb…` (GUI) or `w…:t…` (TUI), spaces
