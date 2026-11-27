@@ -253,10 +253,9 @@ def window_open():
 
 
 def hc_start(argv, cwd, labels, keep):
-    """Start argv in a terminal of its own, with no parent: it outlives this process
-    and a terminal's program. argv runs in the login shell, interactively, so the
-    gateway env reaches it, and a shell stays in the terminal once argv exits, as
-    herdr-app's tab.new leaves one. -> its address."""
+    """Start argv with no parent, so it outlives this process: in the login shell,
+    interactively, so the gateway env reaches it, and leaving a shell once argv
+    exits, as tab.new did. -> its address."""
     shell = os.environ.get("SHELL") or pwd.getpwuid(os.getuid()).pw_shell
     args = ["run", "--bg", "--json", "--no-parent", "--cwd", cwd]
     if keep:
