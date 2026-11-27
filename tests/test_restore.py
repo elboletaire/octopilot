@@ -415,18 +415,21 @@ class EndTerminalTest(unittest.TestCase):
 
 class SpawnResumeTest(unittest.TestCase):
     def test_a_resumed_tab_passes_resume_and_no_new_session(self):
-        with mock.patch.object(scan, "app_do", return_value=(
-                    0, {"terminal": "t1", "tab": NEW_TAB}, "")) as app_do, \
+        with mock.patch.object(scan, "hc_start", return_value="t1") as hc_start, \
+                mock.patch.object(scan, "window_open", return_value=False), \
                 mock.patch.object(scan.HC, "start_agent", return_value=None), \
                 mock.patch.object(scan, "plugin_settings", return_value=""):
             host = scan.HC.spawn_tab(OPEN_SPACE, "o/repo#1", "/repo", "/wt", "T", "m",
                                      name="ap-repo-1", resume="c-old")
-        new_tab = next(c.args[1] for c in app_do.call_args_list if c.args[0] == "tab.new")
-        argv = json.loads(new_tab[new_tab.index("--argv") + 1])
+        argv, cwd, labels = hc_start.call_args.args[:3]
         self.assertIn("--resume", argv)
         self.assertNotIn("--session-id", argv)
+        self.assertEqual(cwd, "/wt")
+        self.assertEqual(labels["herdr.space"], OPEN_SPACE)
+        self.assertEqual(labels["herdr.tab"], host["session"])
+        self.assertEqual(labels["octopilot.agent"], "ap-repo-1")
+        self.assertTrue(host["session"].startswith("tb"))
         self.assertEqual(host["claude_session"], "c-old")
-        self.assertEqual(host["session"], NEW_TAB)
 
 
 class RestoreWiringTest(unittest.TestCase):

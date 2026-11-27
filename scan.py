@@ -9,6 +9,7 @@ import fcntl
 import glob
 import json
 import os
+import pwd
 import re
 import shutil
 import subprocess
@@ -268,6 +269,28 @@ def hc_rpc(method, params, timeout=10):
 def app_do(command, args, timeout=60):
     """`herdr-app do <command>`: the GUI's spaces and focus."""
     return cli(["herdr-app", "do", command] + args, timeout)
+
+
+def window_open():
+    """Whether herdr-app answers, so a window on this computer shows the terminals."""
+    return cli(["herdr-app", "status"], timeout=10)[0] == 0
+
+
+def hc_start(argv, cwd, labels, keep):
+    """Start argv with no parent, so it outlives this process: in the login shell,
+    interactively, so the gateway env reaches it, and leaving a shell once argv
+    exits, as tab.new did. -> its address."""
+    shell = os.environ.get("SHELL") or pwd.getpwuid(os.getuid()).pw_shell
+    args = ["run", "--bg", "--json", "--no-parent", "--cwd", cwd]
+    if keep:
+        args.append("--keep")
+    for key, value in labels.items():
+        args += ["--label", f"{key}={value}"]
+    code, data, raw = hc(args + ["--", shell, "-ic", '"$@"; exec "$0" -i', shell,
+                                 *argv], timeout=60)
+    if code != 0 or not isinstance(data, dict) or not data.get("address"):
+        raise SystemExit(f"hc run failed: {raw}")
+    return data["address"]
 
 
 def error_code(data):
@@ -852,10 +875,38 @@ class HcBackend:
         return hc(["label", entry["pane"], f"octopilot.agent={name}"])[0] == 0
 
     def close(self, session):
-        """Close the session's tab, or its space."""
+        """Close the session's tab, or its space, in the window. Without a window,
+        end and remove the terminals labelled with it."""
+        if not window_open():
+            return self.remove_terminals(session)
         command = "tab.close" if is_tab(session) else "space.close"
         code, _, raw = app_do(command, ["--id", session, "--confirmed", "true"])
         return code, raw
+
+    def terminals_of(self, session):
+        """The terminal records labelled with the session's tab or space, finished
+        ones too; None when hc cannot say."""
+        label = "herdr.tab" if is_tab(session) else "herdr.space"
+        code, data, _ = hc(["ls", "--all", "--json", "--label", f"{label}={session}"],
+                           timeout=10)
+        if code != 0 or not isinstance(data, dict):
+            return None
+        return data.get("terminals", [])
+
+    def remove_terminals(self, session):
+        """End and remove each terminal labelled with the session -> (code, raw) of
+        the first failure."""
+        terms = self.terminals_of(session)
+        if terms is None:
+            return 1, "hc did not answer"
+        for term in terms:
+            if term.get("finished_ms") is None:
+                code, raw = end_terminal(term["address"])
+            else:
+                code, _, raw = hc(["rm", term["address"]])
+            if code != 0:
+                return code, raw
+        return 0, ""
 
     def discard(self, session, wt):
         """Close the space or tab, then remove its worktree -> (code, message). A
@@ -886,18 +937,30 @@ class HcBackend:
         return code, raw
 
     def gone(self, session, tries):
-        """True once the core document no longer lists the session, False while it still
-        does after `tries` looks, None when the list cannot be read. A closed tab
-        can linger in the list a moment."""
+        """True once the session is no longer open, False while it still is after
+        `tries` looks, None when that cannot be read. A closed tab can linger in the
+        list a moment."""
+        window = window_open()
         for attempt in range(tries):
-            spaces = self.spaces()
-            if spaces is None:
+            is_open = self.is_open(session, window)
+            if is_open is None:
                 return None
-            if session not in open_ids(spaces):
+            if not is_open:
                 return True
             if attempt < tries - 1:
                 time.sleep(0.5)
         return False
+
+    def is_open(self, session, window):
+        """Whether the session is open: listed by herdr-app when there is a window,
+        else labelled on a terminal that still runs. None when that cannot be read."""
+        if not window:
+            terms = self.terminals_of(session)
+            if terms is None:
+                return None
+            return any(t.get("finished_ms") is None for t in terms)
+        spaces = self.spaces()
+        return None if spaces is None else session in open_ids(spaces)
 
     def checkout_of(self, spaces, session):
         """The worktree path of a space, or None."""
@@ -939,65 +1002,51 @@ class HcBackend:
     def spawn_space(self, key_, path, wt, title, model, name=None, resume=None,
                     cont=False):
         """A space on the worktree, its first terminal running a named claude.
-        resume or cont restores a conversation instead of starting a new one."""
+        resume or cont restores a conversation instead of starting a new one. The
+        ids are ours: the terminal opens the space and its tab, window or none."""
         session = None if resume or cont else str(uuid.uuid4())
-        argv = json.dumps(self.spawn_command(model, session=session, resume=resume,
-                                             cont=cont))
-        code, data, raw = app_do("space.new", ["--name", title, "--folder", wt,
-                                               "--argv", argv, "--focus", "false"],
-                                 timeout=90)
-        if code != 0 or not data or "terminal" not in data:
-            raise SystemExit(f"herdr-app space.new failed: {raw}")
-        ws, term = data["space"], data["terminal"]
         name = name or agent_name(key_)
-        warning = self.start_agent(term, wt, path, name, f"space {ws}")
-        return self.host_of(ws, name, wt, warning, session or resume)
+        sp, tab = f"sp{uuid.uuid4().hex}", f"tb{uuid.uuid4().hex}"
+        argv = self.spawn_command(model, session=session, resume=resume, cont=cont)
+        term = hc_start(argv, wt, {"herdr.space": sp, "herdr.tab": tab,
+                                   "octopilot.agent": name}, keep=True)
+        if window_open():
+            code, _, raw = app_do("space.rename", ["--id", sp, "--name", title])
+            if code != 0:
+                print(f"note: space {sp} not renamed: {raw}")
+        warning = self.start_agent(term, wt, path, name, f"space {sp}")
+        return self.host_of(sp, name, wt, warning, session or resume)
 
     def spawn_tab(self, sp, key_, path, wt, title, model, name=None, resume=None,
                   cont=False):
         """A tab of the Octopilot space on the worktree, its terminal running a
-        named claude. A reserved tab name gets the agent's name after it.
+        named claude. The ids are ours: the terminal opens the tab, window or none.
+        A reserved tab name gets the agent's name after it.
         resume or cont restores a conversation instead of starting a new one."""
         name = name or agent_name(key_)
         session = None if resume or cont else str(uuid.uuid4())
-        argv = json.dumps(self.spawn_command(model, session=session, resume=resume,
-                                             cont=cont))
-        code, data, raw = app_do("tab.new", ["--space", sp, "--name",
-                                             tab_label(title, name),
-                                             "--folder", wt, "--argv", argv,
-                                             "--focus", "false"], timeout=90)
-        if code != 0 or not data or "terminal" not in data:
-            raise SystemExit(f"herdr-app tab.new failed: {raw}")
-        term = data["terminal"]
-        tab = data.get("tab") if isinstance(data.get("tab"), str) else self.tab_of(term)
-        if not tab:
-            raise SystemExit(f"herdr-app tab.new: {term} has no tab label (tab kept)")
-        warning = self.start_agent(term, wt, path, name, f"tab {tab}")
-        if SETTLE_WORKER_TABS:
-            code, _, raw = app_do("tab.settle", ["--id", tab])
+        tab = f"tb{uuid.uuid4().hex}"
+        argv = self.spawn_command(model, session=session, resume=resume, cont=cont)
+        term = hc_start(argv, wt, {"herdr.space": sp, "herdr.tab": tab,
+                                   "octopilot.agent": name}, keep=True)
+        if window_open():
+            code, _, raw = app_do("tab.rename", ["--id", tab, "--name",
+                                                 tab_label(title, name)])
             if code != 0:
-                print(f"note: tab {tab} not settled: {raw}")
+                print(f"note: tab {tab} not renamed: {raw}")
+            if SETTLE_WORKER_TABS:
+                code, _, raw = app_do("tab.settle", ["--id", tab])
+                if code != 0:
+                    print(f"note: tab {tab} not settled: {raw}")
+        warning = self.start_agent(term, wt, path, name, f"tab {tab}")
         host = self.host_of(tab, name, wt, warning, session or resume)
         host["space"] = sp
         return host
 
-    def tab_of(self, term):
-        """The tab of a terminal, from its herdr.tab label once herdr-core sets it."""
-        for _ in range(30):
-            _, info, _ = hc(["get", term, "--json"], timeout=10)
-            tab = ((info or {}).get("labels") or {}).get("herdr.tab")
-            if tab:
-                return tab
-            time.sleep(0.5)
-        return None
-
     def start_agent(self, term, wt, path, name, where):
-        """Label the terminal as the named agent, answer its trust dialog and wait
-        for it to settle -> the warning when it is blocked, else None. where
-        names the host in messages."""
-        code, _, raw = hc(["label", term, f"octopilot.agent={name}"])
-        if code != 0:
-            raise SystemExit(f"hc label failed ({where} kept): {raw}")
+        """Answer the trust dialog of the named agent in term and wait for it to
+        settle -> the warning when it is blocked, else None. The terminal carries
+        its octopilot.agent label from its start. where names the host in messages."""
         # claude draws its trust dialog a moment after it starts: keep looking
         # for it for a while, then wait for the agent to settle.
         for _ in range(30):
