@@ -48,7 +48,7 @@ tab or space (not held by another item; a tab is preferred): the session follows
 agent there (re-homed), and the row stays. An agent herdr-app parked (`terminal.park`: its terminal is labelled with the agent's name,
 no open tab holds it, its claude still runs) keeps its item tracked: `WORKING` with its
 terminal's address and the `terminal.keep` command to show it, and no prompt is sent until then
-(feedback waits). A parked card you parked with `d` stays in Done; a parked PR that closed is
+(feedback waits; new feedback on a parked PR is counted in the row, not sent or marked). A parked card you parked with `d` stays in Done; a parked PR that closed is
 `CLOSED`. Cleanup and detach (`z`) end the parked terminal (`hc kill`) first, and cleanup keeps the item
 tracked when the kill fails. Only an agent that is gone shows `GONE`.
 

@@ -1413,6 +1413,16 @@ def stack_feedback(it, detail_of):
     return None, []
 
 
+def parked_feedback(it, d, detail_of):
+    """The feedback a parked fix item has waiting, as (layer, feedback), as the
+    FEEDBACK path would see it, but marks nothing: the watermark stays put."""
+    if it["mode"] != "fix" or "feedback_seen" not in it:
+        return None, []
+    if it.get("stack"):
+        return stack_feedback(it, detail_of)
+    return None, new_feedback(d, it["feedback_seen"])
+
+
 def closed_layer(layers, detail_of):
     """The first of `layers` that GitHub reports CLOSED (not merged), or None."""
     for layer in layers:
@@ -1629,11 +1639,14 @@ def scan(state, refresh=False, info=None):
                                          "-> waiting on merge or new activity"))
                 return
             active += 1
+            waits = parked_feedback(it, d, lambda pr: layer_detail(k, it, pr))[1]
+            wait = (f"{len(waits)} new feedback item(s) wait until then" if waits
+                    else "feedback waits until then")
             rows.append(("WORKING", rk, f"mode={it['mode']} {smeta} parked in "
                                         "herdr-app with no tab: `herdr-app do "
                                         "terminal.keep --terminal "
                                         f"{parked_term['pane']}` shows it; "
-                                        "feedback waits until then"))
+                                        f"{wait}"))
 
         # Without a PR the branch lookup below runs first, so a PR the parked
         # claude opened still re-keys and reaches MERGED or CLOSED.

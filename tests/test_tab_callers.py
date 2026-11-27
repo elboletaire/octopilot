@@ -262,6 +262,41 @@ class ParkedIssueItemTest(unittest.TestCase):
         self.assertEqual([r[0] for r in rows], ["WORKING"])
 
 
+class ParkedFeedbackTest(unittest.TestCase):
+    """New feedback on a parked PR is reported in its row, never sent or marked."""
+    SEEN = "2026-11-20T00:00:00Z"
+
+    def scan(self, mode="fix", reviews=()):
+        state = tab_item(mode=mode, pr=5, feedback_seen=self.SEEN)
+        parked = {"session": None, "ids": [], "agent": "ap-app-5", "pane": "t9"}
+        d = pr_detail("octo/app", 5)
+        d["reviews"] = list(d["reviews"]) + list(reviews)
+        with fake.fake_world(all_sessions=([], {"hc"}, {SPACE}), backend_for=scan.HC,
+                             parked_agent=parked, pr_detail=lambda slug, pr: d):
+            rows = scan.scan(state)[0]
+        return state, rows
+
+    NEW_REVIEW = {"author": {"login": "reviewer"}, "state": "CHANGES_REQUESTED",
+                  "submittedAt": "2026-11-26T10:00:00Z", "body": "rename it"}
+
+    def test_new_feedback_is_counted_in_the_parked_row_without_a_feedback_row(self):
+        state, rows = self.scan(reviews=[self.NEW_REVIEW])
+        self.assertEqual([r[0] for r in rows], ["WORKING"])
+        self.assertIn("1 new feedback item(s) wait until then", rows[0][2])
+        self.assertIn("terminal.keep --terminal t9", rows[0][2])
+        self.assertEqual(state["items"][KEY]["feedback_seen"], self.SEEN)
+
+    def test_without_new_feedback_the_parked_row_keeps_its_text(self):
+        state, rows = self.scan()
+        self.assertEqual([r[0] for r in rows], ["WORKING"])
+        self.assertIn("feedback waits until then", rows[0][2])
+        self.assertNotIn("new feedback", rows[0][2])
+
+    def test_a_comment_item_has_no_feedback_to_count(self):
+        state, rows = self.scan(mode="comment", reviews=[self.NEW_REVIEW])
+        self.assertNotIn("new feedback", rows[0][2])
+
+
 class ParkedAgentTest(unittest.TestCase):
     def parked(self, agents, session=TAB, open_ws=frozenset({SPACE}), backend=scan.HC):
         it = tab_item()["items"][KEY]
