@@ -140,10 +140,13 @@ class LauncherSessionsTest(unittest.TestCase):
                           side_effect=lambda address: self.infos.get(address)).start()
         self.addCleanup(mock.patch.stopall)
 
-    def run_claude(self, agent, session=SESSION, pid=4242, cwd="/work/repo"):
+    def run_claude(self, agent, session=SESSION, pid=4242, cwd="/work/repo", fg_cwd=None):
         """A terminal running claude in the foreground, as claude's own session file says."""
         self.addresses[agent] = f"t-{agent}"
-        self.infos[f"t-{agent}"] = {"foreground": {"pid": pid, "name": "claude"}, "cwd": cwd}
+        fg = {"pid": pid, "name": "claude"}
+        if fg_cwd:
+            fg["cwd"] = fg_cwd
+        self.infos[f"t-{agent}"] = {"foreground": fg, "cwd": cwd}
         with open(os.path.join(self.sessions, f"{pid}.json"), "w") as fh:
             json.dump({"pid": pid, "sessionId": session}, fh)
 
@@ -155,6 +158,8 @@ class LauncherSessionsTest(unittest.TestCase):
     def test_a_running_launcher_stores_its_live_session_and_cwd(self):
         self.run_claude(scan.PROMPTER_AGENT)
         self.run_claude(scan.CODE_AGENT, session=RESUMED, pid=4343, cwd="/work/other")
+        self.write_transcript(SESSION)
+        self.write_transcript(RESUMED)
         state = {}
         scan.record_launcher_sessions(state)
         self.assertEqual(state["launcher_sessions"], {
@@ -164,11 +169,30 @@ class LauncherSessionsTest(unittest.TestCase):
 
     def test_a_clear_in_the_launcher_stores_the_new_session(self):
         self.run_claude(scan.PROMPTER_AGENT)
+        self.write_transcript(SESSION)
+        state = {}
+        scan.record_launcher_sessions(state)
+        self.run_claude(scan.PROMPTER_AGENT, session=RESUMED)
+        self.write_transcript(RESUMED)
+        scan.record_launcher_sessions(state)
+        self.assertEqual(state["launcher_sessions"][scan.PROMPTER_AGENT]["session"], RESUMED)
+
+    def test_a_fresh_clear_with_no_transcript_keeps_the_earlier_session(self):
+        self.run_claude(scan.PROMPTER_AGENT)
+        self.write_transcript(SESSION)
         state = {}
         scan.record_launcher_sessions(state)
         self.run_claude(scan.PROMPTER_AGENT, session=RESUMED)
         scan.record_launcher_sessions(state)
-        self.assertEqual(state["launcher_sessions"][scan.PROMPTER_AGENT]["session"], RESUMED)
+        self.assertEqual(state["launcher_sessions"][scan.PROMPTER_AGENT],
+                         {"session": SESSION, "cwd": "/work/repo"})
+
+    def test_the_cwd_is_the_foreground_claudes_folder_when_it_has_one(self):
+        self.run_claude(scan.PROMPTER_AGENT, cwd="/work/terminal", fg_cwd="/work/claude")
+        self.write_transcript(SESSION)
+        state = {}
+        scan.record_launcher_sessions(state)
+        self.assertEqual(state["launcher_sessions"][scan.PROMPTER_AGENT]["cwd"], "/work/claude")
 
     def test_a_launcher_not_running_keeps_its_last_value(self):
         before = {scan.PROMPTER_AGENT: {"session": SESSION, "cwd": "/work/repo"}}
@@ -178,18 +202,16 @@ class LauncherSessionsTest(unittest.TestCase):
 
     def test_the_launcher_session_prints_id_and_cwd_when_the_transcript_exists(self):
         self.run_claude(scan.PROMPTER_AGENT)
+        self.write_transcript()
         state = {}
         scan.record_launcher_sessions(state)
-        self.write_transcript()
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             code = scan.launcher_session(["launcher-session", scan.PROMPTER_AGENT], state)
         self.assertEqual((code, out.getvalue()), (0, f"{SESSION}\t/work/repo\n"))
 
     def test_the_launcher_session_prints_nothing_without_a_transcript(self):
-        self.run_claude(scan.PROMPTER_AGENT)
-        state = {}
-        scan.record_launcher_sessions(state)
+        state = {"launcher_sessions": {scan.PROMPTER_AGENT: {"session": SESSION, "cwd": "/x"}}}
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             code = scan.launcher_session(["launcher-session", scan.PROMPTER_AGENT], state)

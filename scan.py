@@ -3463,13 +3463,16 @@ LAUNCHER_AGENTS = (PROMPTER_AGENT, CODE_AGENT)
 
 def record_launcher_sessions(state):
     """Store the live claude session and cwd of each launcher that runs. A launcher
-    that is not running keeps the value it had."""
+    that is not running, or whose session has no transcript yet (a fresh /clear),
+    keeps the value it had."""
     for agent in LAUNCHER_AGENTS:
         address = agent_address(agent)
         info = terminal_info(address) if address else None
         session = live_session_id(info) if info else None
-        cwd = info.get("cwd") if info else None
-        if session is None or not isinstance(cwd, str) or not cwd:
+        if session is None or not transcript_file(session):
+            continue
+        cwd = (info.get("foreground") or {}).get("cwd") or info.get("cwd")
+        if not isinstance(cwd, str) or not cwd:
             continue
         state.setdefault("launcher_sessions", {})[agent] = {"session": session, "cwd": cwd}
 
