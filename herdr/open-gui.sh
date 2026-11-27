@@ -794,8 +794,13 @@ add_code_tab() {
         if [ -n "$code" ]; then end_terminal "$t"; else shells+="$t "; fi
         continue
       fi
-      echo "open-gui.sh: the $CODE_TAB tab holds $t, which is not the $CODE_AGENT agent;" \
-        "close it first" >&2
+      if [ "$t" = "${HC_TERMINAL_ID:-}" ]; then
+        echo "open-gui.sh: the $CODE_TAB tab holds $t, this run's own terminal;" \
+          "run Open Octopilot from another terminal" >&2
+      else
+        echo "open-gui.sh: the $CODE_TAB tab holds $t, which is not the $CODE_AGENT agent;" \
+          "close it first" >&2
+      fi
       exit 1
     done
   fi
