@@ -162,7 +162,8 @@ export function column(v, t, col, now) {
     .child(div().flex_1().min_h(0).relative()
       .child(v_flex().id(`col-${col.id}`).absolute().inset_0().overflow_y_scroll()
         .track_scroll(v.scrolls[col.id]).gap(8)
-        .children(cards.length ? cards : [div().py(24).text_center().text_color(t.dim).child("—")])));
+        .children(cards.length ? cards : [div().py(24).text_center().text_color(t.dim)
+          .child(col.hidden > 0 ? "D to show" : "—")])));
 }
 
 function repoRow(v, t, line) {

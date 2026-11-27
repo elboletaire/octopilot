@@ -60,11 +60,12 @@ export function engineLabel(engine, view, now) {
 }
 
 // The board's columns in this order, found by id; a column with any other id is skipped
-// (CONTRACT.md). Done shows none of its entries until D toggles it; `hidden` counts them.
+// (CONTRACT.md).
 const COLUMN_ORDER = ["running", "needs", "hold", "done"];
 
 // Board columns with the rows they show, and the Pick next tree as the lines it draws, plus
-// every key the cursor can stand on, in the order j/k walk them.
+// every key the cursor can stand on, in the order j/k walk them. Done shows none of its entries
+// until D toggles it; `hidden` counts them.
 export function arrange(view, { showDone, expanded }) {
   const columns = COLUMN_ORDER.flatMap((id) => {
     const c = view.columns.find((x) => x.id === id);
@@ -189,7 +190,7 @@ export const actionKey = (k) => (k.length === 1 ? k : k.toLowerCase());
 // Why a parsed view.json can't be drawn, or null when it can.
 export function viewError(v) {
   if (!v || typeof v !== "object" || v.v !== 1) return "view.json is not version 1";
-  if (!Array.isArray(v.columns) || v.columns.length !== 4) return "view.json has no four columns";
+  if (!Array.isArray(v.columns)) return "view.json has no columns";
   if (!v.header || typeof v.header !== "object") return "view.json has no header";
   return null;
 }
