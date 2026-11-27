@@ -600,10 +600,9 @@ def layout_blocks(node):
 
 
 def core_layout():
-    """herdr-app's layout as herdr-core's document holds it, every space and tab
-    listed -> [{id, name, folder, tabs: [{id, name, terminals: [{terminal, pane,
-    name}], mods: [{mod, props, pane, name}]}]}], or None when the core does not
-    answer."""
+    """herdr-app's spaces and tabs from herdr-core's document, as core-layout prints
+    them: [{id, name, folder, tabs: [{id, name, terminals: [{terminal, pane, name}],
+    mods: [{mod, props, pane, name}]}]}]; None when the core does not answer."""
     doc = (hc_rpc("doc.get", {"name": "herdr-app"}) or {}).get("value")
     if not isinstance(doc, dict):
         return None
@@ -656,8 +655,8 @@ class HcBackend:
 
     def spaces(self):
         """The open spaces of the core's layout, each with its open tabs (see
-        open_tabs), on any machine. A space with no open tab is closed. None when
-        the core or hc does not answer, so nothing is taken for closed."""
+        open_tabs). A space with no open tab is closed. None when the core or hc
+        does not answer, so nothing is taken for closed."""
         layout = core_layout()
         if layout is None:
             return None
@@ -671,7 +670,7 @@ class HcBackend:
                   for t in tab["terminals"]}
         spaces = {sp["id"] for sp in layout}
         pending = {}
-        for address in sorted(live - listed):
+        for address in sorted(a for a in live - listed if "/" not in a):
             code, info, _ = hc(["get", address, "--json"], timeout=10)
             labels = (info or {}).get("labels") or {} if code == 0 else {}
             if labels.get("herdr.tab") and labels.get("herdr.space") in spaces:
@@ -697,9 +696,6 @@ class HcBackend:
         cwds = None
         out = []
         for sp in spaces:
-            # A space on another machine has a folder this one cannot see.
-            if sp.get("machine"):
-                continue
             wt = checkout(sp["folder"]) if sp.get("folder") else None
             if wt:
                 out.append(self.session_row(sp["id"], sp.get("name"), sp["id"], wt))
@@ -836,7 +832,7 @@ class HcBackend:
         if is_tab(session):
             spaces = self.spaces()
             if spaces is None:
-                return False, "herdr-app did not answer"
+                return False, "herdr-core did not answer"
             space = next((sp["id"] for sp in spaces for t in sp.get("tabs", [])
                           if t.get("id") == session), None)
             if space is None:
@@ -873,7 +869,7 @@ class HcBackend:
         if code != 0 or is_tab(session):
             gone = self.gone(session, TAB_GONE_TRIES if is_tab(session) else 1)
             if gone is None:
-                return code or 1, "herdr-app did not answer: its worktree is kept"
+                return code or 1, "herdr-core did not answer: its worktree is kept"
             if not gone:
                 # Still open: its worktree is still in use.
                 return code or 1, raw or "still open: its worktree is kept"
@@ -890,7 +886,7 @@ class HcBackend:
         return code, raw
 
     def gone(self, session, tries):
-        """True once herdr-app no longer lists the session, False while it still
+        """True once the core document no longer lists the session, False while it still
         does after `tries` looks, None when the list cannot be read. A closed tab
         can linger in the list a moment."""
         for attempt in range(tries):
@@ -1033,7 +1029,7 @@ TAB_GONE_TRIES = 5
 
 
 def open_ids(spaces):
-    """Every space and tab id herdr-app lists, settled tabs included."""
+    """Every space and tab id the core document lists, settled tabs included."""
     return ({sp.get("id") for sp in spaces}
             | {t.get("id") for sp in spaces for t in sp.get("tabs", [])})
 
@@ -1112,7 +1108,7 @@ def octopilot_space():
     """The GUI's Octopilot space: that of the headless engine, the code agent or
     the prompter (their herdr.space label, else octopilot.space once parked),
     when this computer lists it. None when none is found."""
-    local = {s.get("id") for s in HC.spaces() or [] if not s.get("machine")}
+    local = {s.get("id") for s in HC.spaces() or []}
     for label in (HEADLESS_AGENT, CODE_AGENT, PROMPTER_AGENT):
         labels = own_labels(label) or {}
         space = labels.get("herdr.space") or labels.get("octopilot.space")
@@ -3698,7 +3694,7 @@ def end_terminal(term):
 
 
 def session_terminals(spaces, session):
-    """The terminal addresses herdr-app lists in a tab, or in every tab of a space."""
+    """The terminal addresses the core document lists in a tab, or in every tab of a space."""
     addresses = []
     for sp in spaces:
         for tab in sp.get("tabs", []):
@@ -3835,7 +3831,7 @@ def restore_sessions(args):
     sessions, answered, open_ws = all_sessions()
     spaces = HC.spaces() if HC.name in answered else None
     if spaces is None:
-        print("herdr-app did not answer: nothing restored", file=sys.stderr)
+        print("herdr-core did not answer: nothing restored", file=sys.stderr)
         return 1
     space = octopilot_space()
     if space is None:

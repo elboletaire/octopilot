@@ -190,13 +190,6 @@ class HcSessionsTest(unittest.TestCase):
                              "terminals": [{"terminal": "t9"}]}]}]
         self.assertEqual(self.sessions(spaces), [])
 
-    def test_a_remote_space_is_skipped(self):
-        self.cwds = {"t1": WT}
-        spaces = [{"id": "bolt/sp1", "machine": "bolt", "folder": WT, "tabs": []},
-                  {"id": "bolt/sp2", "machine": "bolt", "folder": "/x",
-                   "tabs": [{"id": "bolt/tb1", "terminals": [{"terminal": "t1"}]}]}]
-        self.assertEqual(self.sessions(spaces), [])
-
     def test_worktree_of_is_called_once_per_folder(self):
         self.cwds = {"t1": WT, "t2": WT}
         self.labels = {"t1": {}, "t2": {}}
@@ -487,7 +480,7 @@ class HcTabLifecycleTest(unittest.TestCase):
     def test_focus_a_tab_with_no_herdr_app_answer_is_refused(self):
         with mock.patch.object(scan.HC, "spaces", return_value=None):
             self.assertEqual(scan.HC.focus("tb1", "t7"),
-                             (False, "herdr-app did not answer"))
+                             (False, "herdr-core did not answer"))
 
     def test_focus_stops_at_the_first_failing_step(self):
         self.replies["tab.select"] = (1, None, "no such tab")
@@ -534,7 +527,7 @@ class HcTabLifecycleTest(unittest.TestCase):
         with mock.patch.object(scan.HC, "spaces", side_effect=[spaces, None]):
             code, raw = scan.HC.discard("tb1", self.WT)
         self.assertEqual(code, 1)
-        self.assertEqual(raw, "herdr-app did not answer: its worktree is kept")
+        self.assertEqual(raw, "herdr-core did not answer: its worktree is kept")
         self.git.assert_not_called()
 
     def test_discard_a_tab_whose_close_failed_but_is_gone_removes_the_worktree(self):
@@ -566,10 +559,6 @@ class HcTabLifecycleTest(unittest.TestCase):
         with mock.patch.object(scan.HC, "spaces", side_effect=[before, before]):
             self.assertEqual(scan.HC.discard("sp1", self.WT), (1, "busy"))
         self.git.assert_not_called()
-
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 def doc_tab(tab, *blocks):
@@ -682,3 +671,7 @@ class CoreLayoutTest(unittest.TestCase):
 
     def test_an_empty_document_has_no_open_space(self):
         self.assertEqual(scan.HC.spaces(), [])
+
+
+if __name__ == "__main__":
+    unittest.main()

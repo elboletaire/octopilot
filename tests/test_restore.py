@@ -112,7 +112,7 @@ class RestoreTest(unittest.TestCase):
         code, out, after, _ = self.run_restore(
             {"o/repo#1": before}, all_sessions=([], set(), set()))
         self.assertEqual(code, 1)
-        self.assertIn("herdr-app did not answer", out)
+        self.assertIn("herdr-core did not answer", out)
         self.assertEqual(self.spawn_tab.call_count, 0)
         self.assertEqual(after["o/repo#1"], before)
 
