@@ -299,9 +299,7 @@ class Hosts:
         if backend is None:
             return False
         target = (live.get(session) or {}).get("pane")
-        if backend is scan.HC:
-            return backend.focus(session, target, timeout=10)[0]
-        return backend.focus(session, target)[0]
+        return backend.focus(session, target, timeout=10)[0]
 
     def publish(self, entries):
         """Octopilot's view of each herdr agent, as pane metadata tokens the
@@ -1001,8 +999,11 @@ def row_refusal(model, aid, e):
     if aid == "focus":
         return None if e["session"] else "no session for this row"
     if aid == "shell":
-        return (None if e["path"] and os.path.isdir(e["path"])
-                else "no worktree for this row")
+        if not (e["path"] and os.path.isdir(e["path"])):
+            return "no worktree for this row"
+        if scan.backend_for(e["session"]) is scan.HC and not e["space"]:
+            return "no space for this row"
+        return None
     if aid in ("go", "no"):
         return None if kind == "PROPOSE" else \
             "go/no only applies to Pick next rows"

@@ -40,12 +40,12 @@ class FocusTest(unittest.TestCase):
 
     def test_a_tui_tab_focuses_through_herdr_with_its_agent(self):
         self.hosts.focus("w1:t2", {"w1:t2": {"pane": "p9"}})
-        self.herdr_focus.assert_called_once_with("w1:t2", "p9")
+        self.herdr_focus.assert_called_once_with("w1:t2", "p9", timeout=10)
         self.hc_focus.assert_not_called()
 
     def test_a_tui_workspace_focuses_through_herdr_without_the_dashboard(self):
         self.hosts.focus("w1", {})
-        self.herdr_focus.assert_called_once_with("w1", None)
+        self.herdr_focus.assert_called_once_with("w1", None, timeout=10)
 
     def test_a_refused_focus_names_the_session(self):
         model = mock.Mock(lock=threading.Lock(), live={},
@@ -70,6 +70,11 @@ class ShellRowTest(unittest.TestCase):
                                                    "--folder", self.path],
                                        timeout=10)
 
+    def test_the_tui_focus_passes_its_timeout_to_herdr(self):
+        with mock.patch.object(dashboard.scan, "herdr", return_value=(0, {}, "")) as herdr:
+            dashboard.scan.HERDR.focus("w1:t2", None, timeout=10)
+        herdr.assert_called_once_with(["tab", "focus", "w1:t2"], timeout=10)
+
     def test_a_gui_tab_without_a_space_is_refused(self):
         e = {"session": "tb1a", "space": None, "path": self.path}
         with mock.patch.object(dashboard.scan, "app_do") as app_do:
@@ -83,6 +88,29 @@ class ShellRowTest(unittest.TestCase):
             res = dashboard.shell_row(None, e)
         self.assertEqual(res, dashboard.Result(True, ""))
         popup.assert_called_once_with("shell", {}, cwd=self.path)
+
+
+@unittest.skipIf(dashboard is None, "dashboard needs rich")
+class ShellRefusalTest(unittest.TestCase):
+    def refusal(self, e):
+        with mock.patch.object(dashboard, "tracked_item", return_value=None):
+            return dashboard.row_refusal(None, "shell", e)
+
+    def test_a_gui_tab_without_a_space_is_refused_before_the_action(self):
+        e = {"session": "tb1a", "space": None, "path": tempfile.gettempdir(),
+             "kind": "WORKING", "key": "owner/repo#8"}
+        self.assertEqual(self.refusal(e), "no space for this row")
+
+    def test_a_gui_tab_with_a_space_and_a_tui_tab_pass(self):
+        base = {"path": tempfile.gettempdir(), "kind": "WORKING",
+                "key": "owner/repo#8"}
+        self.assertIsNone(self.refusal({**base, "session": "tb1a", "space": "sp7"}))
+        self.assertIsNone(self.refusal({**base, "session": "w1:t2", "space": None}))
+
+    def test_no_worktree_is_still_refused_first(self):
+        e = {"session": "tb1a", "space": None, "path": None,
+             "kind": "WORKING", "key": "owner/repo#8"}
+        self.assertEqual(self.refusal(e), "no worktree for this row")
 
 
 @unittest.skipIf(dashboard is None, "dashboard needs rich")
