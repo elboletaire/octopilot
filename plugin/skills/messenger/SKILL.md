@@ -172,6 +172,16 @@ With `OCTOPILOT_ENGINE=on` the engine acts on `MERGED`, `RESTACK`, `REVIEW`, `BO
   finds the agent. When the user names a session by title rather than key,
   find it with `herdr workspace list` (TUI) or `herdr-app ls` (GUI) and match
   it to the row's `session=`.
+
+  Once tracked, a `fix` item is driver=agent and the scan never prompts it,
+  so send its first prompt once. For a PR: `$A send <key> "$($A render
+  review-fix KEY=<key> REPO=<slug> PR=<n> BRANCH=<branch> BASE=<base>)"`. For
+  an issue: `$A send <key> "$($A render work KEY=<key> REPO=<slug>
+  ISSUE=<n> BRANCH=<branch> BASE=<base>)"`. `<base>` is `registry.<slug>.base`
+  in `$A status` (what `spawn` prints as `BASE=`); for a PR into another
+  branch, `gh pr view <n> -R <slug> --json baseRefName`. Or start `claude
+  --resume` in the worktree instead of a fresh claude, which needs no send. Do not mark the item booting: its
+  mark-reviewed would count a review round on top of the agent's own claim.
 - **"/investigate [--read-only] <repo> <question>"** -> spawn an investigation (below). The
   question is the user's, verbatim -- never paraphrase it into the prompt, and
   never answer it yourself. You are the orchestrator; the session investigates.
