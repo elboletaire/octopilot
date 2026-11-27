@@ -241,6 +241,30 @@ def hc(args, timeout=60):
     return cli(["hc"] + args, timeout)
 
 
+def hc_rpc(method, params, timeout=10):
+    """One herdr-core RPC over `hc connect`, hello first -> its result, or None on
+    any error or timeout. Needs no herdr-app window."""
+    requests = [{"jsonrpc": "2.0", "id": 1, "method": "hello", "params": {}},
+                {"jsonrpc": "2.0", "id": 2, "method": method, "params": params}]
+    stdin = "".join(json.dumps(r) + "\n" for r in requests)
+    try:
+        p = subprocess.run(["hc", "connect"], input=stdin, capture_output=True,
+                           text=True, timeout=timeout)
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    replies = {}
+    for line in p.stdout.splitlines():
+        try:
+            msg = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(msg, dict):
+            replies[msg.get("id")] = msg
+    if "error" in replies.get(1, {}) or "error" in replies.get(2, {}):
+        return None
+    return replies.get(2, {}).get("result")
+
+
 def app_do(command, args, timeout=60):
     """`herdr-app do <command>`: the GUI's spaces and focus."""
     return cli(["herdr-app", "do", command] + args, timeout)
@@ -566,6 +590,62 @@ class HerdrBackend:
         raise SystemExit(f"herdr agent start failed ({where} kept): {raw}")
 
 
+def layout_blocks(node):
+    """The block nodes under a layout node, in order."""
+    if not isinstance(node, dict):
+        return []
+    if node.get("type") == "block":
+        return [node]
+    return [b for child in node.get("children", []) for b in layout_blocks(child)]
+
+
+def core_layout():
+    """herdr-app's layout as herdr-core's document holds it, every space and tab
+    listed -> [{id, name, folder, tabs: [{id, name, terminals: [{terminal, pane,
+    name}], mods: [{mod, props, pane, name}]}]}], or None when the core does not
+    answer."""
+    doc = (hc_rpc("doc.get", {"name": "herdr-app"}) or {}).get("value")
+    if not isinstance(doc, dict):
+        return None
+    spaces = []
+    for sp in doc.get("spaces", []):
+        tabs = []
+        for tab in sp.get("tabs", []):
+            terminals, mods = [], []
+            for block in layout_blocks(tab.get("root")):
+                content = block.get("content") or {}
+                pane = {"pane": block.get("id"), "name": block.get("title")}
+                if "terminal" in content:
+                    terminals.append({"terminal": content["terminal"], **pane})
+                elif "mod" in content:
+                    mods.append({"mod": content["mod"],
+                                 "props": content.get("props", {}), **pane})
+            tabs.append({"id": tab.get("id"), "name": tab.get("name"),
+                         "terminals": terminals, "mods": mods})
+        spaces.append({"id": sp.get("id"), "name": sp.get("name"),
+                       "folder": sp.get("folder"), "tabs": tabs})
+    return spaces
+
+
+def open_tabs(sp, live, pending):
+    """The open tabs of one core space: a listed tab with a mod pane or a live
+    terminal, and a tab a live terminal is labelled with (pending: tab -> (space,
+    terminal)) while the document does not hold it yet."""
+    adopted = {tab: term for tab, (space, term) in pending.items() if space == sp["id"]}
+    tabs = []
+    for tab in sp["tabs"]:
+        extra = adopted.pop(tab["id"], None)
+        if extra and extra not in {t["terminal"] for t in tab["terminals"]}:
+            tab = {**tab, "terminals": tab["terminals"] + [
+                {"terminal": extra, "pane": None, "name": None}]}
+        if tab["mods"] or extra or any(t["terminal"] in live for t in tab["terminals"]):
+            tabs.append(tab)
+    for tab, term in adopted.items():
+        tabs.append({"id": tab, "name": None, "mods": [],
+                     "terminals": [{"terminal": term, "pane": None, "name": None}]})
+    return tabs
+
+
 class HcBackend:
     """herdr-app's GUI, its terminals run by herdr-core (`hc`). A session is a
     space; an agent is a terminal labelled octopilot.agent=<name> at spawn."""
@@ -575,14 +655,33 @@ class HcBackend:
     remove_label = "herdr-app space remove"
 
     def spaces(self):
-        """Every space herdr-app shows, on any machine; None when herdr-app is
-        missing or not answering, so nothing is taken for closed."""
-        if not shutil.which("herdr-app"):
+        """The open spaces of the core's layout, each with its open tabs (see
+        open_tabs), on any machine. A space with no open tab is closed. None when
+        the core or hc does not answer, so nothing is taken for closed."""
+        layout = core_layout()
+        if layout is None:
             return None
-        code, data, _ = cli(["herdr-app", "ls"], timeout=10)
-        if code != 0 or not data:
+        if not layout:
+            return []
+        code, data, _ = hc(["ls", "--json"], timeout=10)
+        if code != 0 or not isinstance(data, dict):
             return None
-        return data.get("spaces", [])
+        live = {t["address"] for t in data.get("terminals", [])}
+        listed = {t["terminal"] for sp in layout for tab in sp["tabs"]
+                  for t in tab["terminals"]}
+        spaces = {sp["id"] for sp in layout}
+        pending = {}
+        for address in sorted(live - listed):
+            code, info, _ = hc(["get", address, "--json"], timeout=10)
+            labels = (info or {}).get("labels") or {} if code == 0 else {}
+            if labels.get("herdr.tab") and labels.get("herdr.space") in spaces:
+                pending.setdefault(labels["herdr.tab"], (labels["herdr.space"], address))
+        out = []
+        for sp in layout:
+            tabs = open_tabs(sp, live, pending)
+            if tabs:
+                out.append({**sp, "tabs": tabs})
+        return out
 
     def sessions(self, spaces):
         """Linked-worktree spaces, and the tabs of other local spaces that run in
@@ -4015,7 +4114,7 @@ def chat_keys(args):
 SELF_LOCKING = {"tick", "drain", "restore-sessions"}
 READ_ONLY = {"render", "status", "siblings", "snapshot", "wind-down", "plugin-settings",
              "inbox", "installed-dir", "speech", "chat", "chat-send", "chat-keys",
-             "launcher-session", "host-space"}
+             "launcher-session", "host-space", "core-layout"}
 
 
 def claude_plugin_dirs():
@@ -4288,6 +4387,10 @@ def dispatch(cmd, args, state):
         if host:
             print(host)
         return 0
+    if cmd == "core-layout":
+        # core-layout: herdr-app's layout as herdr-core holds it, no window needed.
+        print(json.dumps(core_layout()))
+        return 0
     if cmd == "speech":
         print(json.dumps(speech_cmd(state)))
         return 0
@@ -4557,7 +4660,7 @@ def dispatch(cmd, args, state):
           "mark-merged|restack|"
           "render|spawn|"
           "investigate|snapshot|report|inbox|request|send|send-code|reboot|restore-sessions|read|focus|wind-down|"
-          "speech|chat|chat-send|chat-keys|launcher-session]", file=sys.stderr)
+          "speech|chat|chat-send|chat-keys|launcher-session|core-layout]", file=sys.stderr)
     return 1
 
 

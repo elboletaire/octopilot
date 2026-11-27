@@ -570,3 +570,115 @@ class HcTabLifecycleTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def doc_tab(tab, *blocks):
+    """A document tab whose root row holds the given blocks."""
+    return {"id": tab, "name": "Fix", "root": {"type": "row", "id": tab, "children": [
+        {"type": "block", "id": f"p-{tab}-{i}", "title": title, "content": content}
+        for i, (title, content) in enumerate(blocks)]}}
+
+
+def doc_space(sid, *tabs):
+    return {"id": sid, "name": "Octopilot", "folder": "/home/u/src", "tabs": list(tabs)}
+
+
+class CoreLayoutTest(unittest.TestCase):
+    """core_layout reads herdr-core's document through hc connect, and the open
+    rule of HcBackend.spaces() on top of it. Nothing reaches hc or herdr-app."""
+    def setUp(self):
+        self.doc = {"spaces": []}
+        self.terminals = []   # hc ls --json
+        self.labels = {}      # hc get: terminal -> labels
+        mock.patch.object(scan, "hc_rpc", side_effect=self.fake_rpc).start()
+        mock.patch.object(scan, "hc", side_effect=self.fake_hc).start()
+        self.addCleanup(mock.patch.stopall)
+
+    def fake_rpc(self, method, params, timeout=10):
+        if method == "doc.get" and params == {"name": "herdr-app"}:
+            return {"value": self.doc}
+        raise AssertionError(f"unexpected rpc {method} {params}")
+
+    def fake_hc(self, args, timeout=60):
+        if args == ["ls", "--json"]:
+            return 0, {"terminals": self.terminals}, ""
+        if args[0] == "get":
+            if args[1] not in self.labels:
+                return 1, {"error": {"kind": "not_found"}}, "terminal not found"
+            return 0, {"labels": self.labels[args[1]]}, ""
+        raise AssertionError(f"unexpected hc call {args}")
+
+    def live(self, *addresses):
+        self.terminals = [{"address": a, "agent": "claude-code"} for a in addresses]
+
+    def test_core_layout_lists_terminals_and_mods_of_each_tab(self):
+        self.doc = {"spaces": [doc_space("sp1", doc_tab(
+            "tb1", ("t1", {"terminal": "t6q"}),
+            ("octopilot-kitchen", {"mod": "octopilot-kitchen", "props": {"dir": "/d"}})))]}
+        self.assertEqual(scan.core_layout(), [{
+            "id": "sp1", "name": "Octopilot", "folder": "/home/u/src", "tabs": [{
+                "id": "tb1", "name": "Fix",
+                "terminals": [{"terminal": "t6q", "pane": "p-tb1-0", "name": "t1"}],
+                "mods": [{"mod": "octopilot-kitchen", "props": {"dir": "/d"},
+                          "pane": "p-tb1-1", "name": "octopilot-kitchen"}]}]}])
+
+    def test_core_layout_is_none_when_the_core_does_not_answer(self):
+        with mock.patch.object(scan, "hc_rpc", return_value=None):
+            self.assertIsNone(scan.core_layout())
+
+    def test_a_tab_with_a_live_terminal_is_open(self):
+        self.doc = {"spaces": [doc_space("sp1", doc_tab("tb1", (None, {"terminal": "t1"})))]}
+        self.live("t1")
+        self.assertEqual([t["id"] for t in scan.HC.spaces()[0]["tabs"]], ["tb1"])
+
+    def test_a_tab_with_a_mod_pane_is_open_without_terminals(self):
+        self.doc = {"spaces": [doc_space("sp1", doc_tab(
+            "tb1", (None, {"mod": "octopilot-dashboard", "props": {}})))]}
+        self.assertEqual([s["id"] for s in scan.HC.spaces()], ["sp1"])
+
+    def test_a_tab_with_only_exited_terminals_is_closed(self):
+        self.doc = {"spaces": [doc_space("sp1", doc_tab("tb1", (None, {"terminal": "t1"})))]}
+        self.live()
+        self.assertEqual(scan.HC.spaces(), [])
+
+    def test_a_space_missing_from_the_document_is_closed(self):
+        self.doc = {"spaces": [doc_space("sp1", doc_tab("tb1", (None, {"terminal": "t1"})))]}
+        self.live("t1", "t9")
+        self.labels = {"t9": {"herdr.tab": "tb9", "herdr.space": "sp-gone"}}
+        self.assertEqual([s["id"] for s in scan.HC.spaces()], ["sp1"])
+        self.assertEqual(scan.HC.spaces()[0]["tabs"][0]["id"], "tb1")
+
+    def test_a_pending_tab_is_open_through_its_labelled_terminal(self):
+        # tb2 is not in the document yet: its live terminal says so and names sp1.
+        self.doc = {"spaces": [doc_space("sp1", doc_tab("tb1", (None, {"terminal": "t1"})))]}
+        self.live("t1", "t2")
+        self.labels = {"t2": {"herdr.tab": "tb2", "herdr.space": "sp1"}}
+        spaces = scan.HC.spaces()
+        self.assertEqual([t["id"] for t in spaces[0]["tabs"]], ["tb1", "tb2"])
+        self.assertEqual(spaces[0]["tabs"][1]["terminals"][0]["terminal"], "t2")
+
+    def test_a_pending_tab_alone_opens_its_space(self):
+        self.doc = {"spaces": [doc_space("sp1")]}
+        self.live("t2")
+        self.labels = {"t2": {"herdr.tab": "tb2", "herdr.space": "sp1"}}
+        self.assertEqual([(s["id"], [t["id"] for t in s["tabs"]]) for s in scan.HC.spaces()],
+                         [("sp1", ["tb2"])])
+
+    def test_a_terminal_with_no_herdr_space_does_not_count(self):
+        self.doc = {"spaces": [doc_space("sp1")]}
+        self.live("t2")
+        self.labels = {"t2": {"herdr.tab": "tb2"}}
+        self.assertEqual(scan.HC.spaces(), [])
+
+    def test_a_terminal_in_an_unlisted_space_does_not_count(self):
+        self.doc = {"spaces": [doc_space("sp1")]}
+        self.live("t2")
+        self.labels = {"t2": {"herdr.tab": "tb2", "herdr.space": "sp-other"}}
+        self.assertEqual(scan.HC.spaces(), [])
+
+    def test_spaces_is_none_when_the_core_does_not_answer(self):
+        with mock.patch.object(scan, "hc_rpc", return_value=None):
+            self.assertIsNone(scan.HC.spaces())
+
+    def test_an_empty_document_has_no_open_space(self):
+        self.assertEqual(scan.HC.spaces(), [])
