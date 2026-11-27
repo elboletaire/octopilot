@@ -2529,9 +2529,10 @@ def agent_name(key_):
     return name
 
 
-def add_worktree(path, base, branch, new_branch):
+def add_worktree(path, base, branch, new_branch, pr=None):
     """Create the branch's worktree with git, not `herdr worktree create` (that
-    makes a local branch off HEAD for an origin-only PR). -> the worktree's path."""
+    makes a local branch off HEAD for an origin-only PR). A fork PR's branch is
+    not on origin, so it is fetched from pull/<pr>/head. -> the worktree's path."""
     wt = worktree_dir(path, branch)
     porcelain = sh(["git", "worktree", "list", "--porcelain"], cwd=path)[1]
     if f"worktree {wt}" not in porcelain.splitlines():
@@ -2540,6 +2541,13 @@ def add_worktree(path, base, branch, new_branch):
                     f"origin/{base}"]
         elif sh(["git", "rev-parse", "--verify", "--quiet",
                  f"refs/heads/{branch}"], cwd=path)[0] == 0:
+            args = ["git", "worktree", "add", wt, branch]
+        elif pr and sh(["git", "rev-parse", "--verify", "--quiet",
+                        f"refs/remotes/origin/{branch}"], cwd=path)[0] != 0:
+            code, out, err = sh(["git", "fetch", "origin",
+                                 f"pull/{pr}/head:{branch}"], cwd=path, timeout=180)
+            if code != 0:
+                raise SystemExit(f"git fetch pull/{pr}/head failed: {err or out}")
             args = ["git", "worktree", "add", wt, branch]
         else:
             args = ["git", "worktree", "add", "--track", "-b", branch, wt,
@@ -2553,7 +2561,8 @@ def add_worktree(path, base, branch, new_branch):
 def spawn_host(key_, path, base, branch, title, new_branch, model):
     """git worktree, then a session on OCTOPILOT_BACKEND running a named claude."""
     backend = spawn_backend()
-    wt = add_worktree(path, base, branch, new_branch)
+    _, num, kind = split_key(key_)
+    wt = add_worktree(path, base, branch, new_branch, num if kind == "pr" else None)
     return backend.spawn(key_, path, wt, title, model)
 
 
