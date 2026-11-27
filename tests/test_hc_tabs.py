@@ -301,7 +301,7 @@ class HcSpawnTest(unittest.TestCase):
             "run", "--bg", "--json", "--no-parent", "--cwd", self.SPACE, "--keep",
             "--label", "herdr.space=spOct", "--label", f"herdr.tab={self.TAB}",
             "--label", "octopilot.agent=ap-x-1",
-            "--", "/bin/zsh", "-ic", 'exec "$@"', "/bin/zsh", *self.argv()])
+            "--", "/bin/zsh", "-ic", '"$@"; exec "$0" -i', "/bin/zsh", *self.argv()])
         self.assertEqual(host, {"backend": "hc", "session": self.TAB, "space": "spOct",
                                 "agent": "ap-x-1", "worktree": self.SPACE,
                                 "claude_session": SID})
@@ -325,6 +325,15 @@ class HcSpawnTest(unittest.TestCase):
         self.assertEqual(self.app_calls, [])
         self.assertEqual(host["session"], self.TAB)
         self.assertEqual(self.run_args()[:4], ["run", "--bg", "--json", "--no-parent"])
+
+    def test_the_tab_is_named_and_settled_before_the_agent_starts(self):
+        order = []
+        mock.patch.object(scan, "app_do", side_effect=lambda c, a, timeout=60: (
+            order.append(c), self.fake_app(c, a))[1]).start()
+        mock.patch.object(scan.HC, "start_agent", side_effect=lambda *a: (
+            order.append("start_agent"), None)[1]).start()
+        self.spawn()
+        self.assertEqual(order, ["tab.rename", "tab.settle", "start_agent"])
 
     def test_no_settle_when_settling_is_off(self):
         with mock.patch.object(scan, "SETTLE_WORKER_TABS", False):
@@ -443,7 +452,7 @@ class HcStartTest(unittest.TestCase):
         self.assertEqual(args, [
             "run", "--bg", "--json", "--no-parent", "--cwd", "/wt", "--keep",
             "--label", "herdr.space=sp1", "--label", "octopilot.agent=ap-x",
-            "--", "/bin/zsh", "-ic", 'exec "$@"', "/bin/zsh", "env", "A=1", "claude"])
+            "--", "/bin/zsh", "-ic", '"$@"; exec "$0" -i', "/bin/zsh", "env", "A=1", "claude"])
         self.assertEqual(timeout, 60)
 
     def test_without_keep_there_is_no_keep_flag(self):
@@ -458,7 +467,7 @@ class HcStartTest(unittest.TestCase):
                 mock.patch.object(scan.pwd, "getpwuid", return_value=passwd):
             scan.hc_start(["claude"], "/wt", {}, keep=False)
         self.assertEqual(self.hc_calls[0][0][-5:], ["/usr/bin/fish", "-ic",
-                                                     'exec "$@"', "/usr/bin/fish",
+                                                     '"$@"; exec "$0" -i', "/usr/bin/fish",
                                                      "claude"])
 
     def test_a_failed_start_is_an_error(self):
@@ -673,6 +682,18 @@ class HcTabLifecycleTest(unittest.TestCase):
         self.window = False
         with mock.patch.object(scan, "hc", return_value=(1, None, "no core")):
             self.assertEqual(scan.HC.close("tb1"), (1, "hc did not answer"))
+
+    def test_gone_without_a_window_ignores_finished_terminals(self):
+        self.window = False
+        self.labelled = {"herdr.tab=tb1": [{"address": "t7", "finished_ms": 5}]}
+        self.assertTrue(scan.HC.gone("tb1", 1))
+
+    def test_gone_checks_the_window_once_for_all_its_looks(self):
+        self.window = False
+        self.labelled = {"herdr.tab=tb1": [{"address": "t7", "finished_ms": None}]}
+        with mock.patch.object(scan, "window_open", return_value=False) as wo:
+            self.assertFalse(scan.HC.gone("tb1", 3))
+        self.assertEqual(wo.call_count, 1)
 
     def test_discard_without_a_window_removes_the_worktree_once_unlabelled(self):
         self.window = False

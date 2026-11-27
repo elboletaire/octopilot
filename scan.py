@@ -254,16 +254,17 @@ def window_open():
 
 def hc_start(argv, cwd, labels, keep):
     """Start argv in a terminal of its own, with no parent: it outlives this process
-    and a terminal's program. argv runs in the login shell, interactively, as
-    open-gui.sh's shell_argv does, so the gateway env reaches it. -> its address."""
+    and a terminal's program. argv runs in the login shell, interactively, so the
+    gateway env reaches it, and a shell stays in the terminal once argv exits, as
+    herdr-app's tab.new leaves one. -> its address."""
     shell = os.environ.get("SHELL") or pwd.getpwuid(os.getuid()).pw_shell
     args = ["run", "--bg", "--json", "--no-parent", "--cwd", cwd]
     if keep:
         args.append("--keep")
     for key, value in labels.items():
         args += ["--label", f"{key}={value}"]
-    code, data, raw = hc(args + ["--", shell, "-ic", 'exec "$@"', shell, *argv],
-                         timeout=60)
+    code, data, raw = hc(args + ["--", shell, "-ic", '"$@"; exec "$0" -i', shell,
+                                 *argv], timeout=60)
     if code != 0 or not isinstance(data, dict) or not data.get("address"):
         raise SystemExit(f"hc run failed: {raw}")
     return data["address"]
@@ -845,8 +846,9 @@ class HcBackend:
         """True once the session is no longer open, False while it still is after
         `tries` looks, None when that cannot be read. A closed tab can linger in the
         list a moment."""
+        window = window_open()
         for attempt in range(tries):
-            is_open = self.is_open(session)
+            is_open = self.is_open(session, window)
             if is_open is None:
                 return None
             if not is_open:
@@ -855,12 +857,14 @@ class HcBackend:
                 time.sleep(0.5)
         return False
 
-    def is_open(self, session):
-        """Whether the session is open: listed by herdr-app in the window, else
-        labelled on a terminal. None when that cannot be read."""
-        if not window_open():
+    def is_open(self, session, window):
+        """Whether the session is open: listed by herdr-app when there is a window,
+        else labelled on a terminal that still runs. None when that cannot be read."""
+        if not window:
             terms = self.terminals_of(session)
-            return None if terms is None else bool(terms)
+            if terms is None:
+                return None
+            return any(t.get("finished_ms") is None for t in terms)
         spaces = self.spaces()
         return None if spaces is None else session in open_ids(spaces)
 
@@ -912,11 +916,11 @@ class HcBackend:
         argv = self.spawn_command(model, session=session, resume=resume, cont=cont)
         term = hc_start(argv, wt, {"herdr.space": sp, "herdr.tab": tab,
                                    "octopilot.agent": name}, keep=True)
-        warning = self.start_agent(term, wt, path, name, f"space {sp}")
         if window_open():
             code, _, raw = app_do("space.rename", ["--id", sp, "--name", title])
             if code != 0:
                 print(f"note: space {sp} not renamed: {raw}")
+        warning = self.start_agent(term, wt, path, name, f"space {sp}")
         return self.host_of(sp, name, wt, warning, session or resume)
 
     def spawn_tab(self, sp, key_, path, wt, title, model, name=None, resume=None,
@@ -931,7 +935,6 @@ class HcBackend:
         argv = self.spawn_command(model, session=session, resume=resume, cont=cont)
         term = hc_start(argv, wt, {"herdr.space": sp, "herdr.tab": tab,
                                    "octopilot.agent": name}, keep=True)
-        warning = self.start_agent(term, wt, path, name, f"tab {tab}")
         if window_open():
             code, _, raw = app_do("tab.rename", ["--id", tab, "--name",
                                                  tab_label(title, name)])
@@ -941,6 +944,7 @@ class HcBackend:
                 code, _, raw = app_do("tab.settle", ["--id", tab])
                 if code != 0:
                     print(f"note: tab {tab} not settled: {raw}")
+        warning = self.start_agent(term, wt, path, name, f"tab {tab}")
         host = self.host_of(tab, name, wt, warning, session or resume)
         host["space"] = sp
         return host

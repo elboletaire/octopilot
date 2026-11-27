@@ -30,12 +30,23 @@ Without an Octopilot space or workspace (the launcher has not run), the worker o
 a space or workspace of its own, and the spawn prints `NOTE:` saying so. A remote
 Octopilot space (see `CONTRACT.md`) is not used: workers open on this computer.
 
-`SETTLE_WORKER_TABS` (GUI only; herdr has no settle, read at the same start as `WORKER_HOST`)
+Worker terminals start with `hc run --bg --no-parent --keep` (no parent, so they outlive
+the process that spawned them), labelled `herdr.space`, `herdr.tab` and `octopilot.agent` from
+their start. Octopilot picks the space and tab ids itself (`sp<hex>`, `tb<hex>`), so no
+herdr-app window is needed to start a worker. Each terminal runs claude through the login shell
+and keeps a shell once claude exits (`"$@"; exec "$0" -i`), as herdr-app's tab.new did: the
+tab stays, and restore-sessions reopens its bare shell.
+
+With a herdr-app window, the tab is named and settled right after its start, before the
+agent is started; without one, nothing is named or settled. A space spawned with no window keeps
+its folder name, since its name is only set with a window.
+
+`SETTLE_WORKER_TABS` (with a window only; herdr has no settle, read at the same start as `WORKER_HOST`)
 settles each new worker tab at spawn: herdr-app's `tab.settle` takes it out of the lists, still running. It comes back
 when you open it from the dashboard (`⏎`) or when its agent needs you. `0`
 leaves the tab shown.
 
-A tab is named by its item's title. A title that is one of the launcher's tab names
+With a window, a tab is named by its item's title. A title that is one of the launcher's tab names
 (`OCTOPILOT`, `engine`, `Octopilot (code changes)`, in any case) gets the agent's name
 after it: `engine (ap-<repo>-<number>)`.
 
@@ -250,11 +261,11 @@ own "Octopilot (code changes)" tab (the TUI layout has no mods).
 
 Every engine terminal starts through the user's interactive shell (`$SHELL -ic
 'exec "$@"'`), so the gateway env in `~/.zshrc.local` reaches claude. herdr-app
-already runs the argv of `space.new` and `tab.new` in the shell (and keeps the
-shell open after the program), but runs `pane.split` argv as given, so the
-helpers beside the engine's host are wrapped by open-gui.sh (`shell_argv`). It
-uses `exec`, not herdr's keep-shell form: a shell left behind would keep a dead
-agent's terminal alive and labelled, and the reruns would never restart it.
+runs `pane.split` argv as given, so the helpers beside the engine's host are wrapped by
+open-gui.sh (`shell_argv`). It uses `exec`, not a keep-shell form: a shell left behind would
+keep a dead agent's terminal alive and labelled, and the reruns would never restart it.
+Worker terminals are the exception: they start through `$SHELL -ic '"$@"; exec "$0" -i'` and
+keep their shell, as herdr-app's tab.new did.
 
 The headless dashboard runs the loops and writes `view.json`; the mods only
 render it and send actions. The kitchen is the `octopilot-kitchen` mod, a pane
