@@ -33,6 +33,8 @@ EMPTY = {
     "send_to": (True, None),
     "backend_for": None,
     "record_launcher_sessions": None,
+    "terminal_state": "busy",
+    "end_terminal": (0, ""),
 }
 
 
