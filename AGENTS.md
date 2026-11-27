@@ -20,8 +20,8 @@ queue their commands for the engine, and agent reports are recorded on the item 
 shown on the cards, the kitchen and in notifications. The GUI's Octopilot space has
 three tabs: OCTOPILOT (kitchen, chat, dashboard), "Octopilot (code changes)", a claude
 started in this checkout for changing this code, and "engine" (the prompter and the
-headless dashboard, which hosts the engine), shown third unless the launcher runs with
-`--hide-engine` (see `herdr/README.md`). The TUI's Octopilot workspace has the first
+headless dashboard, which hosts the engine), parked (hidden) unless the launcher runs with
+`--show-engine` (see `herdr/README.md`). The TUI's Octopilot workspace has the first
 two. Worker tabs open in either, after them.
 
 The GUI is native mods over the same Python backend. The decisions stay in

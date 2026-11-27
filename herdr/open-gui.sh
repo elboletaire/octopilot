@@ -4,15 +4,13 @@
 #     kitchen KITCHEN_PX tall); on the right the octopilot-dashboard mod, full height
 #   Octopilot (code changes): the code agent's own claude (a terminal, never parked)
 #   engine: the headless dashboard (the engine's host, dashboard.sh --headless) and the
-#     prompter beside it, as hc terminals (third tab); --hide-engine parks them after
-#     building (no pane, still running), so the tab goes away; a rerun shows them again
-#     unless --hide-engine is given. An agent of an earlier launcher is retired here.
+#     prompter beside it, as hc terminals; parked after building by default (no pane,
+#     still running), so the third tab is not shown. --show-engine shows it; a rerun
+#     without it parks them again. An agent of an earlier launcher is retired here.
 # Each claude is labelled octopilot.agent=<name> and octopilot.session=<uuid>
 # (its transcript, read by scan.py speech and chat). --terminals builds the
 # TUI-style layout instead (the curses dashboard is the host, the prompter on its left).
-# --show-engine is accepted and does nothing (the engine
-# is shown by default). --no-layout is accepted and does nothing (there is no
-# octopilot layout any more).
+# --no-layout is accepted and does nothing (there is no octopilot layout any more).
 # --close-launcher closes this terminal's own pane at the end (the tab goes with
 # its last pane), for the key or the palette (programs.json). A failed run keeps that
 # pane open (the error, the log, Enter). From a worktree it needs OCTOPILOT_STATE_DIR
@@ -43,7 +41,7 @@ CODE_CWD="$DIR"                        # the octopilot dir: its AGENTS.md is the
 
 TERMINALS=0
 CLOSE_LAUNCHER=0
-HIDE_ENGINE=0
+HIDE_ENGINE=1
 # The terminals this run has ended, space-separated and padded: find_agent never adopts them.
 ENDED=" "
 LOG=""
@@ -85,8 +83,8 @@ for arg in "$@"; do
     --close-launcher) CLOSE_LAUNCHER=1 ;;
     --no-layout) ;;
     --hide-engine) HIDE_ENGINE=1 ;;
-    --show-engine) ;;
-    -h|--help) echo "usage: open-gui.sh [--terminals] [--hide-engine] [--no-layout] [--close-launcher]"; exit 0 ;;
+    --show-engine) HIDE_ENGINE=0 ;;
+    -h|--help) echo "usage: open-gui.sh [--terminals] [--show-engine] [--hide-engine] [--no-layout] [--close-launcher]"; exit 0 ;;
     *) echo "open-gui.sh: unknown argument $arg" >&2; exit 2 ;;
   esac
 done
@@ -667,8 +665,8 @@ unpark_engine() {
   done
 }
 
-# Parks the engine's terminals (--hide-engine): their panes go, the processes keep running,
-# and the engine tab goes away. The host's space stays in a label (octopilot.space) for
+# Parks the engine's terminals (the default; --show-engine skips it): their panes go, the
+# processes keep running, and the engine tab goes away. The host's space stays in a label (octopilot.space) for
 # space_of. The code agent is not an engine terminal.
 park_engine() {
   local space=$1 label t
@@ -800,7 +798,7 @@ prompter_pane_in() {
 }
 
 # Runs at the end of every path that did its work: the engine parked (the GUI
-# layout, --hide-engine), then the launcher's own pane.
+# layout, unless --show-engine), then the launcher's own pane.
 finish() {
   local space=$1
   if [ "$TERMINALS" = 0 ]; then park_engine "$space"; fi
@@ -821,7 +819,7 @@ name_space() {
 }
 
 # Puts the space's tabs in order: OCTOPILOT first, the code tab second, the engine tab third,
-# each only when it is present (--hide-engine parks the engine's, so its tab is not there).
+# each only when it is present (the default parks the engine's, so its tab is not there).
 # Worker tabs opened later land after them.
 place_tabs() {
   local space=$1 tab engine

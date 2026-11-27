@@ -143,7 +143,7 @@ terminals run in herdr-core) as one space with three tabs, in this order:
 |---|---|
 | **OCTOPILOT** | the `octopilot-kitchen` mod, a pane 300 px tall, on the left, over the `octopilot-chat` mod (the prompter as a chat, its input at the bottom); on the right the `octopilot-dashboard` mod (the table below), full height (`props`: `dir`, `state_dir`; its pane is named by `pane.rename`, the mod reads no name) |
 | **Octopilot (code changes)** | the code agent's own claude (`octopilot-code`, a claude started in this checkout, an hc terminal that is never parked) |
-| **engine** | the prompter (`octopilot-prompter`, `/octopilot:prompter`) and `dashboard.sh --headless` (`octopilot-headless`, the engine's host: it runs `scan.py tick` and `drain`), each an hc terminal. Shown by default; `--hide-engine` parks them (see below) |
+| **engine** | the prompter (`octopilot-prompter`, `/octopilot:prompter`) and `dashboard.sh --headless` (`octopilot-headless`, the engine's host: it runs `scan.py tick` and `drain`), each an hc terminal. Parked (hidden) by default; `--show-engine` shows them in a third tab (see below) |
 
 Every GUI run keeps OCTOPILOT, code and engine at tabs 1-3 in that order (`place_tabs`), so
 worker tabs opened later land after them. The `--terminals` layout keeps OCTOPILOT and the code tab
@@ -154,18 +154,19 @@ is given here, so the run calls `space.rename` when the space is not named so (b
 effort: a refusal is warned about). A remote herdr-app lists a new terminal a moment
 after it is made, so the run waits up to 15 s for each one it locates.
 
-The engine is shown by default. `--hide-engine` parks its two terminals after
-building (`herdr-app do terminal.park`): the pane goes, the process keeps
-running and core keep is off, so the empty engine tab goes too. They are found
-by their `octopilot.agent` labels, not by panes, so a rerun finds them parked.
-A parked headless keeps its space in an `octopilot.space` label (parking
-removes `herdr.space`). A parked terminal is shown with `terminal.peek` (the
-chef in the kitchen, the chat's Terminal button, the dashboard's `v` and `a`),
-which works on it. A rerun without `--hide-engine` shows parked engine terminals
-again (`terminal.keep`: the first takes a tab named `engine`, the others go
-beside it) and, as every GUI run does, keeps the engine tab third. `--show-engine` is accepted and does
-nothing, since the engine is shown by default. `--terminals` refuses on a parked
-engine and lists the parked terminals, each to show with `herdr-app do terminal.keep`.
+The engine is parked by default. A run parks its two terminals after building
+(`herdr-app do terminal.park`): the pane goes, the process keeps running and core
+keep is off, so the empty engine tab goes too. They are found by their
+`octopilot.agent` labels, not by panes, so a rerun finds them parked. A parked
+headless keeps its space in an `octopilot.space` label (parking removes
+`herdr.space`). A parked terminal is shown with `terminal.peek` (the chef in the
+kitchen, the chat's Terminal button, the dashboard's `v` and `a`), which works on
+it. `--show-engine` shows parked engine terminals (`terminal.keep`: the first takes
+a tab named `engine`, the others go beside it) and, as every GUI run does, keeps
+the engine tab third; a run with it leaves them shown. A run without it parks
+them again, also a shown engine. `--hide-engine` is still accepted and means the
+default. `--terminals` refuses on a parked engine and lists the parked terminals,
+each to show with `herdr-app do terminal.keep`.
 
 Every run writes its output to `$OCTOPILOT_STATE_DIR/open-gui.log` (the default
 state dir without the variable): the last run, and the one before as `open-gui.log.1`.
