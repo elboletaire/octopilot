@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# The GUI twin of open.sh: the Octopilot space in herdr-app, with three tabs:
+# The GUI twin of open.sh: the Octopilot space in herdr-app, with two tabs by default
+# (a third, engine, with --show-engine):
 #   OCTOPILOT: the octopilot-kitchen mod on the left, over the octopilot-chat mod (the
 #     kitchen KITCHEN_PX tall); on the right the octopilot-dashboard mod, full height
 #   Octopilot (code changes): the code agent's own claude (a terminal, never parked)
@@ -897,16 +898,16 @@ if [ -n "$host" ]; then
   keep_saved_records "$host"
   name_space "$space"
   if [ "$TERMINALS" = 1 ]; then
+    if [ -n "$(tab_named "$space" "$MAIN_TAB")" ] && [ "$(tab_named "$space" "$MAIN_TAB")" != "$tab" ]; then
+      echo "open-gui.sh: the space already has an $MAIN_TAB tab (the GUI layout);" \
+        "run without --terminals" >&2
+      exit 1
+    fi
     parked=$(parked_engine)
     if [ -n "$parked" ]; then
       echo "open-gui.sh: these engine terminals are parked (no pane); show each with" \
         "herdr-app do terminal.keep --terminal <address>:" >&2
       sed 's/^/  /' <<<"$parked" >&2
-      exit 1
-    fi
-    if [ -n "$(tab_named "$space" "$MAIN_TAB")" ] && [ "$(tab_named "$space" "$MAIN_TAB")" != "$tab" ]; then
-      echo "open-gui.sh: the space already has an $MAIN_TAB tab (the GUI layout);" \
-        "run without --terminals" >&2
       exit 1
     fi
     app do tab.rename --id "$tab" --name "$MAIN_TAB" >/dev/null

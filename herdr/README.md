@@ -137,7 +137,7 @@ falls back to the prompter's own turns when there is no fresh view.
 ## GUI (herdr-app)
 
 `herdr/open-gui.sh` builds Octopilot in the Herdr app (`herdr-app`, its
-terminals run in herdr-core) as one space with three tabs, in this order:
+terminals run in herdr-core) as one space with two tabs by default, OCTOPILOT and the code tab, plus the engine tab third with `--show-engine`:
 
 | Tab | Holds |
 |---|---|
@@ -145,7 +145,7 @@ terminals run in herdr-core) as one space with three tabs, in this order:
 | **Octopilot (code changes)** | the code agent's own claude (`octopilot-code`, a claude started in this checkout, an hc terminal that is never parked) |
 | **engine** | the prompter (`octopilot-prompter`, `/octopilot:prompter`) and `dashboard.sh --headless` (`octopilot-headless`, the engine's host: it runs `scan.py tick` and `drain`), each an hc terminal. Parked (hidden) by default; `--show-engine` shows them in a third tab (see below) |
 
-Every GUI run keeps OCTOPILOT, code and engine at tabs 1-3 in that order (`place_tabs`), so
+Every GUI run keeps OCTOPILOT, code and (when shown) engine at tabs 1-3 in that order (`place_tabs`), so
 worker tabs opened later land after them. The `--terminals` layout keeps OCTOPILOT and the code tab
 in the same order.
 
