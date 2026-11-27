@@ -797,11 +797,16 @@ def send_failed(p):
     return bool(p.get("error")) and p["error"] != engine.BLOCKED
 
 
-def engine_badge(kind, sends, paused):
-    """The ⏭ badge: the row's own engine action, before a queued send (the
-    failing one first). None when nothing is pending."""
+def engine_badge(kind, sends, paused, failed=None):
+    """The ⏭ badge: the row's own engine action, then the action that failed
+    (a send's reason fails as a send), then a queued send (the failing one
+    first). None when nothing is pending."""
     if kind in ENGINE_ACTIONS:
         action, label = ENGINE_ACTIONS[kind]
+    elif failed:
+        labels = dict(ENGINE_ACTIONS.values())
+        action, label = (failed, labels[failed]) if failed in labels \
+            else ("send", failed)
     elif sends:
         first = next((p for p in sends if send_failed(p)), sends[0])
         action, label = "send", first["reason"]
@@ -823,7 +828,8 @@ def column_of(row, it, ag, ctx):
     failing = next((p for p in sends if send_failed(p)), None)
     rep = scan.live_report(it, ctx["live"])
     state = rep.get("state")
-    extras = {"engine": engine_badge(kind, sends, ctx.get("paused")),
+    failed = it.get("engine_error_action") if it.get("engine_error") else None
+    extras = {"engine": engine_badge(kind, sends, ctx.get("paused"), failed),
               "cause": None, "report": None}
     agent = ag.get("state")
     if kind in ("MERGED", "RESTACK"):
@@ -1462,7 +1468,6 @@ def view_for(model):
         age = now - gen
         github = ("ok" if age < REFRESH_SECS * 1.5 else
                   "stale" if age < REFRESH_SECS * 4 else "old")
-    done_open = [e for e in data["done"] if e["open"]]
     last_tick = hdr["last_tick"]
 
     def column(cid, title, section, rows, **extra):
@@ -1502,8 +1507,7 @@ def view_for(model):
             column("hold", "💤 On hold", "hold", data["hold"],
                    hint="waiting on someone else, or held by you; holds no slot"),
             column("done", "✔ Done", "done", data["done"],
-                   hint="finished; holds no slot",
-                   hidden=len(data["done"]) - len(done_open)),
+                   hint="finished; holds no slot", hidden=len(data["done"])),
         ],
         "pick": [{"repo": slug,
                   "entries": [entry_view(model, e, "pick", i + 1)

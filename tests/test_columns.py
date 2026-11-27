@@ -57,6 +57,14 @@ class PlacementTest(unittest.TestCase):
         self.assertEqual(extras["cause"],
                          "engine-error:cleanup failed: no worktree")
 
+    def test_3_engine_error_keeps_its_failed_action_as_the_badge(self):
+        it = item(engine_error="restack failed: boom",
+                  engine_error_action="restack")
+        section, extras = place("WORKING", it)
+        self.assertEqual((section, extras["engine"]["action"],
+                          extras["engine"]["label"]),
+                         ("needs", "restack", "restacking"))
+
     def test_3_failed_queued_send_needs_you_and_badges_the_send(self):
         send = {"key": "o/r#1", "reason": "rebase", "at": NOW - 5,
                 "error": engine.FAILED}
@@ -151,8 +159,21 @@ class PlacementTest(unittest.TestCase):
 
 @unittest.skipIf(dashboard is None, "dashboard needs rich")
 class EngineBadgeTest(unittest.TestCase):
-    def badge(self, kind, sends=(), paused=False):
-        return dashboard.engine_badge(kind, list(sends), paused)
+    def badge(self, kind, sends=(), paused=False, failed=None):
+        return dashboard.engine_badge(kind, list(sends), paused, failed)
+
+    def test_a_failed_action_is_the_badge_before_a_queued_send(self):
+        self.assertEqual(self.badge("WORKING", failed="boot"),
+                         {"action": "boot", "label": "sending review",
+                          "paused": False})
+        self.assertEqual(self.badge("WORKING", [{"reason": "rebase"}],
+                                    failed="boot")["action"], "boot")
+        self.assertEqual(self.badge("MERGED", failed="boot")["action"],
+                         "cleanup")
+
+    def test_a_failed_send_reason_is_a_send(self):
+        self.assertEqual(self.badge("WORKING", failed="go"),
+                         {"action": "send", "label": "go", "paused": False})
 
     def test_the_table(self):
         for kind, action, label in (
@@ -231,6 +252,22 @@ class BuildSectionsTest(unittest.TestCase):
         self.assertTrue(by_key["o/r#5"]["needs"])
         self.assertFalse(by_key["o/r#4"]["needs"])
         self.assertEqual(hdr["paused"], False)
+
+
+class EngineErrorActionTest(unittest.TestCase):
+    class Ctx:
+        def log(self, kind, key, **fields):
+            pass
+
+    def test_the_failing_action_is_kept_until_the_send_goes_out(self):
+        state = {"items": {"o/r#1": {"session": "tb1"}}}
+        engine._note(state, self.Ctx(), "o/r#1", "engine_error",
+                     "engine-error", "cleanup failed: boom", action="cleanup")
+        it = state["items"]["o/r#1"]
+        self.assertEqual(it["engine_error_action"], "cleanup")
+        engine._clear_notes(it)
+        self.assertNotIn("engine_error_action", it)
+        self.assertNotIn("engine_error", it)
 
 
 if __name__ == "__main__":
