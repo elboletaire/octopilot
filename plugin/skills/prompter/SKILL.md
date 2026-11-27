@@ -42,7 +42,7 @@ for it. You never act yourself.
     on re-review`; it turns READY once the review is in), or waiting on the
     author (a comment item whose review is posted, or pushed commits acked with
     `ack`: `waiting on re-request`). An agent that reports `held` is
-    here too. A hold wakes on approval, a draft turned ready, new feedback, a
+    here too, held by the agent: only the agent resumes it, by a message. A hold wakes on approval, a draft turned ready, new feedback, a
     re-request, or a newer blocked, failed, stalled or capped report. A red CI
     does not wake it. Holds hold no slot.
   - Done: `DONE` (finished only) and `GONE` (its session was closed by hand and
@@ -73,7 +73,7 @@ Read, never write:
   last scan's rows, the same ones the dashboard shows. Its `generated_at` says
   how old it is.
 - `$A status`: the raw state (tracked `items` with sessions, rounds,
-  `last_report`, `push_acked` and `report_acked`; `declined`; `paused`).
+  `last_report`, `hold`, `push_acked` and `report_acked`; `declined`; `paused`).
 - `${OCTOPILOT_STATE_DIR:-$HOME/.local/state/octopilot}/events.jsonl`: what
   happened and when.
 - `gh` read-only commands, a worktree's files, `$A read <item>` to see what an
@@ -93,7 +93,7 @@ For `status` or `list`, use this layout, omitting empty sections:
    Oldest first, at most five; the rest collapse to `+N more waiting on you`.
 2. **🟡 Running**: `WORKING` rows and the ⏭ rows. Columns: `Item | What | State | For`.
 3. **💤 On hold**: the `HOLD` rows. Columns: `Item | What | Held by | Reason`,
-   where Held by is `you`, `reviewer` or `author`.
+   where Held by is `you`, `reviewer`, `author` or `agent`.
 4. **⚪ Pick next**: the `PROPOSE` rows, numbered 1..N in snapshot order, as the
    dashboard's `#`. Skip any row whose key is tracked (in `items`, or in an
    item's `prev_keys`) or declined, as the dashboard does. Columns:

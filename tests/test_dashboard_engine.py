@@ -53,6 +53,16 @@ class OpenPrompterTest(unittest.TestCase):
 
 
 @unittest.skipIf(dashboard is None, "dashboard needs rich")
+class HeldReportKitchenTest(unittest.TestCase):
+    def test_a_held_report_is_a_neutral_zzz_line(self):
+        r = dashboard.kitchen_reaction({"kind": "report", "key": "owner/repo#4",
+                                        "state": "held", "msg": "wait for infra"})
+        self.assertEqual((r["mood"], r["ms"], r["burst"], r["key"], r["tone"]),
+                         ("flip", 2000, "zzz", "owner/repo#4", "info"))
+        self.assertEqual(r["text"], "held repo#4: wait for infra")
+
+
+@unittest.skipIf(dashboard is None, "dashboard needs rich")
 class EngineErrorViewTest(unittest.TestCase):
     def test_kitchen_says_the_reason_in_a_bad_tone(self):
         ev = {"kind": "engine-error", "key": "owner/repo#8",

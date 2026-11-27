@@ -63,6 +63,13 @@ class HoldRefusalTest(unittest.TestCase):
                                                entry("WORKING")),
                          "d only applies to tracked items")
 
+    def test_an_agent_hold_is_offered_hold_and_refuses_unhold_with_the_agent(self):
+        it = item(last_report={"state": "held", "at": NOW - 30, "msg": "wait"})
+        m = model({"o/r#1": it}, IDLE)
+        self.assertIsNone(dashboard.row_refusal(m, "hold", entry("HOLD")))
+        self.assertEqual(dashboard.row_refusal(m, "unhold", entry("HOLD")),
+                         "the agent is holding it; message it to resume")
+
     def test_unhold_only_on_a_card_you_hold(self):
         self.assertEqual(self.refusal("unhold", "WORKING", item()),
                          "o/r#1 is not on hold")

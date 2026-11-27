@@ -1886,8 +1886,8 @@ def scan(state, refresh=False, info=None):
                                            f"report={rep['state']} -> {note}"))
                 continue
             if rep.get("state") == "held":
-                note = one_line(rep.get("msg", "")) or "held as you asked"
-                rows.append(("HOLD", k, f"mode={it['mode']} {smeta} hold=you "
+                note = one_line(rep.get("msg", "")) or "held, no reason given"
+                rows.append(("HOLD", k, f"mode={it['mode']} {smeta} hold=agent "
                                         f"-> {note}"))
                 continue
             # A read-only investigation's ready report is read by the user, then
@@ -1990,9 +1990,9 @@ def scan(state, refresh=False, info=None):
                 continue
             if rep.get("state") == "held":
                 active -= 1
-                note = one_line(rep.get("msg", "")) or "held as you asked"
+                note = one_line(rep.get("msg", "")) or "held, no reason given"
                 rows.append(("HOLD", k,
-                             f"mode={it['mode']} {smeta} hold=you -> {note}"))
+                             f"mode={it['mode']} {smeta} hold=agent -> {note}"))
                 continue
             if rep.get("state") == "ready" and rep.get("sha") \
                     and cmp_head.startswith(rep["sha"]):
@@ -3127,9 +3127,6 @@ def snapshot_doc(state, work, rows, active, nrepos, untracked, info):
         if it:
             r["item"] = {f: it[f] for f in SNAPSHOT_ITEM_FIELDS
                          if it.get(f) is not None}
-            if it.get("hold"):
-                # dashboard.py still reads the old name, with its time.
-                r["item"]["parked"] = {"at": it["hold"].get("since")}
         d = info["details"].get(k)
         m = info["meta"].get(k)
         if d:

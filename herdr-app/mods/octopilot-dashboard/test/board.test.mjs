@@ -56,6 +56,7 @@ test("the engine badge says paused while paused, else the engine's label", () =>
 test("a hold reads as who holds the card and why", () => {
   assert.equal(holdLabel({ by: "you", reason: "waiting on the schema" }), "on hold: you — waiting on the schema");
   assert.equal(holdLabel({ by: "reviewer", reason: "" }), "on hold: reviewer");
+  assert.equal(holdLabel({ by: "agent", reason: "waiting on infra" }), "on hold: agent — waiting on infra");
   assert.equal(holdLabel({ by: "author", reason: "new commits acknowledged -> waiting on re-request" }),
     "on hold: author — new commits acknowledged -> waiting on re-request");
   assert.equal(holdLabel(null), null);

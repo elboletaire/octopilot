@@ -63,6 +63,12 @@ def revalidate_row(row, state):
     it = find_item(state, key)
     if kind in TRACKED and it is None:
         return False
+    # A held card is not the engine's to act on, whatever the row said when it
+    # was built: a hold that landed after the scan wins the race.
+    if kind in ("REVIEW", "BOOTING", "FEEDBACK"):
+        import scan
+        if scan.hold_of(it):
+            return False
     # A restack leaves the old key in handled_merges and keeps the item's
     # stack, so the merge check has to come before the stack check.
     if kind in ("MERGED", "RESTACK") and key in state.get("handled_merges", []):

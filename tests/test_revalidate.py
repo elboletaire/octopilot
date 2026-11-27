@@ -33,6 +33,16 @@ class RevalidateRowTest(unittest.TestCase):
         self.assertTrue(revalidate_row(row("REVIEW"), {"items": {K: {"phase": "idle"}}}))
         self.assertFalse(revalidate_row(row("REVIEW"), {"items": {K: {"phase": "booting"}}}))
 
+    def test_a_held_card_drops_its_engine_rows(self):
+        held = {"hold": {"by": "you", "reason": "", "since": 1}}
+        for kind, extra in (("REVIEW", {"phase": "idle"}),
+                            ("BOOTING", {"phase": "booting"}),
+                            ("FEEDBACK", {})):
+            state = {"items": {K: dict(extra, **held)}}
+            self.assertFalse(revalidate_row(row(kind, since="2026"), state), kind)
+            state = {"items": {K: dict(extra)}}
+            self.assertTrue(revalidate_row(row(kind, since="2026"), state), kind)
+
     def test_booting_needs_booting_phase(self):
         self.assertTrue(revalidate_row(row("BOOTING"), {"items": {K: {"phase": "booting"}}}))
         self.assertFalse(revalidate_row(row("BOOTING"), {"items": {K: {"phase": "idle"}}}))

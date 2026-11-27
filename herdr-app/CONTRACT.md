@@ -105,7 +105,7 @@ Log (one kitchen line, takoyaki's feed.ts `react()`):
  "burst": "sparkle" /* steam|batter|sparkle|smoke|bang|heart|zzz|ink|null */}
 ```
 
-Pan (takoyaki's pan and chef, from feed.ts `readKitchen()` and register.tsx `frame()`/`resting()`):
+Pan (takoyaki's pan and chef, from register.tsx `frame()`/`resting()`). The dashboard's pan is the reference: the board's sections decide it (balls: neither On hold nor Done). The plugin's band (feed.ts `readKitchen()`) approximates it from the snapshot rows, so it may differ for a held card with a running agent or an engine_error card; the two are not promised to match:
 ```jsonc
 {
   "holes": 6,                                       // header max_active
@@ -139,7 +139,7 @@ Entry:
   "note": "…", "pick_kind": "issue|review only|adopt PR|your PR",
   "session": "tb…|w…:t…|sp…|w…|null", "space": "sp…|null", "backend": "hc|herdr|null", "pane": "t7|null", "path": "/…|null",
   "branch": "…", "pr": 12, "stack": 1, "open": true, "tracked": true,
-  "hold": {"by": "you", "reason": "waiting on the schema"} /* the item's hold whatever its section, or null; by: you (held by the user), reviewer or author; reason is a string, "" when none was given (for reviewer and author, the row's note) */,
+  "hold": {"by": "you", "reason": "waiting on the schema"} /* the item's hold whatever its section, or null; by: you (held by the user), reviewer, author or agent (the agent's own `held` report: only the agent resumes it, by a message); reason is a string, "" when none was given (for reviewer and author, the row's note) */,
   "parked": true,                                   // alias: true when hold.by is "you"
   "engine": {"action": "cleanup", "label": "cleaning up", "paused": false} /* the ⏭ badge, see Engine badge; null when nothing is pending */,
   "cause": "report:failed:1732530000" /* opaque to mods: the reason string notifications key on, or null */,
@@ -148,7 +148,7 @@ Entry:
 }
 ```
 `kind` is any of the scan's row kinds (WORKING, READY, CAPPED, …). The new ones are `BLOCKED` (the agent reported blocked,
-failed or stalled; `report` gives which) and `HOLD` (held by you, or waiting on a reviewer or author). `DONE` is finished only.
+failed or stalled; `report` gives which) and `HOLD` (held by you, held by its agent, or waiting on a reviewer or author). `DONE` is finished only.
 
 Engine badge (`engine`), the engine's next action on the card:
 

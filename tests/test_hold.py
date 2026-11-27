@@ -83,11 +83,11 @@ class HoldRowsTest(unittest.TestCase):
         rows, _ = scan_at(item)
         self.assertEqual([kind for kind, _ in rows], ["STALLED"])
 
-    def test_held_is_hold_for_you_and_holds_no_slot(self):
+    def test_held_is_hold_by_the_agent_and_holds_no_slot(self):
         rows, active = scan_at(agent_item(last_report=report("held", msg="")))
         self.assertEqual([kind for kind, _ in rows], ["HOLD"])
-        self.assertIn("hold=you", rows[0][1])
-        self.assertIn("-> held as you asked", rows[0][1])
+        self.assertIn("hold=agent", rows[0][1])
+        self.assertIn("-> held, no reason given", rows[0][1])
         self.assertEqual(active, 0)
 
     def test_a_no_pr_item_reporting_blocked_is_blocked(self):
@@ -132,7 +132,7 @@ class HoldNoteTest(unittest.TestCase):
 
     def test_an_empty_held_message_says_held_as_you_asked(self):
         rows, _ = scan_at(no_pr_item(last_report=report("held", msg="")))
-        self.assertTrue(rows[0][1].endswith("-> held as you asked"), rows[0][1])
+        self.assertTrue(rows[0][1].endswith("-> held, no reason given"), rows[0][1])
 
 
 class HoldReviewedHeadTest(unittest.TestCase):
@@ -160,7 +160,7 @@ class HoldSnapshotTest(unittest.TestCase):
             snap = scan.snapshot(state)
         (row,) = [r for r in snap["rows"] if r["key"] == KEY]
         self.assertEqual(row["kind"], "HOLD")
-        self.assertEqual(row["hold"], {"by": "you", "reason": "wait for infra"})
+        self.assertEqual(row["hold"], {"by": "agent", "reason": "wait for infra"})
 
     def test_rows_without_a_hold_field_have_no_hold(self):
         state = copy.deepcopy(scan.EMPTY)
@@ -394,13 +394,13 @@ class FeedbackNoteTest(unittest.TestCase):
 
 
 class HoldSnapshotFieldsTest(unittest.TestCase):
-    def test_a_held_item_carries_its_hold_and_the_parked_alias_for_the_dashboard(self):
+    def test_a_held_item_carries_its_hold_and_no_parked_alias(self):
         state = state_with(fix_item(hold=hold()))
         with fake.fake_world(pr_detail=lambda slug, number: pr_with()):
             snap = scan.snapshot(state)
         (row,) = [r for r in snap["rows"] if r["key"] == KEY]
         self.assertEqual(row["item"]["hold"]["by"], "you")
-        self.assertEqual(row["item"]["parked"], {"at": LAST_SEEN})
+        self.assertNotIn("parked", row["item"])
         self.assertEqual(row["hold"], {"by": "you", "reason": "waiting"})
 
 

@@ -1141,6 +1141,14 @@ def browse_row(e):
     return Result(True, f"opening {short(e['key'])} in the browser")
 
 
+def agent_holds(model, it):
+    """Whether the item's agent reported held: its hold is the agent's, and
+    only the agent resumes it (by a message)."""
+    with model.lock:
+        live = dict(model.live)
+    return scan.live_report(it or {}, live).get("state") == "held"
+
+
 def unread_report(model, it):
     """Whether a read-only investigation's ready report is still to be read:
     the report `x` acknowledges."""
@@ -1183,7 +1191,11 @@ def row_refusal(model, aid, e):
         if it is None:
             return "d only applies to tracked items"
         if aid == "unhold":
-            return None if held_by_you(it) else f"{e['key']} is not on hold"
+            if held_by_you(it):
+                return None
+            if agent_holds(model, it):
+                return "the agent is holding it; message it to resume"
+            return f"{e['key']} is not on hold"
         if kind in ("MERGED", "RESTACK", "CLOSED", "GONE", "DONE", "BOOTING"):
             return f"{kind} rows can't be held now"
         # Its pending feedback would revive the card on the next tick.
@@ -1359,6 +1371,8 @@ def kitchen_reaction(ev):
             return rx("happy", 4000, "sparkle", True, line, True)
         if state == "capped":
             return rx("happy", 3000, "steam", True, line)
+        if state == "held":
+            return rx("flip", 2000, "zzz", True, line)
         if state == "stalled":
             return rx("worried", 3000, "smoke", True, line, bad=True)
         return rx("sad", 4500, "smoke", True, line, bad=True)
@@ -1428,11 +1442,13 @@ def ball_state(item, done_kind):
 
 
 def kitchen_pan(model, hdr, evs, now, busy, data):
-    """The pan and the chef: readKitchen() over the tracked items, the focus
-    of the newest event on the pan, and the chef's mood (register.tsx's
-    frame() and resting()). The board decides where an item sits: the pan
-    holds the items in neither On hold nor Done, the shelf is Done's, and
-    On hold has its own list (feed.ts's readKitchen agrees)."""
+    """The pan and the chef: the tracked items, the focus of the newest event
+    on the pan, and the chef's mood (register.tsx's frame() and resting()).
+    This pan is the reference: the board decides where an item sits (the pan
+    holds the items in neither On hold nor Done, the shelf is Done's, and On
+    hold has its own list). The plugin's band approximates it from the
+    snapshot rows and may differ (a held card with a running agent, an
+    engine_error card)."""
     state = model.state or {}
     items = state.get("items") or {}
     snap_kinds = {r.get("key"): r.get("kind")
@@ -1715,15 +1731,12 @@ class Dashboard:
         if hdr["paused"]:
             head.append(Text(" ⏸  PAUSED — octopilot starts and acts on nothing "
                              "until resumed (P)", style="bold black on yellow"))
-        # Done rows that still hold a workspace or session stay on the board,
-        # so they can be opened or detached (z) without toggling D first.
-        still_open = [e for e in data["done"] if e["open"]]
-        self.hidden_done = 0 if self.show_done else \
-            len(data["done"]) - len(still_open)
+        # Done is hidden until D shows it; the footer counts what D would show.
+        self.hidden_done = 0 if self.show_done else len(data["done"])
         columns = [("🟡 Running", data["running"], "yellow"),
                    ("🔴 Needs you", data["needs"], "red"),
                    ("💤 On hold", data["hold"], "blue"),
-                   ("✔ Done", data["done"] if self.show_done else still_open,
+                   ("✔ Done", data["done"] if self.show_done else [],
                     "green")]
         # The selection state first: the footer reads it, and it needs no
         # heights, so it is settled before anything is measured.
