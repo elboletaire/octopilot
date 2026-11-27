@@ -6,6 +6,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import time
 import unittest
 
 from tests import SCRATCH
@@ -13,21 +14,26 @@ from tests import SCRATCH
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LAUNCHER = os.path.join(REPO, "herdr", "open-gui.sh")
 
-# A shim logs its argv; herdr-app status succeeds only once $SHIM/window exists, and
-# systemd-run (the window opener) creates it. $SHIM/on_status, when present, runs first.
+# A shim logs its argv, and a line in $SHIM/fds when fd 8 or 9 (the engine's locks) is open.
+# herdr-app status exits 2 with no window until systemd-run (the window opener) creates
+# $SHIM/window; $SHIM/hang makes it time out (124) instead, and $SHIM/on_status runs first.
 SHIMS = {
     "herdr-app": '''#!/bin/sh
 echo "herdr-app $*" >> "$SHIM/trace"
+[ -e /proc/self/fd/8 ] && echo "herdr-app 8" >> "$SHIM/fds"
+[ -e /proc/self/fd/9 ] && echo "herdr-app 9" >> "$SHIM/fds"
 if [ "$1" = status ]; then
   [ -f "$SHIM/on_status" ] && sh "$SHIM/on_status"
+  [ -f "$SHIM/hang" ] && exit 124
   [ -f "$SHIM/window" ] && exit 0
-  echo "Connection refused" >&2
-  exit 1
+  echo "herdr-app: no Herdr window at $SHIM/herdr-app.sock: No such file or directory" >&2
+  exit 2
 fi
 exit 1
 ''',
     "systemd-run": '''#!/bin/sh
 echo "systemd-run $*" >> "$SHIM/trace"
+[ -e /proc/self/fd/8 ] && echo "systemd-run 8" >> "$SHIM/fds"
 touch "$SHIM/window"
 ''',
     "systemctl": '''#!/bin/sh
@@ -36,6 +42,7 @@ echo "systemctl $*" >> "$SHIM/trace"
 ''',
     "hc": '''#!/bin/sh
 echo "hc $*" >> "$SHIM/trace"
+[ -e /proc/self/fd/8 ] && echo "hc 8" >> "$SHIM/fds"
 case "$1 $2" in
   "ls --json") echo '{"terminals": []}' ;;
 esac
@@ -94,6 +101,35 @@ class OpenGuiWindowTest(unittest.TestCase):
         self.assertTrue(trace, "herdr-app status was not called")
         self.assertFalse([t for t in trace if t.startswith(("hc ", "systemd-run"))], trace)
         self.assertFalse([t for t in trace if t.startswith("herdr-app do")], trace)
+
+    def test_timeout_never_starts_a_second_window(self):
+        self.write("env", "WAYLAND_DISPLAY=wayland-1\n")
+        self.write("hang", "")
+        res = self.launch()
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("herdr-app did not answer", res.stdout + res.stderr)
+        self.assertFalse([t for t in self.trace() if t.startswith("systemd-run")], self.trace())
+
+    def test_lock_wait_says_so_before_it_blocks(self):
+        self.write("env", "")
+        tick_lock = os.path.join(self.state, "tick.lock")
+        holder = subprocess.Popen(["flock", tick_lock, "sleep", "2"])
+        self.addCleanup(holder.wait)
+        for _ in range(100):
+            if subprocess.run(["flock", "-n", tick_lock, "true"]).returncode != 0:
+                break
+            time.sleep(0.05)
+        res = self.launch()
+        out = res.stdout + res.stderr
+        self.assertIn("waiting for the engine's tick to finish", out)
+        self.assertIn("herdr-app has no window", out)
+
+    def test_children_do_not_inherit_the_locks(self):
+        self.write("env", "WAYLAND_DISPLAY=wayland-1\n")
+        self.launch()
+        fds = os.path.join(self.shim, "fds")
+        opened = open(fds).read().splitlines() if os.path.exists(fds) else []
+        self.assertEqual(opened, [])
 
     def test_graphical_session_opens_the_window(self):
         self.write("env", "WAYLAND_DISPLAY=wayland-1\n")
