@@ -3,6 +3,8 @@ window check. Runs the real launcher with herdr-app, systemd-run, systemctl and 
 shimmed on PATH; each shim appends its argv to a trace. No window is ever opened."""
 import json
 import os
+import pty
+import select
 import shutil
 import stat
 import subprocess
@@ -78,6 +80,7 @@ case "$1" in
   restore-sessions)
     echo "scan restore-sessions locks=$(locks)" >> "$SHIM/trace"
     [ -e /proc/self/fd/8 ] && echo "scan restore-sessions 8" >> "$SHIM/fds"
+    echo "$OCTOPILOT_LAUNCHER_LOCKED" > "$SHIM/restore_env"
     [ -f "$SHIM/restore_rc" ] && exit "$(cat "$SHIM/restore_rc")"
     exit 0 ;;
   request)
@@ -130,7 +133,7 @@ class OpenGuiWindowTest(unittest.TestCase):
         os.chmod(scan, os.stat(scan).st_mode | stat.S_IEXEC)
         return checkout
 
-    def launch(self, *args, home=None, checkout=None):
+    def launcher_env(self, home=None):
         env = {
             **os.environ,
             "SHIM": self.shim,
@@ -143,8 +146,11 @@ class OpenGuiWindowTest(unittest.TestCase):
         }
         if home:
             env["HOME"] = home  # where scan.py finds the claude transcripts
+        return env
+
+    def launch(self, *args, home=None, checkout=None):
         launcher = LAUNCHER if checkout is None else os.path.join(checkout, "herdr", "open-gui.sh")
-        return subprocess.run(["bash", launcher, *args], env=env, cwd=self.root,
+        return subprocess.run(["bash", launcher, *args], env=self.launcher_env(home), cwd=self.root,
                               capture_output=True, text=True, timeout=120)
 
     def trace(self):
@@ -174,15 +180,19 @@ class OpenGuiWindowTest(unittest.TestCase):
         for sid, _ in sessions.values():
             open(os.path.join(folder, sid + ".jsonl"), "w").close()
 
-    def running_app(self):
-        """A herdr-app that answers: space s1 holds the host th (tab OCTOPILOT, pane p1), tp, tc."""
-        self.write("window", "")
-        self.write("space", "")
+    def app_listing(self):
+        """The space s1 with the host th (tab OCTOPILOT, pane p1), tp and tc, as herdr-app ls shows it."""
         self.write("app-ls.json", json.dumps({"spaces": [{"id": "s1", "name": "Octopilot", "tabs": [
             {"id": "t1", "name": "OCTOPILOT", "terminals": [{"terminal": "th", "pane": "p1"}]},
             {"id": "t3", "name": "engine", "terminals": [{"terminal": "tp", "pane": "p2"}]},
             {"id": "t5", "name": "scratch", "terminals": [{"terminal": "tc", "pane": "p4"}]},
         ]}]}))
+
+    def running_app(self):
+        """A herdr-app that answers (its window is open), with the app_listing."""
+        self.write("window", "")
+        self.write("space", "")
+        self.app_listing()
 
     def shown_host(self, checkout=REPO):
         """This checkout's headless, shown in space s1 (tab OCTOPILOT, pane p1) of a running herdr-app."""
@@ -241,6 +251,7 @@ class OpenGuiWindowTest(unittest.TestCase):
         trace = self.trace()
         run = next(i for i, t in enumerate(trace) if t.startswith("systemd-run"))
         self.assertEqual(trace[run], "systemd-run --user --collect --quiet"
+                         f" --setenv=PATH={self.shim}{os.pathsep}{os.environ['PATH']}"
                          " --setenv=HERDR_APP_HOME=" + os.path.join(self.root, "app-home")
                          + " herdr-app")
         # The window answers after systemd-run: the run goes on past the check.
@@ -357,11 +368,12 @@ class OpenGuiWindowTest(unittest.TestCase):
         self.write("get-t-claude.json", json.dumps(terminal_json(real, code, "claude", old)))
         self.launch()
         trace = self.trace()
-        self.assertIn("hc kill t-shell", trace)
-        self.assertIn("hc rm t-shell", trace)
-        for t in ("t-young", "t-claude"):
-            self.assertFalse([line for line in trace if line.startswith((f"hc kill {t}", f"hc rm {t}"))],
-                             trace)
+        # Under the launcher's locks a shell of any age is bare: the young one goes too.
+        for t in ("t-shell", "t-young"):
+            self.assertIn(f"hc kill {t}", trace)
+            self.assertIn(f"hc rm {t}", trace)
+        self.assertFalse([line for line in trace if line.startswith(("hc kill t-claude", "hc rm t-claude"))],
+                         trace)
 
     def assert_restored_between_tabs_and_tick(self, trace):
         """restore-sessions runs after the tabs are set up, with the locks still held; the
@@ -418,6 +430,59 @@ class OpenGuiWindowTest(unittest.TestCase):
         for name in ("tick.lock", "exec.lock"):
             held = subprocess.run(["flock", "-n", os.path.join(self.state, name), "true"])
             self.assertEqual(held.returncode, 0, name)
+
+
+    def test_a_failed_run_frees_the_locks_while_it_waits_for_enter(self):
+        checkout = self.copy_checkout()
+        self.write("env", "HOME=/nowhere\nLANG=C\n")
+        # The Enter wait needs a terminal on stdin: the run's pane.
+        master, slave = pty.openpty()
+        self.addCleanup(os.close, master)
+        proc = subprocess.Popen(["bash", os.path.join(checkout, "herdr", "open-gui.sh"), "--close-launcher"],
+                                env=self.launcher_env(), cwd=self.root,
+                                stdin=slave, stdout=slave, stderr=slave)
+        os.close(slave)
+        self.addCleanup(proc.kill)
+        output = b""
+        deadline = time.time() + 60
+        while b"Press Enter" not in output and time.time() < deadline and proc.poll() is None:
+            if select.select([master], [], [], 1)[0]:
+                try:
+                    output += os.read(master, 4096)
+                except OSError:
+                    break
+        self.assertIn(b"Press Enter", output)
+        self.assertIsNone(proc.poll(), "the run must wait for Enter")
+        for name in ("tick.lock", "exec.lock"):
+            held = subprocess.run(["flock", "-n", os.path.join(self.state, name), "true"])
+            self.assertEqual(held.returncode, 0, name)
+        os.write(master, b"\n")
+        self.assertEqual(proc.wait(timeout=60), 1)
+
+    def test_young_bare_shells_are_reaped_on_the_systemd_run_path(self):
+        checkout = self.copy_checkout()
+        self.write("env", "WAYLAND_DISPLAY=wayland-1\n")
+        self.write("space", "")
+        self.app_listing()
+        real = os.path.realpath(checkout)
+        # Shells started just now, as a restore leaves them: the launcher's locks mean
+        # nothing is still starting, so they are reaped all the same.
+        young = {"octopilot-headless": "ys1", "octopilot-prompter": "ys2", "octopilot-code": "ys3"}
+        for agent, term in young.items():
+            self.write(f"ls-octopilot.agent={agent}.json", json.dumps({"terminals": [{"address": term}]}))
+            self.write(f"get-{term}.json", json.dumps(terminal_json(
+                real, {"herdr.space": "s1", "octopilot.agent": agent}, "zsh", now_ms())))
+        res = self.launch(checkout=checkout)
+        trace = self.trace()
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        for term in young.values():
+            self.assertIn(f"hc kill {term}", trace)
+            self.assertIn(f"hc rm {term}", trace)
+        first_app = next(i for i, t in enumerate(trace) if t.startswith("herdr-app do "))
+        self.assertLess(trace.index("hc rm ys1"), first_app, trace)
+        self.assertLess(trace.index("hc rm ys3"), first_app, trace)
+        with open(os.path.join(self.shim, "restore_env")) as fh:
+            self.assertEqual(fh.read().strip(), "1")
 
 
 if __name__ == "__main__":

@@ -67,6 +67,8 @@ on_exit() {
   local status=$?
   trap - EXIT
   exec 10>&- 11>&- 12>&- || true
+  # The engine's locks go before the Enter wait below: a failed pane must not freeze the engine.
+  exec 8>&- 9>&- || true
   if [ "$status" -ne 0 ] && [ "$CLOSE_LAUNCHER" = 1 ]; then
     if [ -n "$LOG" ]; then echo "open-gui.sh: failed (status $status); the log is $LOG" >&2; fi
     flush_log
@@ -204,7 +206,7 @@ ensure_window() {
       "or run herdr-app there, then run Open Octopilot again." >&2
     exit 1
   fi
-  local run=(systemd-run --user --collect --quiet)
+  local run=(systemd-run --user --collect --quiet "--setenv=PATH=$PATH")
   if [ -n "${HERDR_APP_HOME:-}" ]; then run+=("--setenv=HERDR_APP_HOME=$HERDR_APP_HOME"); fi
   "${run[@]}" "$APP" >/dev/null 2>&1 8>&- 9>&- || true
   for i in $(seq 30); do
@@ -284,12 +286,17 @@ is_mine() {
 }
 
 # The address of this checkout's terminal labelled as an octopilot agent, if
-# any. Pure lookup: it never kills (see reap_dead).
+# any. Pure lookup: it never kills (see reap_dead). A bare shell is never the agent:
+# the launcher holds the engine's locks, so no shell here is still starting.
 find_agent() {
-  local t
+  local t fg
   for t in $("$HC" ls --json --label "octopilot.agent=$1" | jq -r '.terminals[].address'); do
     case "$ENDED" in *" $t "*) continue ;; esac
-    if is_mine "$t"; then echo "$t"; return 0; fi
+    if ! is_mine "$t"; then continue; fi
+    fg=$("$HC" get "$t" --json | jq -r '.foreground.name // empty')
+    case "$fg" in zsh|bash|sh|fish) continue ;; esac
+    echo "$t"
+    return 0
   done
 }
 
@@ -318,18 +325,16 @@ end_terminal() {
 # Ends this checkout's terminals of an agent that are not running its program (a
 # shell herdr kept after claude exited, a dead headless), so it starts again.
 reap_dead() {
-  local t info fg created want=claude
+  local t fg want=claude
   if [ "$1" = "$HEADLESS_AGENT" ]; then want=uv; fi
   for t in $("$HC" ls --json --label "octopilot.agent=$1" | jq -r '.terminals[].address'); do
     is_mine "$t" || continue
-    info=$("$HC" get "$t" --json)
-    fg=$(jq -r '.foreground.name // empty' <<<"$info")
+    fg=$("$HC" get "$t" --json | jq -r '.foreground.name // empty')
     if [ "$fg" = "$want" ]; then continue; fi
-    # Still starting: its shell has not exec'd the program yet (created_ms, epoch ms).
-    created=$(jq -r '.created_ms // 0' <<<"$info")
+    # No age rule: the engine's locks are held, so no shell is still starting here (a
+    # restored one may be seconds old).
     case "$fg" in
-      zsh|bash|sh|fish)
-        if [ $(( $(date +%s%3N) - created )) -lt 30000 ]; then continue; fi ;;
+      zsh|bash|sh|fish) ;;
       *)
         # The code agent's terminal is the person's own: only a shell is reaped there.
         if [ "$1" = "$CODE_AGENT" ]; then continue; fi ;;
@@ -918,7 +923,8 @@ finish() {
 # exits first, and the exit releases the locks.
 restore_and_tick() {
   # The workers' children do not keep the locks, as in herdr-app and hc above.
-  if ! env "${envs[@]}" "$DIR/scan.sh" restore-sessions 8>&- 9>&-; then
+  # OCTOPILOT_LAUNCHER_LOCKED: the locks are held, so a restored shell is bare at once (scan.py).
+  if ! env "${envs[@]}" OCTOPILOT_LAUNCHER_LOCKED=1 "$DIR/scan.sh" restore-sessions 8>&- 9>&-; then
     echo "open-gui.sh: restore-sessions refused; no worker was reopened (see above)" >&2
   fi
   exec 9>&- 8>&-
