@@ -821,6 +821,9 @@ class HcBackend:
     def spawn_command(self, model, session=None, resume=None, cont=False):
         """The argv of a worker's terminal: a named claude on this octopilot.
         session starts claude under that id; resume or cont restores one."""
+        if session and (resume or cont):
+            # claude refuses --session-id with --resume or --continue.
+            raise ValueError("session cannot be combined with resume or cont")
         # The terminal inherits herdr-core's login environment, not this one,
         # so the octopilot settings the worker needs travel in its argv.
         env = ["OCTOPILOT_BACKEND=hc", f"OCTOPILOT_DIR={OCTOPILOT_DIR}",
@@ -1733,11 +1736,13 @@ def scan(state, refresh=False, info=None):
                 rehomed.append((k, sess))
 
         # Its own agent's live claude session: it follows /clear, and an item
-        # tracked before claude_session was stored gets it here.
+        # tracked before claude_session was stored gets it here. A session with
+        # no transcript yet (a /clear with nothing typed) does not replace one.
         own = live.get(sess) if sess else None
-        if own and own.get("agent") == it.get("agent") and own.get("claude_session") \
-                and own["claude_session"] != it.get("claude_session"):
-            it["claude_session"] = own["claude_session"]
+        new = own.get("claude_session") if own and own.get("agent") == it.get("agent") \
+            else None
+        if new and new != it.get("claude_session") and transcript_file(new):
+            it["claude_session"] = new
 
         if it.get("pr") and d and d.get("state") == "MERGED":
             # A fix stack whose bottom merged, with layers still open, is
@@ -3457,6 +3462,12 @@ def live_session_id(info):
     return sid if isinstance(sid, str) and UUID_RE.match(sid) else None
 
 
+def transcript_file(session):
+    """The transcript file of a claude session id, or None when none is written."""
+    hits = glob.glob(os.path.join(PROJECTS_DIR, "*", f"{session}.jsonl"))
+    return hits[0] if hits else None
+
+
 def transcript_path(info):
     """The transcript of a terminal's claude: the session of the claude running
     in its foreground (claude's sessions/<pid>.json, which follows /clear), else
@@ -3466,8 +3477,7 @@ def transcript_path(info):
     session = live_session_id(info) or (info.get("labels") or {}).get("octopilot.session") or ""
     if not UUID_RE.match(session):
         return None
-    hits = glob.glob(os.path.join(PROJECTS_DIR, "*", f"{session}.jsonl"))
-    return hits[0] if hits else None
+    return transcript_file(session)
 
 
 def parse_line(raw):

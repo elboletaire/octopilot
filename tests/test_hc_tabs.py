@@ -354,6 +354,12 @@ class HcSpawnTest(unittest.TestCase):
         self.assertEqual(scan.HC.spawn_command(None, cont=True)[-1], "--continue")
         self.assertNotIn("--session-id", scan.HC.spawn_command(None, resume="c-1"))
 
+    def test_a_session_cannot_resume_or_continue(self):
+        with self.assertRaises(ValueError):
+            scan.HC.spawn_command(None, session=SID, resume="c-1")
+        with self.assertRaises(ValueError):
+            scan.HC.spawn_command(None, session=SID, cont=True)
+
     def test_worker_host_space_spawns_a_space(self):
         os.environ["WORKER_HOST"] = "space"
         host, _ = self.spawn()

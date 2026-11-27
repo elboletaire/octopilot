@@ -40,12 +40,19 @@ def tab_item(**extra):
     return state
 
 
-def claude_session_of(live_entry):
-    """scan() with the tab's live entry as given: the item after."""
+def claude_session_of(live_entry, transcripts=("c-new",)):
+    """scan() with the tab's live entry as given and the transcripts written for
+    the given session ids: the item after."""
     state = tab_item(claude_session="c-old")
-    with fake.fake_world(all_sessions=([], {"hc"}, {TAB}), all_live={TAB: live_entry},
-                         pr_detail=pr_detail, backend_for=scan.HC):
-        scan.scan(state)
+    with tempfile.TemporaryDirectory() as projects:
+        for sid in transcripts:
+            os.makedirs(os.path.join(projects, "proj"), exist_ok=True)
+            open(os.path.join(projects, "proj", f"{sid}.jsonl"), "w").close()
+        with mock.patch.object(scan, "PROJECTS_DIR", projects), \
+                fake.fake_world(all_sessions=([], {"hc"}, {TAB}),
+                                all_live={TAB: live_entry},
+                                pr_detail=pr_detail, backend_for=scan.HC):
+            scan.scan(state)
     return state["items"][KEY]
 
 
@@ -57,10 +64,21 @@ class ClaudeSessionTest(unittest.TestCase):
     def test_an_item_tracked_before_the_field_gets_it(self):
         state = tab_item()
         live = dict(agent_in(TAB), claude_session="c-new")
-        with fake.fake_world(all_sessions=([], {"hc"}, {TAB}), all_live={TAB: live},
-                             pr_detail=pr_detail, backend_for=scan.HC):
-            scan.scan(state)
+        with tempfile.TemporaryDirectory() as projects, \
+                mock.patch.object(scan, "PROJECTS_DIR", projects):
+            os.makedirs(os.path.join(projects, "proj"))
+            open(os.path.join(projects, "proj", "c-new.jsonl"), "w").close()
+            with fake.fake_world(all_sessions=([], {"hc"}, {TAB}),
+                                 all_live={TAB: live}, pr_detail=pr_detail,
+                                 backend_for=scan.HC):
+                scan.scan(state)
         self.assertEqual(state["items"][KEY]["claude_session"], "c-new")
+
+    def test_a_new_session_with_no_transcript_keeps_the_stored_one(self):
+        # A /clear with nothing typed: claude has a new id, but no transcript yet.
+        live = dict(agent_in(TAB), claude_session="c-new")
+        self.assertEqual(claude_session_of(live, transcripts=())["claude_session"],
+                         "c-old")
 
     def test_another_agent_in_the_tab_does_not_change_it(self):
         live = dict(agent_in(TAB, name="ap-other-9"), claude_session="c-new")
