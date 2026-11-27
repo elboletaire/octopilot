@@ -33,6 +33,7 @@ EMPTY = {
     "send_to": (True, None),
     "backend_for": None,
     "octopilot_closed": False,
+    "octopilot_reopened": False,
 }
 
 

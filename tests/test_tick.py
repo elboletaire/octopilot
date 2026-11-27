@@ -153,6 +153,23 @@ class OctopilotClosedTest(unittest.TestCase):
                                      labels=headless_in("sp1")))
 
 
+class OctopilotReopenedTest(unittest.TestCase):
+    def reopened(self, spaces=None, labels=None):
+        with mock.patch.object(scan.HC, "spaces", return_value=spaces), \
+                mock.patch.object(scan, "own_labels", side_effect=labels):
+            return scan.octopilot_reopened()
+
+    def test_the_space_listed_again_is_reopened(self):
+        self.assertTrue(self.reopened(spaces=[{"id": "sp1"}],
+                                      labels=headless_in("sp1")))
+
+    def test_a_space_not_listed_is_not_reopened(self):
+        self.assertFalse(self.reopened(spaces=[], labels=headless_in("sp1")))
+
+    def test_herdr_app_not_answering_is_not_reopened(self):
+        self.assertFalse(self.reopened(spaces=None, labels=headless_in("sp1")))
+
+
 class TickWhileOctopilotClosedTest(unittest.TestCase):
     def test_a_closed_space_leaves_the_state_and_the_rows_alone(self):
         gone = {"items": {KEY: {"mode": "fix", "pr": 5, "session": "w1"}}}
@@ -193,12 +210,27 @@ class TickWhileOctopilotClosedTest(unittest.TestCase):
             with mock.patch.object(scan, "octopilot_closed", return_value=True):
                 run_tick("--quiet")
             self.assertTrue(os.path.exists(scan.CLOSED_FILE))
-            code, out = run_tick("--quiet")
+            with mock.patch.object(scan, "octopilot_reopened", return_value=True):
+                code, out = run_tick("--quiet")
             self.assertFalse(os.path.exists(scan.CLOSED_FILE))
             with open(scan.STATE_FILE) as fh:
                 saved = json.load(fh)
         self.assertEqual((code, out), (0, ""))
         self.assertEqual(saved["items"][KEY]["pending_rerequest"], HEAD)
+
+    def test_a_herdr_app_flap_keeps_the_marker_and_logs_no_second_closed(self):
+        with fake.fake_world(pr_detail=pr_detail):
+            scan.save(new_state())
+            with mock.patch.object(scan, "octopilot_closed", return_value=True):
+                run_tick("--quiet")
+            # herdr-app does not answer: neither closed nor reopened.
+            with mock.patch.object(scan, "octopilot_closed", return_value=False), \
+                    mock.patch.object(scan, "octopilot_reopened", return_value=False):
+                run_tick("--quiet")
+            self.assertTrue(os.path.exists(scan.CLOSED_FILE))
+            with mock.patch.object(scan, "octopilot_closed", return_value=True):
+                run_tick("--quiet")
+            self.assertEqual([e["kind"] for e in events()].count("closed"), 1)
 
     def test_tick_runs_as_today_when_herdr_app_does_not_answer(self):
         with mock.patch.object(scan, "OCTOPILOT_BACKEND", "hc"), \

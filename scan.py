@@ -1011,6 +1011,12 @@ def octopilot_closed():
     return own_labels(HEADLESS_AGENT) is not None and octopilot_space() is None
 
 
+def octopilot_reopened():
+    """True when herdr-app answers and the Octopilot space is listed again. False
+    when it does not answer, so a flap is not taken for the space back."""
+    return HC.spaces() is not None and octopilot_space() is not None
+
+
 def octopilot_workspace():
     """The TUI's Octopilot workspace (labelled as herdr/open.sh does), else the
     one the prompter runs in. None when neither is found."""
@@ -3823,9 +3829,9 @@ def tick(args):
             if entered and "--quiet" not in args:
                 print("octopilot closed: its space is gone; run Open Octopilot")
             return 0
+        if os.path.exists(CLOSED_FILE) and octopilot_reopened():
+            os.remove(CLOSED_FILE)
         with locked():
-            if os.path.exists(CLOSED_FILE):
-                os.remove(CLOSED_FILE)
             state = load()
             info = {}
             rows, active, n, untracked = scan(state, refresh="--refresh" in args,
