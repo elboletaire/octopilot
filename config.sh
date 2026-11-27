@@ -50,6 +50,9 @@ MODEL_WORK='claude-opus-5-5[1m]'               # issue -> implementation, ambigu
 MODEL_INVESTIGATE='claude-fable-5-2[1m]'       # open-ended question
 MODEL_REVIEW_FIX='claude-opus-5-5[1m]'         # own/assigned PR: rebase, 3 review rounds, CI waits -- the longest-lived session
 MODEL_REVIEW_COMMENT='claude-opus-5-5[1m]'     # public review of someone else's PR
+# Full model id the launchers pin on the prompter and the code-changes claude, never the global default.
+MODEL_PROMPTER="${MODEL_PROMPTER:-claude-opus-5-5[1m]}"
+MODEL_CODE="${MODEL_CODE:-claude-opus-5-5[1m]}"
 
 # Agent-tool aliases for the two review passes (settings.json pins each to a full id).
 # Pass 1 wants recall; pass 2 filters its false positives.
