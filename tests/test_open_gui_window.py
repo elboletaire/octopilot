@@ -38,6 +38,7 @@ if [ -f "$SHIM/space" ]; then
   case "$2" in
     pane.split) echo '{"terminal":"tp","pane":"p2"}' ;;
     tab.new) echo '{"terminal":"tc","pane":"p4"}' ;;
+    space.new) echo '{"space":"s1","terminal":"th"}' ;;
     *) echo '{}' ;;
   esac
   exit 0
@@ -140,8 +141,8 @@ class OpenGuiWindowTest(unittest.TestCase):
         for sid, _ in sessions.values():
             open(os.path.join(folder, sid + ".jsonl"), "w").close()
 
-    def shown_host(self):
-        """This checkout's headless, shown in space s1 (tab OCTOPILOT, pane p1) of a running herdr-app."""
+    def running_app(self):
+        """A herdr-app that answers: space s1 holds the host th (tab OCTOPILOT, pane p1), tp, tc."""
         self.write("window", "")
         self.write("space", "")
         self.write("app-ls.json", json.dumps({"spaces": [{"id": "s1", "name": "Octopilot", "tabs": [
@@ -149,6 +150,10 @@ class OpenGuiWindowTest(unittest.TestCase):
             {"id": "t3", "name": "engine", "terminals": [{"terminal": "tp", "pane": "p2"}]},
             {"id": "t5", "name": "scratch", "terminals": [{"terminal": "tc", "pane": "p4"}]},
         ]}]}))
+
+    def shown_host(self):
+        """This checkout's headless, shown in space s1 (tab OCTOPILOT, pane p1) of a running herdr-app."""
+        self.running_app()
         self.write("ls-octopilot.agent=octopilot-headless.json",
                    json.dumps({"terminals": [{"address": "th"}]}))
         self.write("get-th.json", json.dumps(terminal_json(
@@ -263,6 +268,30 @@ class OpenGuiWindowTest(unittest.TestCase):
         argv = self.argv_of("tab.new")
         self.assertIn("--session-id", argv)
         self.assertNotIn("--resume", argv)
+
+    def test_terminals_layout_resumes_the_recorded_code_session(self):
+        self.running_app()
+        home = os.path.join(self.root, "home")
+        code, code_dir = str(uuid.uuid4()), os.path.join(self.root, "code-dir")
+        self.record_sessions({"octopilot-code": (code, code_dir)}, home)
+        self.launch("--terminals", home=home)
+        argv = self.argv_of("tab.new")
+        self.assertEqual(argv[argv.index("--resume") + 1], code)
+        self.assertEqual(argv[argv.index("-C") + 1], code_dir)
+        self.assertNotIn("--session-id", argv)
+        self.assertTrue(any(t.startswith("hc label tc ") and f"octopilot.session={code}" in t
+                            for t in self.trace()), self.trace())
+
+    def test_terminals_layout_starts_the_code_agent_fresh_without_a_transcript(self):
+        self.running_app()
+        home = os.path.join(self.root, "home")
+        self.record_sessions({"octopilot-code": (str(uuid.uuid4()), self.root)}, home,
+                             transcripts=False)
+        self.launch("--terminals", home=home)
+        argv = self.argv_of("tab.new")
+        self.assertNotIn("--resume", argv)
+        self.assertNotIn("--session-id", argv)
+        self.assertNotIn("-C", argv)
 
     def test_bare_shell_code_terminal_is_reaped_but_not_a_running_claude(self):
         self.write("window", "")

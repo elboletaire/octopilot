@@ -660,14 +660,22 @@ add_code_tab() {
   drop_side_panel "$code" "$t" "$(cut -f3 <<<"$located")"
 }
 
-# The --terminals code tab: a terminal tab with its claude started in this checkout,
-# unless this checkout's code agent runs already (another checkout's is left alone).
+# The --terminals code tab: a terminal tab with its claude, resumed when the launcher recorded
+# one, else started in this checkout, unless this checkout's code agent runs already (another
+# checkout's is left alone).
 add_code_terminal_tab() {
-  local created
+  local created recorded session="" cwd="" argv
   if [ -n "$(find_agent "$CODE_AGENT")" ]; then return 0; fi
+  recorded=$(recorded_session "$CODE_AGENT")
+  if [ -n "$recorded" ]; then
+    IFS=$'\t' read -r session cwd <<<"$recorded"
+    argv=$(session_argv "$session" "" "$cwd" "$MODEL_CODE" resume)
+  else
+    argv=$(session_argv "" "" "" "$MODEL_CODE")
+  fi
   created=$(app do tab.new --space "$1" --name "$CODE_TAB" --folder "$CODE_CWD" \
-    --argv "$(session_argv "" "" "" "$MODEL_CODE")" --focus false)
-  name_agent "$(jq -r '.terminal' <<<"$created")" "$CODE_AGENT"
+    --argv "$argv" --focus false)
+  name_agent "$(jq -r '.terminal' <<<"$created")" "$CODE_AGENT" "$session"
 }
 
 # The terminal of a dashboard.sh run as the TUI layout's curses dashboard, if
