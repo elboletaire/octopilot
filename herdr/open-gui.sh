@@ -908,16 +908,14 @@ prompter_pane_in() {
 # layout, unless --show-engine), then the launcher's own pane.
 finish() {
   local space=$1
-  if [ "$TERMINALS" = 0 ]; then park_engine "$space"; fi
   trap - EXIT
   flush_log
   if [ "$CLOSE_LAUNCHER" = 1 ]; then close_launcher; fi
 }
 
-# Runs once the space and its tabs are in place: reopens the tracked workers with their
-# conversations (restore-sessions; a refusal is warned about, never fatal), releases the engine's
-# locks, then asks for a tick so the first one decides each card. Only the success paths call it:
-# a failure exits first, and its exit releases the locks.
+# Runs after the space, its tabs and the park: restores the workers (a refusal is only warned
+# about), releases the engine's locks, then requests a tick. Success paths only: a failure
+# exits first, and the exit releases the locks.
 restore_and_tick() {
   # The workers' children do not keep the locks, as in herdr-app and hc above.
   if ! env "${envs[@]}" "$DIR/scan.sh" restore-sessions 8>&- 9>&-; then
@@ -1057,6 +1055,7 @@ if [ -n "$host" ]; then
     place_tabs "$space"
     focus_main "$space"
   fi
+  if [ "$TERMINALS" = 0 ]; then park_engine "$space"; fi
   restore_and_tick
   finish "$space"
   exit 0
@@ -1115,5 +1114,6 @@ else
   place_tabs "$space"
   focus_main "$space"
 fi
+if [ "$TERMINALS" = 0 ]; then park_engine "$space"; fi
 restore_and_tick
 finish "$space"

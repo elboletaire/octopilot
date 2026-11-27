@@ -366,10 +366,14 @@ class OpenGuiWindowTest(unittest.TestCase):
     def assert_restored_between_tabs_and_tick(self, trace):
         """restore-sessions runs after the tabs are set up, with the locks still held; the
         tick is requested after it, with the locks released."""
-        restore = trace.index("scan restore-sessions locks=held")
+        restores = [t for t in trace if t.startswith("scan restore-sessions")]
+        requests = [t for t in trace if t.startswith("scan request tick")]
+        self.assertEqual(restores, ["scan restore-sessions locks=held"], trace)
+        self.assertEqual(requests, ["scan request tick locks=free"], trace)
+        restore = trace.index(restores[0])
         tabs = [i for i, t in enumerate(trace) if t.startswith("herdr-app do ")]
         self.assertLess(max(i for i in tabs if i < restore), restore, trace)
-        self.assertLess(restore, trace.index("scan request tick locks=free"), trace)
+        self.assertLess(restore, trace.index(requests[0]), trace)
         self.assertNotIn("scan restore-sessions 8", trace)
 
     def test_restore_runs_after_the_tabs_and_before_the_tick_on_the_existing_space(self):

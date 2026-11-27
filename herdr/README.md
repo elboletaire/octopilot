@@ -39,13 +39,15 @@ A tab is named by its item's title. A title that is one of the launcher's tab na
 (`OCTOPILOT`, `engine`, `Octopilot (code changes)`, in any case) gets the agent's name
 after it: `engine (ap-<repo>-<number>)`.
 
-> **Closing the Octopilot space or rebooting keeps the items.** The next Open Octopilot
-> opens a window if none is up, resumes the prompter and the code agent, and restores
-> every worker with its conversation (`restore-sessions`, below). Then the first tick
-> decides each card's status: a merged PR is cleaned up, and so on. A worker tab you
+> In the GUI, closing the Octopilot space or rebooting keeps the items. The next Open
+> Octopilot opens a window if none is up, resumes the prompter and the code agent, and
+> restores every worker with its conversation (`restore-sessions`, below). Then the first
+> tick decides each card's status: a merged PR is cleaned up, and so on. A worker tab you
 > close yourself while Octopilot runs is still dropped: its item shows `GONE` and is
-> untracked, freeing its slot. To end one worker, use `z` or `del` on its row.
-> While the GUI's Octopilot space is closed (the default, with the engine parked), the
+> untracked, freeing its slot. To end one worker, use `z` or `del` on its row. In the TUI,
+> closing the Octopilot workspace or rebooting still ends its worker tabs: their items show
+> `GONE` and are untracked (worktrees kept).
+> While the GUI's Octopilot space is closed and its engine parked (the default), the
 > ticks and drains do nothing and the rows stay as they are.
 
 A tab closed by hand does not end its session when its agent is live in another open
