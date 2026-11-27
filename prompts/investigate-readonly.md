@@ -43,7 +43,7 @@ quote it: it contains `?`, which a shell otherwise expands as a glob.
 When you stop, send exactly one report:
 
 ```
-$A report "{{KEY}}" <ready|blocked> "$(git rev-parse HEAD)" "<one line>"
+$A report "{{KEY}}" <ready|blocked|held> "$(git rev-parse HEAD)" "<one line>"
 ```
 
 `ready` when the report is written, `blocked` when you could not finish.
@@ -51,6 +51,10 @@ The first line is a one-line summary (e.g. "3 findings, 1 high: ..."); put
 the findings list on the lines after it, inside the same quotes. The full
 report stays in this pane. Never type into the octopilot panes, and never send
 desktop notifications.
+
+If the user tells you to wait (for a reviewer, a decision, another PR), report
+`held` with what you wait on and stop. The card goes On hold and frees your slot;
+a new prompt or heartbeat brings it back.
 
 If you are going to be working for more than half an hour (a long build, a
 stack coming up, a slow test run), call
