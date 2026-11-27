@@ -1,6 +1,7 @@
-"""open-gui.sh before its first step: the engine's locks, and ensure_window's herdr-app
-window check. Runs the real launcher with herdr-app, systemd-run, systemctl and hc
-shimmed on PATH; each shim appends its argv to a trace. No window is ever opened."""
+"""open-gui.sh before its first step: the engine's locks, the herdr-app window check, and
+the layout read through scan.sh core-layout (no window). Runs the real launcher with
+herdr-app, hc and scan.sh shimmed on PATH; each shim appends its argv to a trace. No window
+is ever opened, and nothing is read from herdr-core but through the shim."""
 import json
 import os
 import pty
@@ -19,9 +20,9 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LAUNCHER = os.path.join(REPO, "herdr", "open-gui.sh")
 
 # A shim logs its argv, and a line in $SHIM/fds when fd 8 or 9 (the engine's locks) is open.
-# herdr-app status exits 2 with no window until systemd-run creates $SHIM/window ($SHIM/hang: 124,
-# $SHIM/on_status runs first). With $SHIM/space, ls reads $SHIM/app-ls.json, pane.split and tab.new
-# answer tp and tc, and other commands succeed with {}.
+# herdr-app status exits 2 with no window, 0 with $SHIM/window ($SHIM/hang: 124, which is no
+# window too; $SHIM/on_status runs first). With $SHIM/space, `do` commands answer (pane.split
+# tp, tab.new tc, space.new s1 and th), other commands exit 1: no window, no answer.
 SHIMS = {
     "herdr-app": '''#!/bin/sh
 echo "herdr-app $*" >> "$SHIM/trace"
@@ -35,7 +36,6 @@ if [ "$1" = status ]; then
   exit 2
 fi
 if [ -f "$SHIM/space" ]; then
-  if [ "$1" = ls ]; then cat "$SHIM/app-ls.json"; exit 0; fi
   case "$2" in
     pane.split) echo '{"terminal":"tp","pane":"p2"}' ;;
     tab.new) echo '{"terminal":"tc","pane":"p4"}' ;;
@@ -45,15 +45,6 @@ if [ -f "$SHIM/space" ]; then
   exit 0
 fi
 exit 1
-''',
-    "systemd-run": '''#!/bin/sh
-echo "systemd-run $*" >> "$SHIM/trace"
-[ -e /proc/self/fd/8 ] && echo "systemd-run 8" >> "$SHIM/fds"
-touch "$SHIM/window"
-''',
-    "systemctl": '''#!/bin/sh
-echo "systemctl $*" >> "$SHIM/trace"
-[ -f "$SHIM/env" ] && cat "$SHIM/env"
 ''',
     "hc": '''#!/bin/sh
 echo "hc $*" >> "$SHIM/trace"
@@ -68,15 +59,27 @@ esac
 ''',
 }
 
-# The checkout's scan.sh: restore-sessions and request are logged with whether the engine's
-# locks are free (flock -n) at that moment; restore-sessions exits with $SHIM/restore_rc when
-# there is one. Every other subcommand runs the real scan.sh (REAL below).
+# The checkout's scan.sh: core-layout prints $SHIM/core-layout.json (no spaces when there is
+# none), or null as scan.py does when the core does not answer ($SHIM/core_down, or once more
+# calls than $SHIM/core_down_after: the first N calls answer). restore-sessions
+# and request are logged with whether the engine's locks are free (flock -n) at that moment;
+# restore-sessions exits with $SHIM/restore_rc when there is one. Every other subcommand runs
+# the real scan.sh (REAL below).
 SCAN_SHIM = '''#!/bin/sh
 locks() {
   if flock -n "$OCTOPILOT_STATE_DIR/tick.lock" true && flock -n "$OCTOPILOT_STATE_DIR/exec.lock" true
   then echo free; else echo held; fi
 }
 case "$1" in
+  core-layout)
+    n=$(( $(cat "$SHIM/core-calls" 2>/dev/null || echo 0) + 1 ))
+    echo "$n" > "$SHIM/core-calls"
+    if [ -f "$SHIM/core_down" ]; then echo null; exit 0; fi
+    if [ -f "$SHIM/core_down_after" ] && [ "$n" -gt "$(cat "$SHIM/core_down_after")" ]; then
+      echo null; exit 0
+    fi
+    if [ -f "$SHIM/core-layout.json" ]; then cat "$SHIM/core-layout.json"; else echo '[]'; fi
+    exit 0 ;;
   restore-sessions)
     echo "scan restore-sessions locks=$(locks)" >> "$SHIM/trace"
     [ -e /proc/self/fd/8 ] && echo "scan restore-sessions 8" >> "$SHIM/fds"
@@ -116,13 +119,15 @@ class OpenGuiWindowTest(unittest.TestCase):
             with open(path, "w") as fh:
                 fh.write(body)
             os.chmod(path, os.stat(path).st_mode | stat.S_IEXEC)
+        self.checkout = self.copy_checkout()
 
     def write(self, name, text):
         with open(os.path.join(self.shim, name), "w") as fh:
             fh.write(text)
 
     def copy_checkout(self):
-        """A checkout with the launcher and config.sh copied, and the shim scan.sh (SCAN_SHIM)."""
+        """A checkout with the launcher and config.sh copied, and the shim scan.sh (SCAN_SHIM).
+        The tests' checkout (self.checkout): its launcher, the one run."""
         checkout = os.path.join(self.root, "octopilot")
         os.makedirs(os.path.join(checkout, "herdr"))
         shutil.copy(LAUNCHER, os.path.join(checkout, "herdr", "open-gui.sh"))
@@ -149,7 +154,7 @@ class OpenGuiWindowTest(unittest.TestCase):
         return env
 
     def launch(self, *args, home=None, checkout=None):
-        launcher = LAUNCHER if checkout is None else os.path.join(checkout, "herdr", "open-gui.sh")
+        launcher = os.path.join(checkout or self.checkout, "herdr", "open-gui.sh")
         return subprocess.run(["bash", launcher, *args], env=self.launcher_env(home), cwd=self.root,
                               capture_output=True, text=True, timeout=120)
 
@@ -181,12 +186,12 @@ class OpenGuiWindowTest(unittest.TestCase):
             open(os.path.join(folder, sid + ".jsonl"), "w").close()
 
     def app_listing(self):
-        """The space s1 with the host th (tab OCTOPILOT, pane p1), tp and tc, as herdr-app ls shows it."""
-        self.write("app-ls.json", json.dumps({"spaces": [{"id": "s1", "name": "Octopilot", "tabs": [
-            {"id": "t1", "name": "OCTOPILOT", "terminals": [{"terminal": "th", "pane": "p1"}]},
-            {"id": "t3", "name": "engine", "terminals": [{"terminal": "tp", "pane": "p2"}]},
-            {"id": "t5", "name": "scratch", "terminals": [{"terminal": "tc", "pane": "p4"}]},
-        ]}]}))
+        """The space s1 with the host th (tab OCTOPILOT, pane p1), tp and tc, as scan.sh core-layout lists them."""
+        self.write("core-layout.json", json.dumps([{"id": "s1", "name": "Octopilot", "folder": None, "tabs": [
+            {"id": "t1", "name": "OCTOPILOT", "terminals": [{"terminal": "th", "pane": "p1", "name": None}], "mods": []},
+            {"id": "t3", "name": "engine", "terminals": [{"terminal": "tp", "pane": "p2", "name": None}], "mods": []},
+            {"id": "t5", "name": "scratch", "terminals": [{"terminal": "tc", "pane": "p4", "name": None}], "mods": []},
+        ]}]))
 
     def running_app(self):
         """A herdr-app that answers (its window is open), with the app_listing."""
@@ -194,38 +199,41 @@ class OpenGuiWindowTest(unittest.TestCase):
         self.write("space", "")
         self.app_listing()
 
-    def shown_host(self, checkout=REPO):
+    def shown_host(self):
         """This checkout's headless, shown in space s1 (tab OCTOPILOT, pane p1) of a running herdr-app."""
         self.running_app()
         self.write("ls-octopilot.agent=octopilot-headless.json",
                    json.dumps({"terminals": [{"address": "th"}]}))
         self.write("get-th.json", json.dumps(terminal_json(
-            os.path.realpath(checkout), {"herdr.space": "s1", "octopilot.agent": "octopilot-headless"},
+            os.path.realpath(self.checkout), {"herdr.space": "s1", "octopilot.agent": "octopilot-headless"},
             fg="uv")))
 
-    def test_no_window_and_no_session_stops_before_anything(self):
-        self.write("env", "HOME=/nowhere\nLANG=C\n")
+    def no_space_message(self, res):
+        return f"No Octopilot space on {os.uname().nodename}, and building one needs a herdr-app window"
+
+    def test_no_window_and_no_space_stops_before_anything(self):
         res = self.launch()
-        self.assertEqual(res.returncode, 1, res.stderr)
+        self.assertEqual(res.returncode, 1, res.stdout + res.stderr)
         # The launcher's output goes through its log tee to stdout.
         out = res.stdout + res.stderr
-        self.assertIn("herdr-app has no window on", out)
-        self.assertIn("then run Open Octopilot again", out)
+        self.assertIn(self.no_space_message(res), out)
+        self.assertIn("Open herdr-app on", out)
+        self.assertIn("run Open Octopilot there", out)
         trace = self.trace()
-        self.assertTrue(trace, "herdr-app status was not called")
-        self.assertFalse([t for t in trace if t.startswith(("hc ", "systemd-run"))], trace)
-        self.assertFalse([t for t in trace if t.startswith("herdr-app do")], trace)
+        self.assertIn("herdr-app status", trace)
+        for prefix in ("hc run", "hc kill", "hc rm", "hc label", "herdr-app do", "herdr-app ls"):
+            self.assertFalse([t for t in trace if t.startswith(prefix)], trace)
 
-    def test_timeout_never_starts_a_second_window(self):
-        self.write("env", "WAYLAND_DISPLAY=wayland-1\n")
+    def test_a_window_that_does_not_answer_in_time_is_no_window(self):
         self.write("hang", "")
         res = self.launch()
         self.assertEqual(res.returncode, 1)
-        self.assertIn("herdr-app did not answer", res.stdout + res.stderr)
-        self.assertFalse([t for t in self.trace() if t.startswith("systemd-run")], self.trace())
+        self.assertIn(self.no_space_message(res), res.stdout + res.stderr)
+        self.assertIn("herdr-app did not answer on", res.stdout + res.stderr)
+        self.assertIn("(status 124)", res.stdout + res.stderr)
+        self.assertFalse([t for t in self.trace() if t.startswith("herdr-app do")], self.trace())
 
     def test_lock_wait_says_so_before_it_blocks(self):
-        self.write("env", "")
         tick_lock = os.path.join(self.state, "tick.lock")
         holder = subprocess.Popen(["flock", tick_lock, "sleep", "2"])
         self.addCleanup(holder.wait)
@@ -236,30 +244,126 @@ class OpenGuiWindowTest(unittest.TestCase):
         res = self.launch()
         out = res.stdout + res.stderr
         self.assertIn("waiting for the engine's tick to finish", out)
-        self.assertIn("herdr-app has no window", out)
+        self.assertIn("No Octopilot space", out)
 
     def test_children_do_not_inherit_the_locks(self):
-        self.write("env", "WAYLAND_DISPLAY=wayland-1\n")
+        self.write("window", "")
+        self.app_listing()
         self.launch()
         fds = os.path.join(self.shim, "fds")
         opened = open(fds).read().splitlines() if os.path.exists(fds) else []
         self.assertEqual(opened, [])
 
-    def test_graphical_session_opens_the_window(self):
-        self.write("env", "WAYLAND_DISPLAY=wayland-1\n")
+    def test_no_window_with_a_labelled_space_carries_on_past_the_checks(self):
+        self.app_listing()
+        self.write("ls-octopilot.agent=octopilot-headless.json",
+                   json.dumps({"terminals": [{"address": "th"}]}))
+        self.write("get-th.json", json.dumps(terminal_json(
+            os.path.realpath(self.checkout), {"herdr.space": "s1", "octopilot.agent": "octopilot-headless"},
+            fg="uv")))
         res = self.launch()
+        out = res.stdout + res.stderr
+        self.assertNotIn("No Octopilot space", out)
+        self.assertNotIn("does not answer", out)
+        # No window, so the first herdr-app do (the space's tab) is the one that fails.
+        self.assertIn("herdr-app do tab.rename --id t1 --name engine", self.trace())
+        self.assertEqual(res.returncode, 1, out)
+
+    def test_no_window_with_the_dashboard_pane_of_this_checkout_carries_on(self):
+        self.write("core-layout.json", json.dumps([{"id": "s9", "name": "Octopilot", "folder": None, "tabs": [
+            {"id": "t9", "name": "OCTOPILOT", "terminals": [], "mods": [
+                {"mod": "octopilot-dashboard", "pane": "p9", "name": None,
+                 "props": {"dir": os.path.realpath(self.checkout), "state_dir": self.state}}]}]}]))
+        res = self.launch()
+        out = res.stdout + res.stderr
+        self.assertNotIn("No Octopilot space", out)
+        self.assertTrue([t for t in self.trace() if t.startswith("herdr-app do tab.new --space s9")], self.trace())
+
+    def test_the_dashboard_pane_of_another_checkout_is_no_space(self):
+        self.write("core-layout.json", json.dumps([{"id": "s9", "name": "Octopilot", "folder": None, "tabs": [
+            {"id": "t9", "name": "OCTOPILOT", "terminals": [], "mods": [
+                {"mod": "octopilot-dashboard", "pane": "p9", "name": None,
+                 "props": {"dir": "/elsewhere/octopilot", "state_dir": self.state}}]}]}]))
+        res = self.launch()
+        self.assertEqual(res.returncode, 1)
+        self.assertIn(self.no_space_message(res), res.stdout + res.stderr)
+
+    def test_a_failed_layout_read_stops_before_any_change(self):
+        # The headless is this checkout's and runs: a closed-space stop would end it.
+        self.write("core_down", "")
+        self.write("ls-octopilot.agent=octopilot-headless.json",
+                   json.dumps({"terminals": [{"address": "th"}]}))
+        self.write("get-th.json", json.dumps(terminal_json(
+            os.path.realpath(self.checkout), {"herdr.space": "s1", "octopilot.agent": "octopilot-headless"},
+            fg="uv")))
+        res = self.launch()
+        out = res.stdout + res.stderr
+        self.assertEqual(res.returncode, 1, out)
+        self.assertIn("herdr-core on", out)
+        self.assertIn("does not answer (scan.sh core-layout)", out)
         trace = self.trace()
-        run = next(i for i, t in enumerate(trace) if t.startswith("systemd-run"))
-        self.assertEqual(trace[run], "systemd-run --user --collect --quiet"
-                         f" --setenv=PATH={self.shim}{os.pathsep}{os.environ['PATH']}"
-                         " --setenv=HERDR_APP_HOME=" + os.path.join(self.root, "app-home")
-                         + " herdr-app")
-        # The window answers after systemd-run: the run goes on past the check.
-        self.assertIn("herdr-app status", trace[run:])
-        self.assertNotIn("has no window", res.stdout + res.stderr)
+        for prefix in ("hc run", "hc kill", "hc rm", "hc label", "herdr-app do", "herdr-app ls"):
+            self.assertFalse([t for t in trace if t.startswith(prefix)], trace)
+
+    def test_a_failed_read_after_the_gate_makes_no_space_or_tab(self):
+        # The gate reads the layout; the read that decides a new space fails: no space.new, no tab.new.
+        self.write("window", "")
+        self.write("core_down_after", "1")
+        res = self.launch()
+        out = res.stdout + res.stderr
+        self.assertEqual(res.returncode, 1, out)
+        self.assertIn("does not answer (scan.sh core-layout)", out)
+        self.assertNotIn("nothing is changed", out)
+        trace = self.trace()
+        for prefix in ("herdr-app do space.new", "herdr-app do tab.new", "hc run", "hc kill", "hc rm",
+                       "hc label"):
+            self.assertFalse([t for t in trace if t.startswith(prefix)], trace)
+        for name in ("tick.lock", "exec.lock"):
+            held = subprocess.run(["flock", "-n", os.path.join(self.state, name), "true"])
+            self.assertEqual(held.returncode, 0, name)
+
+    def test_a_failed_read_in_a_subshell_ends_the_run_before_any_tab_is_made(self):
+        # The space and its host are shown; the layout reads fail at each point of the run in turn
+        # (some inside $(...) subshells). Wherever it fails, no tab is made and the run exits 1.
+        self.shown_host()
+        failed = 0
+        for n in range(1, 7):
+            self.write("core_down_after", str(n))
+            self.write("core-calls", "0")
+            if os.path.exists(os.path.join(self.shim, "trace")):
+                os.remove(os.path.join(self.shim, "trace"))
+            res = self.launch()
+            out = res.stdout + res.stderr
+            if "does not answer (scan.sh core-layout)" not in out:
+                continue
+            failed += 1
+            self.assertEqual(res.returncode, 1, (n, out))
+            trace = self.trace()
+            self.assertFalse([t for t in trace if t.startswith(("herdr-app do tab.new",
+                                                              "herdr-app do space.new"))], (n, trace))
+        self.assertGreater(failed, 0)
+
+    def test_a_closed_space_without_a_window_is_not_stopped(self):
+        # The headless's space is gone, the dashboard pane's space is open: without a window
+        # the engine is not stopped to build a space that cannot be built.
+        self.write("core-layout.json", json.dumps([{"id": "s2", "name": "Octopilot", "folder": None, "tabs": [
+            {"id": "t2", "name": "OCTOPILOT", "terminals": [], "mods": [
+                {"mod": "octopilot-dashboard", "pane": "p2", "name": None,
+                 "props": {"dir": os.path.realpath(self.checkout), "state_dir": self.state}}]}]}]))
+        self.write("ls-octopilot.agent=octopilot-headless.json",
+                   json.dumps({"terminals": [{"address": "th"}]}))
+        self.write("get-th.json", json.dumps(terminal_json(
+            os.path.realpath(self.checkout), {"herdr.space": "gone", "octopilot.agent": "octopilot-headless"},
+            fg="uv")))
+        res = self.launch()
+        out = res.stdout + res.stderr
+        self.assertEqual(res.returncode, 1, out)
+        self.assertIn("is closed, and building one needs a herdr-app window", out)
+        trace = self.trace()
+        self.assertFalse([t for t in trace if t.startswith(("hc kill", "hc rm"))], trace)
+        self.assertFalse([t for t in trace if t.startswith("herdr-app do space.new")], trace)
 
     def test_held_lock_makes_a_tick_say_so(self):
-        self.write("env", "")
         # Runs while the launcher holds tick.lock: the status check is its first herdr call.
         self.write("on_status", (
             f'OCTOPILOT_STATE_DIR={self.state} HOME_REPOS=none/none ISSUE_ORGS=none-org '
@@ -358,7 +462,7 @@ class OpenGuiWindowTest(unittest.TestCase):
 
     def test_bare_shell_code_terminal_is_reaped_but_not_a_running_claude(self):
         self.write("window", "")
-        real = os.path.realpath(REPO)
+        real = os.path.realpath(self.checkout)
         old = now_ms() - 60000
         self.write("ls-octopilot.agent=octopilot-code.json", json.dumps({"terminals": [
             {"address": "t-shell"}, {"address": "t-young"}, {"address": "t-claude"}]}))
@@ -389,8 +493,8 @@ class OpenGuiWindowTest(unittest.TestCase):
         self.assertNotIn("scan restore-sessions 8", trace)
 
     def test_restore_runs_after_the_tabs_and_before_the_tick_on_the_existing_space(self):
-        checkout = self.copy_checkout()
-        self.shown_host(checkout)
+        checkout = self.checkout
+        self.shown_host()
         res = self.launch(checkout=checkout)
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         self.assert_restored_between_tabs_and_tick(self.trace())
@@ -399,22 +503,22 @@ class OpenGuiWindowTest(unittest.TestCase):
             self.assertEqual(held.returncode, 0, name)
 
     def test_restore_runs_on_a_new_space(self):
-        checkout = self.copy_checkout()
+        checkout = self.checkout
         self.running_app()
         res = self.launch(checkout=checkout)
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         self.assert_restored_between_tabs_and_tick(self.trace())
 
     def test_restore_runs_on_terminals(self):
-        checkout = self.copy_checkout()
+        checkout = self.checkout
         self.running_app()
         res = self.launch("--terminals", checkout=checkout)
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         self.assert_restored_between_tabs_and_tick(self.trace())
 
     def test_a_refused_restore_is_warned_about_and_the_run_succeeds(self):
-        checkout = self.copy_checkout()
-        self.shown_host(checkout)
+        checkout = self.checkout
+        self.shown_host()
         self.write("restore_rc", "1")
         res = self.launch(checkout=checkout)
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
@@ -422,8 +526,7 @@ class OpenGuiWindowTest(unittest.TestCase):
         self.assertIn("scan request tick locks=free", self.trace())
 
     def test_a_failed_launch_does_not_restore_and_releases_the_locks(self):
-        checkout = self.copy_checkout()
-        self.write("env", "HOME=/nowhere\nLANG=C\n")
+        checkout = self.checkout
         res = self.launch(checkout=checkout)
         self.assertEqual(res.returncode, 1, res.stdout + res.stderr)
         self.assertFalse([t for t in self.trace() if t.startswith("scan ")], self.trace())
@@ -433,8 +536,7 @@ class OpenGuiWindowTest(unittest.TestCase):
 
 
     def test_a_failed_run_frees_the_locks_while_it_waits_for_enter(self):
-        checkout = self.copy_checkout()
-        self.write("env", "HOME=/nowhere\nLANG=C\n")
+        checkout = self.checkout
         # The Enter wait needs a terminal on stdin: the run's pane.
         master, slave = pty.openpty()
         self.addCleanup(os.close, master)
@@ -459,9 +561,8 @@ class OpenGuiWindowTest(unittest.TestCase):
         os.write(master, b"\n")
         self.assertEqual(proc.wait(timeout=60), 1)
 
-    def test_young_bare_shells_are_reaped_on_the_systemd_run_path(self):
-        checkout = self.copy_checkout()
-        self.write("env", "WAYLAND_DISPLAY=wayland-1\n")
+    def test_young_bare_shells_are_reaped_on_a_space_with_no_window(self):
+        checkout = self.checkout
         self.write("space", "")
         self.app_listing()
         real = os.path.realpath(checkout)
@@ -491,7 +592,7 @@ class OpenGuiWindowTest(unittest.TestCase):
         self.write("ls-octopilot.agent=octopilot-headless.json",
                    json.dumps({"terminals": [{"address": "ys1"}]}))
         self.write("get-ys1.json", json.dumps(terminal_json(
-            os.path.realpath(REPO), {"herdr.space": "s1", "octopilot.agent": "octopilot-headless"},
+            os.path.realpath(self.checkout), {"herdr.space": "s1", "octopilot.agent": "octopilot-headless"},
             "zsh", 0)))
         res = self.launch()
         trace = self.trace()

@@ -80,6 +80,8 @@ on_exit() {
 }
 trap on_exit EXIT
 trap 'echo "open-gui.sh: line $LINENO: $BASH_COMMAND failed" >&2' ERR
+# A failed layout read in a $(...) subshell signals this shell (refresh_layout): the run ends here.
+trap 'exit 1' USR1
 for arg in "$@"; do
   case "$arg" in
     --terminals) TERMINALS=1 ;;
@@ -177,45 +179,43 @@ app() {
   printf '%s\n' "$out"
 }
 
-# herdr-app's status, from its exit code: 0 when the window answers, 2 when there is none
-# (no socket, or a stale one that refuses), anything else when it did not answer in time.
-# Only 2 may start a window; a second one over a slow answer would be a second window.
+# herdr-app's status, from its exit code: 0 when the window answers. Anything else means no
+# window here: 2 (no socket, or a stale one that refuses), or it did not answer in time. No
+# window is ever started: two windows over one machine's layout would fight over it.
 window_status() {
   local rc=0
   timeout 5 "$APP" status >/dev/null 2>&1 8>&- 9>&- || rc=$?
   return "$rc"
 }
 
-# Makes sure herdr-app has a window to answer on, before anything reads or changes a
-# space: after a reboot there is none. With a graphical session the window is opened
-# with systemd-run (it outlives this run), else the run stops here, before any step.
-ensure_window() {
-  local i rc app_home="${HERDR_APP_HOME:-$HOME/.config/herdr-app}" session
-  rc=0
-  window_status || rc=$?
-  if [ "$rc" = 0 ]; then return 0; fi
-  if [ "$rc" != 2 ]; then
-    echo "open-gui.sh: herdr-app did not answer on $(uname -n) (status $rc); no window is started" \
-      "over it. Check herdr-app there, then run Open Octopilot again." >&2
-    exit 1
+# What the window check found, for a message that needs a window.
+no_window_note() {
+  if [ "$WINDOW_RC" = 2 ]; then echo "herdr-app has no window on $(uname -n)"; else
+    echo "herdr-app did not answer on $(uname -n) (status $WINDOW_RC)"; fi
+}
+
+# herdr-app's spaces and tabs in the shape `herdr-app ls` gives ({spaces: [...]}), from
+# herdr-core (scan.sh core-layout, no window needed). refresh_layout is the only read; the
+# readers use LAYOUT as it was last read. A failed read ends the run: a subshell signals the main
+# shell (USR1, trapped there as exit 1), so no read inside $(...) can end as an empty layout.
+# core-layout prints null when the core does not answer.
+LAYOUT=""
+refresh_layout() {
+  local out
+  if out=$(env "${envs[@]}" "$DIR/scan.sh" core-layout) \
+    && jq -e 'type == "array"' <<<"$out" >/dev/null; then
+    LAYOUT=$(jq -nc --argjson s "$out" '{spaces: $s}')
+    return 0
   fi
-  session=$(systemctl --user show-environment 2>/dev/null || true)
-  if ! grep -qE '^(WAYLAND_DISPLAY|DISPLAY)=' <<<"$session"; then
-    echo "open-gui.sh: herdr-app has no window on $(uname -n) ($app_home/herdr-app.sock does not answer)" \
-      "and no graphical session to open one in: log in on $(uname -n)'s screen (or enable autologin)," \
-      "or run herdr-app there, then run Open Octopilot again." >&2
-    exit 1
-  fi
-  local run=(systemd-run --user --collect --quiet "--setenv=PATH=$PATH")
-  if [ -n "${HERDR_APP_HOME:-}" ]; then run+=("--setenv=HERDR_APP_HOME=$HERDR_APP_HOME"); fi
-  "${run[@]}" "$APP" >/dev/null 2>&1 8>&- 9>&- || true
-  for i in $(seq 30); do
-    if window_status; then return 0; fi
-    sleep 1
-  done
-  echo "open-gui.sh: started herdr-app with systemd-run but it did not answer in 30 s;" \
-    "see journalctl --user" >&2
-  exit 1
+  echo "open-gui.sh: herdr-core on $(uname -n) does not answer (scan.sh core-layout)" >&2
+  # In a subshell $$ is the main shell's pid; the main shell returns 1 itself.
+  if [ "$BASHPID" != "$$" ]; then kill -USR1 $$; fi
+  return 1
+}
+
+# The layout last read by refresh_layout, in herdr-app ls's shape. Pure: it never reads herdr-core.
+app_ls() {
+  printf '%s\n' "$LAYOUT"
 }
 
 # A JSON argv array from its arguments, as herdr-app takes it.
@@ -355,7 +355,7 @@ reap_dead() {
 
 # "space tab pane" of a terminal as herdr-app shows it, if it shows it.
 locate() {
-  "$APP" ls | jq -r --arg t "$1" '.spaces[] as $s | $s.tabs[] as $tab |
+  app_ls | jq -r --arg t "$1" '.spaces[] as $s | $s.tabs[] as $tab |
     $tab.terminals[] | select(.terminal == $t) | [$s.id, $tab.id, .pane] | @tsv'
 }
 
@@ -364,13 +364,27 @@ locate() {
 # is one of them, else the first named so.
 tab_named() {
   local space=$1 name=$2 hint=${3:-} ids
-  ids=$("$APP" ls | jq -r --arg s "$space" --arg n "$name" \
+  ids=$(app_ls | jq -r --arg s "$space" --arg n "$name" \
     '.spaces[] | select(.id == $s) | .tabs[] | select(.name == $n) | .id')
   if [ -n "$hint" ] && grep -qxF "$hint" <<<"$ids"; then
     echo "$hint"
     return 0
   fi
   head -n1 <<<"$ids"
+}
+
+# Waits (up to 15 s) until a tab named $2 shows in space $1, and prints its id: herdr-app applies
+# a new tab in the background, so a read right after the write may not see it. $3 is tab_named's hint.
+await_tab() {
+  local i id
+  for i in $(seq 30); do
+    refresh_layout || return 1
+    id=$(tab_named "$1" "$2" "${3:-}")
+    if [ -n "$id" ]; then echo "$id"; return 0; fi
+    sleep 0.5
+  done
+  echo "open-gui.sh: the $2 tab did not show in space $1" >&2
+  return 1
 }
 
 # The tab of space $2 that holds this checkout's agent $1, if it runs there: a hint for tab_named.
@@ -396,7 +410,7 @@ recorded_main_tab() {
 
 # True when herdr-app shows a space with this id.
 space_exists() {
-  "$APP" ls | jq -e --arg s "$1" '.spaces[] | select(.id == $s)' >/dev/null
+  app_ls | jq -e --arg s "$1" '.spaces[] | select(.id == $s)' >/dev/null
 }
 
 # Labels a terminal as an agent of this checkout: its name, its dir, and for a
@@ -475,6 +489,7 @@ add_engine_agents() {
 add_prompter_left() {
   local term prompter
   term=$(add_prompter "$1" "$2" right)
+  refresh_layout || exit 1
   prompter=$(locate "$term" | cut -f3)
   if [ -n "$prompter" ]; then app do pane.swap --pane "$prompter" --target "$2" >/dev/null; fi
 }
@@ -499,13 +514,15 @@ record_label() {
 
 # The OCTOPILOT tab, unless the space has one: the dashboard mod, and the chat
 # mod (the prompter) beside it. The chat's pane is recorded on the host
-# (octopilot.chat=<tab>:<pane>) so the kitchen can split from it; herdr-app ls lists no mod panes.
+# (octopilot.chat=<tab>:<pane>) so the kitchen can split from it (the layout's terminals do not list mods).
 add_main_tab() {
   local created chat pane tab
+  refresh_layout || exit 1
   if [ -n "$(tab_named "$1" "$MAIN_TAB" "$(recorded_main_tab)")" ]; then return 0; fi
   created=$(app do tab.new --space "$1" --name "$MAIN_TAB" \
     --mod octopilot-chat --props "$PROMPTER_PROPS" --focus false)
   chat=$(jq -r '.pane // empty' <<<"$created")
+  tab=$(jq -r '.tab // empty' <<<"$created")
   if [ -z "$chat" ]; then
     echo "open-gui.sh: the $MAIN_TAB tab has no pane to split the dashboard from" >&2
     exit 1
@@ -515,7 +532,7 @@ add_main_tab() {
     --mod octopilot-dashboard --props "$DASH_PROPS")
   pane=$(jq -r '.pane // empty' <<<"$created")
   name_mod_pane "$pane" "$(pane_name "$DASHBOARD_PANE")"
-  tab=$(tab_named "$1" "$MAIN_TAB" "$(recorded_main_tab)")
+  if [ -z "$tab" ]; then tab=$(await_tab "$1" "$MAIN_TAB" "$(recorded_main_tab)") || tab=""; fi
   if [ -n "$chat" ] && [ -n "$tab" ]; then record_label "$(find_host)" octopilot.chat "$tab:$chat"; fi
 }
 
@@ -542,6 +559,7 @@ size_kitchen() {
 # record, so its kitchen is not split (the note says so).
 add_kitchen() {
   local space=$1 host main kitchen chat created top out
+  refresh_layout || exit 1
   host=$(find_host)
   main=$(tab_named "$space" "$MAIN_TAB" "$(recorded_main_tab)")
   if [ -z "$host" ] || [ -z "$main" ]; then
@@ -605,9 +623,9 @@ start_code_tab() {
   echo "$term"
 }
 
-# The terminals a tab holds, by id. herdr-app ls lists no mod panes.
+# The terminals a tab holds, by id (its mod panes are not terminals).
 tab_terminals() {
-  "$APP" ls | jq -r --arg t "$1" '.spaces[].tabs[] | select(.id == $t) | .terminals[].terminal'
+  app_ls | jq -r --arg t "$1" '.spaces[].tabs[] | select(.id == $t) | .terminals[].terminal'
 }
 
 # Waits (up to 15 s) until a terminal shows in a tab, and prints its "space tab pane".
@@ -616,6 +634,7 @@ tab_terminals() {
 await_shown() {
   local i located
   for i in $(seq 30); do
+    refresh_layout || return 1
     located=$(locate "$1")
     if [ -n "$located" ]; then echo "$located"; return 0; fi
     sleep 0.5
@@ -628,8 +647,10 @@ await_shown() {
 # that is shown. Prints its "space tab pane" only when it is in $space, alone in its tab.
 show_code_tab() {
   local space=$1 code=$2 located
+  refresh_layout || return 1
   if [ -z "$(locate "$code")" ]; then
     "$HC" label "$code" "herdr.space=$space" "octopilot.space=$space" >/dev/null
+    refresh_layout || return 1
     if [ -z "$(locate "$code")" ]; then app do terminal.keep --terminal "$code" >/dev/null; fi
   fi
   located=$(await_shown "$code") || return 1
@@ -662,6 +683,7 @@ drop_side_panel() {
 # or a parked agent, never ending its claude; a tab holding another terminal is refused.
 add_code_tab() {
   local space=$1 old code located t
+  refresh_layout || exit 1
   code=$(find_agent "$CODE_AGENT")
   old=$(tab_named "$space" "$CODE_TAB" "$(agent_tab "$CODE_AGENT" "$space")")
   if [ -n "$old" ]; then
@@ -710,13 +732,13 @@ add_code_terminal_tab() {
 # (`dashboard`, as the TUI layout's builder gives it) count too.
 legacy_dashboard() {
   local t
-  for t in $("$APP" ls | jq -r --arg s "$1" \
+  for t in $(app_ls | jq -r --arg s "$1" \
     '.spaces[] | select(.id == $s) | .tabs[].terminals[] |
       select(.name == "dashboard") | .terminal'); do
     echo "$t"
     return 0
   done
-  for t in $("$APP" ls | jq -r --arg s "$1" \
+  for t in $(app_ls | jq -r --arg s "$1" \
     '.spaces[] | select(.id == $s) | .tabs[].terminals[].terminal'); do
     if "$HC" get "$t" --json | jq -e '[(.argv // []), (.foreground.argv // [])] |
       any(join(" ") | test("dashboard[.]sh") and (test("--headless") | not))' >/dev/null; then
@@ -735,6 +757,7 @@ close_launcher() {
   # Run from the code agent's own terminal: its pane is the agent's, never closed here.
   code=$(find_agent "$CODE_AGENT")
   if [ "$HC_TERMINAL_ID" = "$code" ]; then return 0; fi
+  refresh_layout || exit 1
   located=$(locate "$HC_TERMINAL_ID") || return 0
   IFS=$'\t' read -r _ _ pane <<<"$located"
   if [ -z "$pane" ]; then return 0; fi
@@ -764,6 +787,7 @@ unpark_engine() {
   local space=$1 label t tab located out lspace ltab
   local keep
   for label in "$HEADLESS_AGENT" "$PROMPTER_AGENT"; do
+    refresh_layout || exit 1
     t=$(find_agent "$label")
     if [ -z "$t" ] || [ -n "$(locate "$t")" ]; then continue; fi
     "$HC" label "$t" "herdr.space=$space" "octopilot.space=$space" >/dev/null
@@ -800,6 +824,7 @@ park_engine() {
   if [ "$HIDE_ENGINE" = 0 ]; then return 0; fi
   for label in "$HEADLESS_AGENT" "$PROMPTER_AGENT"; do
     t=$(find_agent "$label")
+    refresh_layout || exit 1
     if [ -z "$t" ] || [ -z "$(locate "$t")" ]; then continue; fi
     if [ "$label" = "$HEADLESS_AGENT" ]; then
       "$HC" label "$t" "octopilot.space=$space" >/dev/null
@@ -819,8 +844,19 @@ stop_engine() {
   done
 }
 
+# The space of this checkout's octopilot-dashboard mod pane (its props name this checkout's dir
+# and state dir), if the core lists one. Empty: none.
+dashboard_space() {
+  local ids
+  ids=$(app_ls | jq -r --arg d "$DIR" --arg st "$STATE_DIR" '.spaces[] | .id as $s |
+    .tabs[].mods[]? | select(.mod == "octopilot-dashboard" and .props.dir == $d and
+    .props.state_dir == $st) | $s')
+  head -n1 <<<"$ids"
+}
+
 # The space a new host starts in: the one of a terminal labelled with this checkout's dir,
 # never a match by name. Empty: a new space. ORCH is the last fallback, for a migrated space.
+# Without a labelled terminal, the space of this checkout's dashboard mod pane.
 existing_space() {
   local label t s
   for label in "$CODE_AGENT" "$HEADLESS_AGENT" "$PROMPTER_AGENT" "$ORCH_AGENT"; do
@@ -829,6 +865,7 @@ existing_space() {
     s=$(space_of "$t")
     if [ -n "$s" ] && space_exists "$s"; then echo "$s"; return 0; fi
   done
+  dashboard_space
 }
 
 # The terminal that keeps a retired agent's chat and kitchen labels until the new host
@@ -845,7 +882,7 @@ records_holder() {
 own_curses_dashboard() {
   local t
   if [ -z "$1" ]; then return 0; fi
-  for t in $("$APP" ls | jq -r --arg s "$1" \
+  for t in $(app_ls | jq -r --arg s "$1" \
     '.spaces[] | select(.id == $s) | .tabs[].terminals[].terminal'); do
     if "$HC" get "$t" --json | jq -e --arg d "$DIR/dashboard.sh" '
       (.labels["octopilot.agent"] == null) and
@@ -952,7 +989,8 @@ restore_and_tick() {
 # space is called after its first terminal's folder. A refusal is warned about, never fatal.
 name_space() {
   local name out
-  name=$("$APP" ls | jq -r --arg s "$1" '.spaces[] | select(.id == $s) | .name') || true
+  refresh_layout || exit 1
+  name=$(app_ls | jq -r --arg s "$1" '.spaces[] | select(.id == $s) | .name') || true
   if [ "$name" = "$LABEL" ]; then return 0; fi
   if ! out=$("$APP" do space.rename --id "$1" --name "$LABEL" 2>&1); then
     echo "open-gui.sh: could not name space $1 $LABEL: $out" >&2
@@ -964,6 +1002,7 @@ name_space() {
 # Worker tabs opened later land after them.
 place_tabs() {
   local space=$1 tab engine
+  refresh_layout || exit 1
   tab=$(tab_named "$space" "$MAIN_TAB" "$(recorded_main_tab)")
   if [ -n "$tab" ]; then app do tab.move --id "$tab" --index 1 >/dev/null; fi
   tab=$(tab_named "$space" "$CODE_TAB" "$(agent_tab "$CODE_AGENT" "$space")")
@@ -977,13 +1016,31 @@ place_tabs() {
 # Shows the space and its OCTOPILOT tab.
 focus_main() {
   app do space.select --id "$1" >/dev/null
-  app do tab.select --id "$(tab_named "$1" "$MAIN_TAB" "$(recorded_main_tab)")" >/dev/null
+  app do tab.select --id "$(await_tab "$1" "$MAIN_TAB" "$(recorded_main_tab)")" >/dev/null
 }
 
-ensure_window
+# herdr-app's window, when one answers: the terminal starts still need it (they move to
+# herdr-core later). Without one, the run only goes on in a space the core already holds.
+HAVE_WINDOW=0
+WINDOW_RC=0
+window_status || WINDOW_RC=$?
+if [ "$WINDOW_RC" = 0 ]; then HAVE_WINDOW=1; fi
+# The layout is read before anything is changed: a failed read stops the run here.
+refresh_layout || {
+  echo "open-gui.sh: nothing is changed; check herdr-core on $(uname -n), then run Open Octopilot again." >&2
+  exit 1
+}
 # The space is found before the retirement and the reap, which may end the terminals that prove it.
 # A bare shell proves it too (find_labelled): after a reboot the restored shells are all there is.
 known_space=$(existing_space)
+if [ -z "$known_space" ] && [ "$HAVE_WINDOW" = 0 ]; then
+  echo "open-gui.sh: No Octopilot space on $(uname -n), and building one needs a herdr-app window on" \
+    "$(uname -n) (its mod panes). Open herdr-app on $(uname -n)'s screen and run Open Octopilot there;" \
+    "$(no_window_note)." >&2
+  exit 1
+fi
+# The decisions below read the layout as it is now (a failed read stops the run).
+refresh_layout || exit 1
 # Dead shells go first: the pre-checks and the records holder must not see them.
 for a in "$HEADLESS_AGENT" "$PROMPTER_AGENT" "$CODE_AGENT"; do reap_dead "$a"; done
 # Layouts this run cannot build over are refused before anything is ended.
@@ -1023,10 +1080,18 @@ if [ -n "$host" ]; then
       echo "open-gui.sh: the $HEADLESS_AGENT agent ($host) is not in a Herdr space" >&2
       exit 1
     fi
+    # Read here, in this shell: a failed read stops the run, it is never a closed space.
+    refresh_layout || exit 1
     if space_exists "$space"; then
       tab=""
       pane=""
     else
+      if [ "$HAVE_WINDOW" = 0 ]; then
+        echo "open-gui.sh: the space of the $HEADLESS_AGENT agent is closed, and building one needs a" \
+          "herdr-app window on $(uname -n); nothing is stopped. Open herdr-app on $(uname -n)'s screen" \
+          "and run Open Octopilot there ($(no_window_note))." >&2
+        exit 1
+      fi
       echo "open-gui.sh: the space of the $HEADLESS_AGENT agent is closed; stopping" \
         "octopilot and building it again" >&2
       stop_engine
@@ -1087,6 +1152,8 @@ fi
 # No host running: it starts in this checkout's space, or in a new one, and the prompter
 # beside it. --terminals starts the curses dashboard as the host. A kept prompter in the
 # host's tab (a retired agent's) gets the host beside it, to its right.
+# The space and the tab are decided on a fresh layout: a failed read stops the run before either.
+refresh_layout || exit 1
 space="$known_space"
 tab_name="$ENGINE_TAB"
 host_argv=$(headless_argv)

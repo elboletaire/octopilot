@@ -210,20 +210,22 @@ prints the error and the log path and waits for Enter. Success closes the pane
 as before. This covers `set -e` failures too (the ERR trap names the line when it can).
 The log's tee ignores HUP, so a pane closed mid-run still writes the whole log.
 
-A run first checks that herdr-app has a window to answer (`herdr-app status`, the machine it
-runs on). After a reboot or a logout there is none: with a graphical session on that
-computer (`WAYLAND_DISPLAY` or `DISPLAY` in the systemd user environment) the run opens the
-window with `systemd-run --user` and waits up to 30 s for it; without one it stops before
-it touches the space, and says so (log in on that computer, or run herdr-app there, then
-run Open Octopilot again). A run also holds the engine's `tick.lock` and `exec.lock` while it sets
-the space up and restores the workers, and releases them before it requests a tick: a tick started
+A run reads the layout from herdr-core (`scan.sh core-layout`), which needs no herdr-app
+window, and finds the Octopilot space there: by a labelled terminal of this checkout, else by its
+`octopilot-dashboard` mod pane. A run never starts a window. With no space and no window
+(`herdr-app status` on the machine it runs on) it stops before it touches anything, and says so
+(open herdr-app on that computer's screen, then run Open Octopilot there). A layout that the core
+does not answer stops the run the same way, and a read that fails later ends the run at once, with
+nothing created after it. The terminal starts still use herdr-app, so a run with a space but no
+window does not finish yet (the next step moves them to herdr-core). A run also holds the engine's
+`tick.lock` and `exec.lock` while it sets the space up and restores the workers, and releases them before it requests a tick: a tick started
 meanwhile prints `tick already running` (its `tick.lock`) or `engine busy: ...` (its `exec.lock`),
 and a drain prints `engine busy: the drain retries later`. None of them acts while the locks are held.
 
 To recover from the Mac when the Octopilot space is on caprica and caprica's window is gone:
-open a space on caprica (`herdr-app do space.new --machine caprica`, or the new-space dialog),
-then run Open Octopilot from it. The palette entry opens its tab on the focused space's
-machine, so the run is caprica's, and the window is opened there as above.
+the space is still in herdr-core, so a run from caprica finds it with no window. Building a space
+needs herdr-app's window on caprica (open herdr-app on its screen, then run Open Octopilot there).
+The palette entry opens its tab on the focused space's machine, so the run is caprica's.
 
 Viewed from another computer (the Octopilot space is on a remote machine, see
 `CONTRACT.md`), the mods run their commands and read `view.json` on that machine,
