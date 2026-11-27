@@ -1000,6 +1000,15 @@ def octopilot_space():
     return None
 
 
+def octopilot_closed():
+    """True when this checkout's headless runs here but its Octopilot space is
+    gone: the space was closed, and octopilot with it. False when herdr-app does
+    not answer, so nothing is taken for closed."""
+    if OCTOPILOT_BACKEND != "hc" or HC.spaces() is None:
+        return False
+    return own_labels(HEADLESS_AGENT) is not None and octopilot_space() is None
+
+
 def octopilot_workspace():
     """The TUI's Octopilot workspace (labelled as herdr/open.sh does), else the
     one the prompter runs in. None when neither is found."""
@@ -3802,6 +3811,10 @@ def tick(args):
             print("tick already running")
             return 0
         with locked():
+            if octopilot_closed():
+                # Every worker tab is gone with the space: keep the rows, untouched.
+                print("octopilot closed: its space is gone; run Open Octopilot")
+                return 0
             state = load()
             info = {}
             rows, active, n, untracked = scan(state, refresh="--refresh" in args,

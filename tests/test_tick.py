@@ -117,3 +117,68 @@ class TickTest(unittest.TestCase):
             self.assertFalse(scan.engine_allowed(worktree))
             os.environ["OCTOPILOT_STATE_DIR"] = fake.SCRATCH
             self.assertTrue(scan.engine_allowed(worktree))
+
+
+def headless_in(space):
+    """own_labels stand-in: this checkout's headless, parked in `space`."""
+    def own_labels(agent):
+        if agent == scan.HEADLESS_AGENT:
+            return {"octopilot.space": space}
+        return None
+    return own_labels
+
+
+class OctopilotClosedTest(unittest.TestCase):
+    def closed(self, backend="hc", spaces=None, labels=None):
+        with mock.patch.object(scan, "OCTOPILOT_BACKEND", backend), \
+                mock.patch.object(scan.HC, "spaces", return_value=spaces), \
+                mock.patch.object(scan, "own_labels", side_effect=labels):
+            return scan.octopilot_closed()
+
+    def test_the_space_of_a_running_headless_is_gone(self):
+        self.assertTrue(self.closed(spaces=[], labels=headless_in("sp1")))
+
+    def test_an_open_space_is_not_closed(self):
+        self.assertFalse(self.closed(spaces=[{"id": "sp1"}],
+                                     labels=headless_in("sp1")))
+
+    def test_herdr_app_not_answering_is_not_closed(self):
+        self.assertFalse(self.closed(spaces=None, labels=headless_in("sp1")))
+
+    def test_no_headless_here_is_not_closed(self):
+        self.assertFalse(self.closed(spaces=[], labels=lambda agent: None))
+
+    def test_the_herdr_backend_is_never_closed(self):
+        self.assertFalse(self.closed(backend="herdr", spaces=[],
+                                     labels=headless_in("sp1")))
+
+
+class TickWhileOctopilotClosedTest(unittest.TestCase):
+    def test_a_closed_space_leaves_the_state_and_the_rows_alone(self):
+        gone = {"items": {KEY: {"mode": "fix", "pr": 5, "session": "w1"}}}
+        with fake.fake_world(octopilot_closed=True,
+                             all_sessions=([], {"hc"}, set()),
+                             backend_for=lambda s: FakeBackend(),
+                             pr_detail=pr_detail):
+            scan.save(dict(scan.EMPTY, **gone))
+            with open(scan.STATE_FILE) as fh:
+                before = fh.read()
+            code, out = run_tick()
+            with open(scan.STATE_FILE) as fh:
+                self.assertEqual(fh.read(), before)
+            self.assertFalse(os.path.exists(scan.SNAPSHOT_FILE))
+            self.assertFalse(os.path.exists(scan.EVENTS_FILE))
+        self.assertEqual((code, out), (0, "octopilot closed: its space is gone; "
+                                          "run Open Octopilot\n"))
+
+    def test_tick_runs_as_today_when_herdr_app_does_not_answer(self):
+        with mock.patch.object(scan, "OCTOPILOT_BACKEND", "hc"), \
+                mock.patch.object(scan.HC, "spaces", return_value=None), \
+                mock.patch.object(scan, "own_labels", side_effect=headless_in("sp1")), \
+                fake.fake_world(pr_detail=pr_detail):
+            scan.save(new_state())
+            code, out = run_tick("--quiet")
+            with open(scan.STATE_FILE) as fh:
+                saved = json.load(fh)
+        self.assertEqual((code, out), (0, ""))
+        self.assertEqual(saved["items"][KEY]["pending_rerequest"], HEAD)
