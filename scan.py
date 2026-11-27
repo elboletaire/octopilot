@@ -3445,10 +3445,46 @@ def transcript_path(info):
     not written yet gives None, never the stale label. No guess from the folder:
     other claude sessions, the user's own included, may run in the prompter's folder."""
     session = live_session_id(info) or (info.get("labels") or {}).get("octopilot.session") or ""
+    return transcript_file(session)
+
+
+def transcript_file(session):
+    """The transcript file of a claude session id, or None when none is written."""
     if not UUID_RE.match(session):
         return None
     hits = glob.glob(os.path.join(PROJECTS_DIR, "*", f"{session}.jsonl"))
     return hits[0] if hits else None
+
+
+# The launchers' claude sessions, kept in state so open-gui.sh can resume them
+# after a reboot (launcher_sessions[agent] = {"session", "cwd"}).
+LAUNCHER_AGENTS = (PROMPTER_AGENT, CODE_AGENT)
+
+
+def record_launcher_sessions(state):
+    """Store the live claude session and cwd of each launcher that runs. A launcher
+    that is not running keeps the value it had."""
+    for agent in LAUNCHER_AGENTS:
+        address = agent_address(agent)
+        info = terminal_info(address) if address else None
+        session = live_session_id(info) if info else None
+        cwd = info.get("cwd") if info else None
+        if session is None or not isinstance(cwd, str) or not cwd:
+            continue
+        state.setdefault("launcher_sessions", {})[agent] = {"session": session, "cwd": cwd}
+
+
+def launcher_session(args, state):
+    """launcher-session <agent>: print "<session>\\t<cwd>" of a launcher's recorded
+    claude, only when its transcript exists; print nothing otherwise."""
+    if len(args) < 2:
+        print("usage: scan.sh launcher-session <agent>", file=sys.stderr)
+        return 1
+    record = (state.get("launcher_sessions") or {}).get(args[1]) or {}
+    session = record.get("session") or ""
+    if transcript_file(session):
+        print(f"{session}\t{record.get('cwd') or ''}")
+    return 0
 
 
 def parse_line(raw):
@@ -3698,7 +3734,7 @@ def chat_keys(args):
 SELF_LOCKING = {"tick", "drain"}
 READ_ONLY = {"render", "status", "siblings", "snapshot", "wind-down", "plugin-settings",
              "inbox", "installed-dir", "speech", "chat", "chat-send", "chat-keys",
-             "host-space"}
+             "launcher-session", "host-space"}
 
 
 def claude_plugin_dirs():
@@ -3813,6 +3849,7 @@ def tick(args):
             for kind, k, _ in rows:
                 if kind == "GONE":
                     log_event("gone", k)
+            record_launcher_sessions(state)
             counts = {}
             for kind, _, _ in rows:
                 counts[kind] = counts.get(kind, 0) + 1
@@ -3963,6 +4000,8 @@ def dispatch(cmd, args, state):
         return chat_send(args)
     if cmd == "chat-keys":
         return chat_keys(args)
+    if cmd == "launcher-session":
+        return launcher_session(args, state)
     if cmd == "reboot":
         return reboot(state, args[1])
     if cmd in ("read", "focus") and len(args) < 2:
@@ -4218,7 +4257,7 @@ def dispatch(cmd, args, state):
           "mark-merged|restack|"
           "render|spawn|"
           "investigate|snapshot|report|inbox|request|send|send-code|reboot|read|focus|wind-down|"
-          "speech|chat|chat-send|chat-keys]", file=sys.stderr)
+          "speech|chat|chat-send|chat-keys|launcher-session]", file=sys.stderr)
     return 1
 
 
