@@ -42,7 +42,8 @@ class PlacementTest(unittest.TestCase):
                          ("running", {"engine": {"action": "cleanup",
                                                  "label": "cleaning up",
                                                  "paused": False},
-                                      "cause": None, "report": None}))
+                                      "why": None, "cause": None,
+                                      "report": None}))
         self.assertEqual(place("RESTACK", item())[1]["engine"]["action"],
                          "restack")
 

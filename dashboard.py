@@ -58,6 +58,8 @@ SNAPSHOT_LOCK = SNAPSHOT_FILE + ".lock"
 # dashboard so only one of them notifies.
 NOTIFIED_FILE = os.path.join(STATE_DIR, "notified.json")
 NOTIFIED_LOCK = NOTIFIED_FILE + ".lock"
+# The format of notified.json: {"v": 2, "seen": {item: [cause, ...]}}.
+NOTIFIED_VERSION = 2
 # GitHub notifications watermark, shared so whichever dashboard polls next
 # carries on from it; only the lock holder polls.
 NOTIFY_WATCH_FILE = os.path.join(STATE_DIR, "notifications.json")
@@ -66,9 +68,12 @@ NOTIFY_WHY = {"READY": "ready to merge", "overdue": "re-review overdue",
               "CAPPED": "out of review rounds",
               "PUSHED": "stale: pushed, never re-requested",
               "STALLED": "agent not reporting", "stalled": "agent not reporting",
-              "CLOSED": "closed without merging", "blocked": "agent is blocked",
-              "failed": "agent's CI is failing", "capped": "out of review rounds",
-              "asking": "agent is asking something"}
+              "CLOSED": "closed without merging",
+              "BLOCKED": "agent blocked, failed or stalled",
+              "blocked": "agent is blocked", "failed": "agent reported failed",
+              "capped": "out of review rounds", "asking": "agent is asking something",
+              "ready": "report to read", "woke": "back from hold",
+              "engine_error": "engine failed", "send_failed": "engine failed"}
 REFRESH_SECS = int(os.environ.get("DASHBOARD_REFRESH_SECS", "120"))
 NOTIFY_POLL_SECS = int(os.environ.get("NOTIFY_POLL_SECS", "60"))
 MAX_REVIEW_ROUNDS = int(os.environ.get("MAX_REVIEW_ROUNDS", "3"))
@@ -207,6 +212,21 @@ def desktop(title, body):
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except OSError:
         pass
+
+
+def notify_text(e):
+    """The headline of a desktop notification for a card in Needs you."""
+    why = e["why"] or "needs you"
+    note = e["note"] or ""
+    if why == "woke" and "back from hold" in note:
+        return note[note.index("back from hold"):]
+    if why in ("engine_error", "send_failed"):
+        eng = e["engine"] or {}
+        subject = eng.get("label") if eng.get("action") == "send" \
+            else eng.get("action")
+        if subject:
+            return f"engine: {subject} failed"
+    return NOTIFY_WHY.get(why, why)
 
 
 def poll_notifications(watch):
@@ -541,25 +561,39 @@ class Model:
             last = cur
 
     def notify(self, data):
-        """A desktop notification when an item enters Needs you, once per
-        item and reason; herdr's own toasts stay inside herdr. The first run
-        only records what is already there, so a fresh dashboard does not
-        replay old news."""
+        """A desktop notification when a card enters Needs you for a cause it
+        has not notified for. Once per (item, cause): a card that bounces out
+        of Needs and back with the same cause stays quiet, and a new cause
+        (a new head, a new report) notifies again. The first run, with no
+        notified.json or one of an older format, only records the causes
+        already there, so a fresh dashboard does not replay old news."""
         if self.snap is None or not shutil.which("notify-send"):
             return
-        now_needs = {e["key"]: e for e in data["needs"]}
+        with self.lock:
+            items = dict((self.state or {}).get("items") or {})
+        tracked = set(items)
+        for it in items.values():
+            tracked.update(it.get("prev_keys") or [])
         with open(NOTIFIED_LOCK, "w") as lk:
             fcntl.flock(lk.fileno(), fcntl.LOCK_EX)
-            first = not os.path.exists(NOTIFIED_FILE)
-            sent = read_json(NOTIFIED_FILE) or {}
-            out = {}
-            for k, e in now_needs.items():
-                why = e["why"] or "needs you"
-                out[k] = why
-                if not first and sent.get(k) != why:
-                    desktop(f"🔴 {short(k)}: {NOTIFY_WHY.get(why, why)}",
+            sent = read_json(NOTIFIED_FILE)
+            first = not (isinstance(sent, dict)
+                         and sent.get("v") == NOTIFIED_VERSION)
+            seen = {} if first else {k: set(c) for k, c in
+                                     (sent.get("seen") or {}).items()}
+            for e in data["needs"]:
+                causes = seen.setdefault(e["key"], set())
+                cause = e["cause"] or e["why"] or "needs you"
+                if cause in causes:
+                    continue
+                causes.add(cause)
+                if not first:
+                    desktop(f"🔴 {short(e['key'])}: {notify_text(e)}",
                             f"{e['title']}\n{(e['note'] or '')[:200]}")
-            if out != sent or first:
+            out = {"v": NOTIFIED_VERSION,
+                   "seen": {k: sorted(c) for k, c in seen.items()
+                            if k in tracked}}
+            if first or out != sent:
                 tmp = f"{NOTIFIED_FILE}.tmp.{os.getpid()}"
                 with open(tmp, "w") as fh:
                     json.dump(out, fh)
@@ -701,20 +735,7 @@ class Model:
         stalled = (it.get("driver") == "agent" and kind in RUN_ROWS | {"NEW"}
                    and quiet is not None and quiet >= AGENT_STALL_MIN * 60
                    and agent_state != "running" and not rep)
-        # A read-only investigation never gets a PR, so no READY row: its
-        # `ready` report is the moment the user has something to read.
-        rep_needs = REPORT_NEEDS | ({"ready"} if it.get("read_only")
-                                    else set())
         hold = scan.hold_of(it) or {}
-        # Why it needs the user, for the desktop notification: one per reason.
-        # An overdue re-review is a READY row with its own reason, so its
-        # notification and a later plain READY one are told apart.
-        overdue = kind == "READY" and \
-            (row.get("fields") or {}).get("wait") == "overdue"
-        why = ("overdue" if overdue else kind) if kind in NEEDS_ROWS \
-            else "stalled" if stalled else rep.get("state") \
-            if rep.get("state") in rep_needs \
-            else "asking" if agent_state == "waiting" else None
         if rep:
             note = f"{rep.get('state')}: {rep.get('msg') or ''}"
         elif stalled:
@@ -761,7 +782,7 @@ class Model:
                 "branch": it.get("branch"), "pr": pr,
                 "stack": len(it.get("stack") or []),
                 "pane": ag.get("pane"), "open": bool(sess and sess in sessions),
-                "why": why, "hold": hold_view(row, it),
+                "why": None, "hold": hold_view(row, it),
                 "engine": None, "cause": None, "report": None}
 
 
@@ -818,7 +839,8 @@ def engine_badge(kind, sends, paused, failed=None):
 def column_of(row, it, ag, ctx):
     """Where a tracked row sits on the board: (section, extras). The first
     placement rule that matches wins (herdr-app/CONTRACT.md, Placement).
-    extras: engine (the ⏭ badge), cause (what notifications key on, or None)
+    extras: engine (the ⏭ badge), why (the reason a Needs card gives, for the
+    notification's text), cause (the key a notification is once per, or None)
     and report (the live report state behind a BLOCKED or HOLD card, or None).
     ctx: live (the scan's agents), sends (the item's queued sends), paused,
     stalled (the dashboard's live check)."""
@@ -830,22 +852,26 @@ def column_of(row, it, ag, ctx):
     state = rep.get("state")
     failed = it.get("engine_error_action") if it.get("engine_error") else None
     extras = {"engine": engine_badge(kind, sends, ctx.get("paused"), failed),
-              "cause": None, "report": None}
+              "why": None, "cause": None, "report": None}
     agent = ag.get("state")
+
+    def needs(why, cause):
+        extras.update(why=why, cause=cause)
+        return "needs", extras
+
     if kind in ("MERGED", "RESTACK"):
         return "running", extras
     if kind == "GONE":
         return "done", extras
     if kind == "CLOSED":
-        return "needs", extras
+        return needs("CLOSED", "CLOSED")
     if it.get("engine_error"):
-        extras["cause"] = f"engine-error:{it['engine_error']}"
-        return "needs", extras
+        return needs("engine_error", f"engine-error:{it['engine_error']}")
     if failing:
-        extras["cause"] = f"send:{failing['reason']}:{failing['at']}"
-        return "needs", extras
+        return needs("send_failed",
+                     f"send:{failing['reason']}:{failing['at']}")
     if agent == "waiting":
-        return "needs", extras
+        return needs("asking", "asking")
     if kind in ("REVIEW", "BOOTING", "FEEDBACK") or agent == "running":
         return "running", extras
     hold = scan.hold_of(it) or {}
@@ -855,26 +881,35 @@ def column_of(row, it, ag, ctx):
     if hold.get("by") == "you" and not newer:
         return "hold", extras
     if state in REPORT_NEEDS:
-        extras["cause"] = f"report:{state}:{rep.get('at')}"
         if state != "capped":
             extras["report"] = state
-        return "needs", extras
+        return needs(state, f"report:{state}:{rep.get('at')}")
     if state == "held":
         extras["report"] = state
         return "hold", extras
     if state == "ready" and it.get("read_only"):
         if it.get("report_acked") == rep.get("at"):
             return "done", extras
-        extras["cause"] = f"report:ready:{rep.get('at')}"
-        return "needs", extras
+        return needs("ready", f"report:ready:{rep.get('at')}")
     if kind in NEEDS_ROWS:
-        return "needs", extras
+        fields = row.get("fields") or {}
+        why = "overdue" if kind == "READY" and \
+            fields.get("wait") == "overdue" else kind
+        if kind == "BLOCKED" and fields.get("report") in REPORT_NEEDS:
+            why = fields["report"]
+        # A new head is a new reason to look at a READY or PUSHED card.
+        cause = f"{why}:{row.get('head') or ''}" \
+            if kind in ("READY", "PUSHED") else why
+        # A card the user woke from a hold notifies once for its wake.
+        if "back from hold" in (row.get("note") or ""):
+            return needs("woke", f"woke:{cause}")
+        return needs(why, cause)
     if kind == "HOLD":
         return "hold", extras
     if kind == "DONE":
         return "done", extras
     if ctx.get("stalled"):
-        return "needs", extras
+        return needs("stalled", "stalled")
     return "running", extras
 
 
