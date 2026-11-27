@@ -221,6 +221,47 @@ class RehomeTest(unittest.TestCase):
         self.assertEqual(state["items"][KEY]["session"], MOVED)
 
 
+class ParkedIssueItemTest(unittest.TestCase):
+    """A parked issue item has no PR yet; its claude may open one."""
+    PARKED = {"session": None, "ids": [], "agent": "ap-app-3", "pane": "t9"}
+    ISSUE = "octo/app#3"
+
+    def scan(self, found):
+        state = tab_item()
+        state["items"] = {self.ISSUE: {"mode": "fix", "branch": "feat/x",
+                                       "session": TAB, "agent": "ap-app-3",
+                                       "phase": "booting"}}
+        pr = {"number": 8, "state": found, "headRefOid": "abc1234",
+              "headRefName": "feat/x"}
+        with fake.fake_world(all_sessions=([], {"hc"}, {SPACE}), backend_for=scan.HC,
+                             parked_agent=self.PARKED, pr_detail=pr_detail,
+                             build_registry={"octo/app": {"path": "/p"}},
+                             gh_json=lambda args, cwd=None, default=None: [pr]):
+            rows = scan.scan(state)[0]
+        return state, rows
+
+    def test_a_merged_pr_of_a_parked_issue_item_reaches_merged(self):
+        state, rows = self.scan("MERGED")
+        self.assertEqual([(r[0], r[1]) for r in rows], [("MERGED", "octo/app#8")])
+        self.assertIn("octo/app#8", state["items"])
+
+    def test_an_open_pr_rekeys_a_parked_issue_item_and_it_stays_parked(self):
+        state, rows = self.scan("OPEN")
+        self.assertEqual([(r[0], r[1]) for r in rows], [("WORKING", "octo/app#8")])
+        self.assertIn("terminal.keep --terminal t9", rows[0][2])
+        self.assertEqual(state["items"]["octo/app#8"]["pr"], 8)
+
+    def test_no_pr_yet_keeps_a_booting_parked_item_working_without_a_prompt(self):
+        state = tab_item()
+        state["items"] = {self.ISSUE: {"mode": "fix", "branch": "feat/x",
+                                       "session": TAB, "agent": "ap-app-3",
+                                       "phase": "booting"}}
+        with fake.fake_world(all_sessions=([], {"hc"}, {SPACE}), backend_for=scan.HC,
+                             parked_agent=self.PARKED, pr_detail=pr_detail):
+            rows = scan.scan(state)[0]
+        self.assertEqual([r[0] for r in rows], ["WORKING"])
+
+
 class ParkedAgentTest(unittest.TestCase):
     def parked(self, agents, session=TAB, open_ws=frozenset({SPACE}), backend=scan.HC):
         it = tab_item()["items"][KEY]
@@ -270,6 +311,15 @@ class ParkedTargetAndCleanupTest(unittest.TestCase):
         self.assertEqual(r["msg"], f"detached {KEY} session={TAB} branch=feat/x "
                                    "-> parked terminal t9 ended, worktree kept, untracked")
         self.assertNotIn(KEY, state["items"])
+
+    def test_no_kill_when_herdr_app_did_not_answer(self):
+        # An outage must not make every labelled terminal look parked.
+        state = tab_item()
+        with mock.patch.object(scan, "hc") as hc_call, \
+                fake.fake_world(all_sessions=([], set(), set()), backend_for=scan.HC,
+                                parked_agent=REAL_PARKED_AGENT):
+            self.assertIsNone(scan.kill_parked(state["items"][KEY], TAB))
+        hc_call.assert_not_called()
 
     def test_a_parked_detach_keeps_the_item_when_the_kill_fails(self):
         state = tab_item()

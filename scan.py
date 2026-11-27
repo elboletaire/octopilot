@@ -1073,10 +1073,8 @@ def all_agents():
 
 
 def parked_agent(it, session, open_ws, agents):
-    """The herdr-app agent of an item whose session is gone, when its terminal is
-    labelled with the agent's name and no open tab or space holds it: herdr-app
-    parked it (terminal.park), its claude still runs. agents() gives HC.agents().
-    None otherwise."""
+    """The herdr-app terminal named for the item's agent that no open tab holds:
+    herdr-app parked it, its claude still runs. agents() is HC.agents(). Else None."""
     if backend_for(session) is not HC or not it.get("agent"):
         return None
     return next((a for a in agents() if a.get("agent") == it["agent"]
@@ -1086,9 +1084,11 @@ def parked_agent(it, session, open_ws, agents):
 def kill_parked(it, sess):
     """hc kill of the item's parked terminal, its claude runs in no tab. None when
     there is none, else (pane, code, raw)."""
-    if backend_for(sess) is not HC:
+    # Without HC's answer every labelled terminal would look parked.
+    _, answered, open_ws = all_sessions()[:3]
+    if backend_for(sess) is not HC or HC.name not in answered:
         return None
-    parked = parked_agent(it, sess, all_sessions()[2], HC.agents)
+    parked = parked_agent(it, sess, open_ws, HC.agents)
     if not parked:
         return None
     code, _, raw = hc(["kill", parked["pane"]])
@@ -1557,10 +1557,9 @@ def scan(state, refresh=False, info=None):
         sess = it.get("session")
         smeta = f"session={sid(sess)}"
 
-        # A session closed by hand: an item whose agent is live elsewhere follows
-        # it (rehome_of); an agent herdr-app parked stays tracked (parked_term, below);
-        # otherwise it is untracked and frees its slot. A merged PR still goes
-        # through MERGED below. Only when its backend answered: silence is not removal.
+        # A session closed by hand follows its agent if live elsewhere, stays
+        # tracked if herdr-app parked it, else is untracked (slot freed). Only when
+        # its backend answered; a merged PR still reaches MERGED below.
         parked_term = None
         if sess and sess not in open_ws \
                 and listed(answered, sess) and not (
@@ -1621,21 +1620,28 @@ def scan(state, refresh=False, info=None):
                                           "session left alone"))
                 continue
 
-        if parked_term:
+        def parked_row(rk):
             # herdr-app parked the agent's terminal: nothing to send to until it is
             # shown again, so no prompt goes out, and a parked card stays in Done.
+            nonlocal active
             if it.get("parked"):
-                rows.append(("DONE", k, f"mode={it['mode']} {smeta} parked by you "
-                                        "-> waiting on merge or new activity"))
-                continue
+                rows.append(("DONE", rk, f"mode={it['mode']} {smeta} parked by you "
+                                         "-> waiting on merge or new activity"))
+                return
             active += 1
-            rows.append(("WORKING", k, f"mode={it['mode']} {smeta} parked in herdr-app "
-                                       "with no tab: `herdr-app do terminal.keep "
-                                       f"--terminal {parked_term['pane']}` shows it; "
-                                       "feedback waits until then"))
+            rows.append(("WORKING", rk, f"mode={it['mode']} {smeta} parked in "
+                                        "herdr-app with no tab: `herdr-app do "
+                                        "terminal.keep --terminal "
+                                        f"{parked_term['pane']}` shows it; "
+                                        "feedback waits until then"))
+
+        # Without a PR the branch lookup below runs first, so a PR the parked
+        # claude opened still re-keys and reaches MERGED or CLOSED.
+        if parked_term and it.get("pr"):
+            parked_row(k)
             continue
 
-        if it.get("phase") == "booting":
+        if it.get("phase") == "booting" and not parked_term:
             active += 1
             # A reboot whose wait timed out leaves a busy agent: a BOOTING row
             # would have the engine prompt it mid-task.
@@ -1693,6 +1699,9 @@ def scan(state, refresh=False, info=None):
                     rows.append(("CLOSED", nk, f"branch={it.get('branch')} {smeta} "
                                                "-> not merged; session left alone"))
                     continue
+                if parked_term:
+                    parked_row(nk)
+                    continue
                 active += 1
                 # An agent-driven item runs its own review loop; a REVIEW row
                 # here would tell the engine to reboot it mid-flight.
@@ -1705,6 +1714,9 @@ def scan(state, refresh=False, info=None):
                     rows.append(("REVIEW", nk,
                                  f"mode={it['mode']} {smeta} head={found['headRefOid'][:7]} "
                                  f"reviewed=none"))
+                continue
+            if parked_term:
+                parked_row(k)
                 continue
             st = live.get(sess, {}).get("state", "?")
             age = live.get(sess, {}).get("age_secs")
