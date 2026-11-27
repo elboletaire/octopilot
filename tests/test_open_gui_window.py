@@ -485,5 +485,21 @@ class OpenGuiWindowTest(unittest.TestCase):
             self.assertEqual(fh.read().strip(), "1")
 
 
+    def test_bare_shells_after_a_reboot_keep_their_space(self):
+        self.running_app()
+        # The headless of the restored space is a bare shell: it still names the space.
+        self.write("ls-octopilot.agent=octopilot-headless.json",
+                   json.dumps({"terminals": [{"address": "ys1"}]}))
+        self.write("get-ys1.json", json.dumps(terminal_json(
+            os.path.realpath(REPO), {"herdr.space": "s1", "octopilot.agent": "octopilot-headless"},
+            "zsh", 0)))
+        res = self.launch()
+        trace = self.trace()
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("hc kill ys1", trace)
+        self.assertFalse([t for t in trace if t.startswith("herdr-app do space.new")], trace)
+        self.assertTrue([t for t in trace if t.startswith("herdr-app do tab.new --space s1")], trace)
+
+
 if __name__ == "__main__":
     unittest.main()

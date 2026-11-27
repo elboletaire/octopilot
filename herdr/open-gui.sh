@@ -285,9 +285,19 @@ is_mine() {
   [ -n "$d" ] && [ "$(realpath -m "$d")" = "$DIR" ]
 }
 
-# The address of this checkout's terminal labelled as an octopilot agent, if
-# any. Pure lookup: it never kills (see reap_dead). A bare shell is never the agent:
-# the launcher holds the engine's locks, so no shell here is still starting.
+# The address of this checkout's terminal labelled as an octopilot agent, if any, a bare
+# shell (a restored one after a reboot) included: it still proves the space. Pure lookup.
+find_labelled() {
+  local t
+  for t in $("$HC" ls --json --label "octopilot.agent=$1" | jq -r '.terminals[].address'); do
+    case "$ENDED" in *" $t "*) continue ;; esac
+    if is_mine "$t"; then echo "$t"; return 0; fi
+  done
+}
+
+# The address of this checkout's terminal labelled as an octopilot agent that runs
+# (a labelled bare shell is not the agent, see find_labelled). Pure lookup: it never kills
+# (see reap_dead). The launcher holds the engine's locks, so no shell here is starting.
 find_agent() {
   local t fg
   for t in $("$HC" ls --json --label "octopilot.agent=$1" | jq -r '.terminals[].address'); do
@@ -439,28 +449,33 @@ add_prompter() {
   fi
   term=$(start_engine_term "$1" "$2" "$3" "$argv" prompter)
   name_agent "$term" "$PROMPTER_AGENT" "$session"
+  echo "$term"
 }
 
 # Starts the engine's host (the headless, or the --terminals curses dashboard) beside pane
 # $2 in direction $3, with argv $4, its pane named $5.
+# Prints its address.
 add_host() {
   local term
   term=$(start_engine_term "$1" "$2" "$3" "$4" "$5")
   name_agent "$term" "$HEADLESS_AGENT"
+  echo "$term"
 }
 
 # The engine tab's helpers beside the host (space, pane), those that are missing.
 add_engine_agents() {
-  if [ -z "$(find_agent "$HEADLESS_AGENT")" ]; then add_host "$1" "$2" down "$(headless_argv)" headless; fi
-  if [ -z "$(find_agent "$PROMPTER_AGENT")" ]; then add_prompter "$1" "$2" right; fi
+  if [ -z "$(find_agent "$HEADLESS_AGENT")" ]; then
+    add_host "$1" "$2" down "$(headless_argv)" headless >/dev/null
+  fi
+  if [ -z "$(find_agent "$PROMPTER_AGENT")" ]; then add_prompter "$1" "$2" right >/dev/null; fi
 }
 
 # The prompter on the left of the dashboard pane $2 (--terminals). pane.split only goes
 # right or down, so it is split right and swapped with the dashboard.
 add_prompter_left() {
-  local prompter
-  add_prompter "$1" "$2" right
-  prompter=$(locate "$(find_agent "$PROMPTER_AGENT")" | cut -f3)
+  local term prompter
+  term=$(add_prompter "$1" "$2" right)
+  prompter=$(locate "$term" | cut -f3)
   if [ -n "$prompter" ]; then app do pane.swap --pane "$prompter" --target "$2" >/dev/null; fi
 }
 
@@ -809,7 +824,7 @@ stop_engine() {
 existing_space() {
   local label t s
   for label in "$CODE_AGENT" "$HEADLESS_AGENT" "$PROMPTER_AGENT" "$ORCH_AGENT"; do
-    t=$(find_agent "$label")
+    t=$(find_labelled "$label")
     if [ -z "$t" ]; then continue; fi
     s=$(space_of "$t")
     if [ -n "$s" ] && space_exists "$s"; then echo "$s"; return 0; fi
@@ -967,6 +982,7 @@ focus_main() {
 
 ensure_window
 # The space is found before the retirement and the reap, which may end the terminals that prove it.
+# A bare shell proves it too (find_labelled): after a reboot the restored shells are all there is.
 known_space=$(existing_space)
 # Dead shells go first: the pre-checks and the records holder must not see them.
 for a in "$HEADLESS_AGENT" "$PROMPTER_AGENT" "$CODE_AGENT"; do reap_dead "$a"; done
@@ -993,7 +1009,8 @@ if [ -n "$known_space" ] && [ "$TERMINALS" = 1 ] && [ -z "$(find_host)" ]; then
   fi
 fi
 retire_orchestrator "$known_space"
-host=$(find_host)
+# A bare shell still proves the headless's space (find_labelled), before the reap ends it.
+host=$(find_labelled "$HEADLESS_AGENT")
 if [ -n "$host" ]; then
   located=$(locate "$host")
   if [ -n "$located" ]; then
@@ -1082,8 +1099,7 @@ fi
 beside=""
 if [ -n "$space" ]; then beside=$(prompter_pane_in "$space" "$(tab_named "$space" "$tab_name")"); fi
 if [ -n "$beside" ]; then
-  add_host "$space" "$beside" right "$host_argv" "$host_name"
-  host=$(find_host)
+  host=$(add_host "$space" "$beside" right "$host_argv" "$host_name")
 elif [ -n "$space" ]; then
   created=$(app do tab.new --space "$space" --name "$tab_name" --argv "$host_argv" --focus false)
   host=$(jq -r '.terminal' <<<"$created")
