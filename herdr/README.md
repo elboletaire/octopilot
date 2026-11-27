@@ -48,7 +48,7 @@ tab or space (not held by another item; a tab is preferred): the session follows
 agent there (re-homed), and the row stays. An agent herdr-app parked (`terminal.park`: its terminal is labelled with the agent's name,
 no open tab holds it, its claude still runs) keeps its item tracked: `WORKING` with its
 terminal's address and the `terminal.keep` command to show it, and no prompt is sent until then
-(feedback waits; new feedback on a parked PR is counted in the row, not sent or marked). A parked card you parked with `d` stays in Done; a parked PR that closed is
+(feedback waits; new feedback on a parked PR is counted in the row, not sent or marked). A card you held with `d` stays On hold; a parked PR that closed is
 `CLOSED`. Cleanup and detach (`z`) end the parked terminal (`hc kill`) first, and cleanup keeps the item
 tracked when the kill fails. Only an agent that is gone shows `GONE`.
 
@@ -366,10 +366,10 @@ the warning is harmless.
 
 | Section | Rows |
 |---|---|
-| 🔴 Needs you | `CAPPED`, `READY`, `PUSHED`, `STALLED`, `CLOSED`, agents waiting on a question, and agents whose last report was `blocked`/`failed`/`stalled`/`capped` |
-| ⏭ Next tick | `MERGED`, `REVIEW`, `FEEDBACK`, `BOOTING` -- what the engine does on its next tick |
-| 🟡 Running | `WORKING`, and anything spawned since the last GitHub refresh |
-| ✔ Done | `DONE` (including a fix PR waiting on a review: `waiting on review`, or `waiting on re-review` after requested changes; past `RE_REVIEW_QUIET_HOURS` that re-review shows as READY, `re-review overdue`), `GONE`, and cards you parked with `d` (they keep their tab or workspace and hold no slot; new feedback or a re-requested review brings them back). Done rows without a tab or workspace are hidden; `D` shows them |
+| 🟡 Running | `WORKING`, and anything spawned since the last GitHub refresh. Also `MERGED`, `RESTACK`, `REVIEW`, `BOOTING` and `FEEDBACK` with a ⏭ badge (`⏭ cleaning up`, `⏭ held: paused`, ...) for what the engine does next; a REVIEW, BOOTING or FEEDBACK whose agent waits for you is in Needs you instead |
+| 🔴 Needs you | `CAPPED`, `READY`, `PUSHED`, `STALLED`, `CLOSED`, `BLOCKED` (the agent reported blocked, failed or stalled), agents waiting on a question, and a read-only investigation's `ready` report until acked |
+| 💤 On hold | `HOLD`: cards you held with `d` or `hold`, a fix PR waiting on a reviewer (`waiting on review`, or `waiting on re-review` after requested changes; past `RE_REVIEW_QUIET_HOURS` that re-review shows as READY, `re-review overdue`), a comment waiting on its author, pushed commits you acked (`ack`: waiting on re-request), and agents that reported `held`. A hold wakes on approval, draft turned ready, new feedback, a re-request, or a newer blocked, failed, stalled or capped report; a red CI does not wake it. Holds keep their tab or workspace and hold no slot |
+| ✔ Done | `DONE` (finished only), `GONE`, and a read-only investigation's report once acked. Hidden by default; `D` shows them |
 | ⚪ Pick next | `PROPOSE` |
 
 Agent state comes from herdr every 3s, heartbeats, rounds and reports the moment
@@ -378,7 +378,7 @@ they are written, and GitHub (PR state, CI) every `DASHBOARD_REFRESH_SECS`
 dashboards share one refresh. GitHub notifications are polled every 60s
 (`NOTIFY_POLL_SECS`) and trigger an early refresh. Each GitHub pass runs `scan.py tick`
 (`snapshot`, which saves nothing, where the engine may not run), and the engine acts on
-the Next tick rows itself. `OCTOPILOT_ENGINE` picks what it does: `on` (the default,
+the ⏭ rows itself. `OCTOPILOT_ENGINE` picks what it does: `on` (the default,
 set in config.sh) acts; `plan` logs the tick's row actions as "would ..." without acting,
 and `off` acts on nothing. It is read when open-gui.sh (or the TUI dashboard pane)
 starts; to change it, see Upgrading from the orchestrator. The dashboard drains the inbox only under `on`, so under
@@ -399,12 +399,12 @@ requests, queued for the engine.
 | `o` | PR or issue in the browser, opened on the computer you are at (the mod runs `xdg-open`, `open` or `start`), not on the octopilot's machine; no URL: `dashboard.sh --action browser` |
 | `g` / `n` | on a Pick next row: queue `go <key>` / `no <key>` for the engine (press twice; past `WIND_DOWN_AT`, or with the slots full (`ACTIVE + UNTRACKED` at `MAX_ACTIVE`), the second press confirms starting anyway, and the alert's `g` sends it with `(confirmed past wind-down)` and/or `(confirmed over cap)`) |
 | `R` | on a CAPPED row: grant another `MAX_REVIEW_ROUNDS` review rounds (press twice) |
-| `e` / `x` | on a PUSHED (stale) row: queue a re-review / ack the new commits (press twice) |
+| `e` / `x` | on a PUSHED (stale) row: queue a re-review / ack the new commits (press twice; the acked row goes to On hold). On a read-only investigation's `ready` report, `x` marks it read and it goes to Done |
 | `i` | start an investigation: type the repo, the question, and whether it is read-only. Past `WIND_DOWN_AT` or with the slots full, the second press confirms starting anyway, as for `g` |
 | `P` | pause / resume octopilot (press twice) |
 | `z` | detach a tracked item: closes its tab (or its workspace or space), keeps the worktree, stops tracking it (press twice) |
 | `del` / `⌫` | remove a tracked item: deletes its tab (or its workspace or space) and worktree, stops tracking it (press twice). The confirm says what goes: `tab and worktree deleted`, `workspace and worktree deleted`, or `worktree kept` for an item with no session. Refused on MERGED and RESTACK rows: the engine handles those |
 | `r` | refresh from GitHub now |
-| `d` | on a tracked card: move it to Done / back (press twice). It keeps its tab or workspace and holds no slot; the engine still merges and cleans up |
-| `D` | show / hide done rows (DONE, GONE) |
+| `d` | on a tracked card: hold it / resume it (press twice; the prompter's `hold` / `unhold`). It goes to On hold, keeps its tab or workspace and holds no slot; the engine still merges and cleans up |
+| `D` | show / hide the Done rows (DONE, GONE; hidden by default) |
 | `q` | quit |
