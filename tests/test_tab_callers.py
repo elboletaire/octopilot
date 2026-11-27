@@ -1,0 +1,174 @@
+"""The scan.py callers of worker tabs: detach, cleanup, track and the re-home of
+an item whose tab was moved, with the herdr and herdr-app calls faked."""
+import contextlib
+import io
+import json
+import unittest
+from unittest import mock
+
+from tests import fake
+import scan
+from tests.test_rerequest import KEY, new_state, pr_detail
+from tests.test_returns import FakeHost
+from tests.test_tick import events, run_tick
+
+TAB = "tb1"        # a worker's tab that was closed
+MOVED = "tb2"      # the same agent, now in another tab of the Octopilot space
+SPACE = "sp1"
+
+
+def tab_row(tab, space=SPACE):
+    return {"id": tab, "title": "fix", "path": "/wt/app-5", "backend": "hc",
+            "space": space, "worktree": {"branch": "feat/x", "main_repo_path": "/p"}}
+
+
+def agent_in(sess, name="ap-app-5"):
+    return {"session": sess, "agent": name, "pane": "t1", "backend": "hc",
+            "state": "idle"}
+
+
+def tab_item(session=TAB, **extra):
+    state = new_state()
+    state["items"][KEY]["session"] = session
+    state["items"][KEY]["agent"] = "ap-app-5"
+    state["items"][KEY].update(extra)
+    return state
+
+
+class DetachTabTest(unittest.TestCase):
+    def test_detach_says_tab_closed_for_a_tab(self):
+        state = tab_item()
+        host = FakeHost(close=(0, ""))
+        with fake.fake_world(backend_for=host):
+            r = scan.detach_item(state, KEY)
+        self.assertEqual(r["msg"], f"detached {KEY} session={TAB} branch=feat/x "
+                                   "-> tab closed, worktree kept, untracked")
+        self.assertEqual(host.closed, [TAB])
+
+    def test_detach_names_the_tab_host_when_its_close_fails(self):
+        state = tab_item()
+        with fake.fake_world(backend_for=FakeHost(close=(1, "busy"))):
+            r = scan.detach_item(state, KEY)
+        self.assertEqual(r, {"ok": False, "error": "herdr-app tab close failed: busy",
+                             "msg": None})
+
+
+class CleanupTabTest(unittest.TestCase):
+    def test_the_discard_is_logged_under_the_tab_label(self):
+        state = tab_item()
+        with fake.fake_world(backend_for=FakeHost(discard=(0, ""))):
+            r = scan.cleanup_item(state, KEY)
+        self.assertEqual(r["msg"], f"herdr-app tab remove {TAB}: ok\ncleaned up octo/app#5")
+
+
+class TrackTabTest(unittest.TestCase):
+    def track(self, sessions, open_ids):
+        state = new_state()
+        err = io.StringIO()
+        out = io.StringIO()
+        with fake.fake_world(all_sessions=(sessions, {"hc"}, open_ids),
+                             backend_for=scan.HC), \
+                contextlib.redirect_stderr(err), contextlib.redirect_stdout(out):
+            code = scan.dispatch("track", ["track", KEY, "comment", "feat/x", MOVED],
+                                 state)
+        return code, state, err.getvalue(), out.getvalue()
+
+    def test_a_tab_id_is_an_open_session(self):
+        code, state, _, out = self.track([tab_row(MOVED)], {SPACE, MOVED})
+        self.assertEqual(code, 0)
+        self.assertEqual(out, f"tracked {KEY} mode=comment branch=feat/x session={MOVED}\n")
+        self.assertEqual(state["items"][KEY]["session"], MOVED)
+        self.assertEqual(state["items"][KEY]["space"], SPACE)
+
+    def test_a_closed_tab_is_refused_with_its_host_name(self):
+        code, state, err, _ = self.track([], {SPACE})
+        self.assertEqual(code, 1)
+        self.assertEqual(err, f"{MOVED} is not an open herdr-app tab\n")
+        self.assertEqual(state["items"][KEY]["session"], "w1")
+
+
+class RehomeTest(unittest.TestCase):
+    def test_a_missing_tab_with_no_agent_left_is_gone(self):
+        state = tab_item()
+        with fake.fake_world(all_sessions=([], {"hc"}, {SPACE}), backend_for=scan.HC,
+                             pr_detail=pr_detail):
+            rows = scan.scan(state)[0]
+        self.assertEqual([r[0] for r in rows], ["GONE"])
+        self.assertNotIn(KEY, state["items"])
+
+    def test_the_item_follows_its_agent_to_another_tab(self):
+        state = tab_item()
+        info = {}
+        live = {MOVED: agent_in(MOVED), SPACE: agent_in(SPACE)}
+        with fake.fake_world(all_sessions=([tab_row(MOVED)], {"hc"}, {SPACE, MOVED}),
+                             all_live=live, pr_detail=pr_detail, backend_for=scan.HC):
+            rows = scan.scan(state, info=info)[0]
+        self.assertNotIn("GONE", [r[0] for r in rows])
+        it = state["items"][KEY]
+        self.assertEqual((it["session"], it["space"]), (MOVED, SPACE))
+        self.assertEqual(info["rehomed"], [(KEY, MOVED)])
+
+    def test_a_tab_is_preferred_to_the_space_its_agent_also_lives_in(self):
+        state = tab_item()
+        info = {}
+        live = {SPACE: agent_in(SPACE), MOVED: agent_in(MOVED)}
+        rows = [tab_row(MOVED), tab_row(SPACE, space=None)]
+        with fake.fake_world(all_sessions=(rows, {"hc"}, {SPACE, MOVED}),
+                             all_live=live, pr_detail=pr_detail, backend_for=scan.HC):
+            scan.scan(state, info=info)
+        self.assertEqual(info["rehomed"], [(KEY, MOVED)])
+
+    def test_a_session_another_item_holds_is_not_taken(self):
+        state = tab_item()
+        state["items"]["octo/app#6"] = {"mode": "comment", "pr": 6, "branch": "feat/y",
+                                        "session": MOVED, "agent": "ap-app-6",
+                                        "phase": "working"}
+        live = {MOVED: agent_in(MOVED)}
+        info = {}
+        with fake.fake_world(all_sessions=([tab_row(MOVED)], {"hc"}, {SPACE, MOVED}),
+                             all_live=live, pr_detail=pr_detail, backend_for=scan.HC):
+            rows = scan.scan(state, info=info)[0]
+        self.assertEqual([r[0] for r in rows if r[1] == KEY], ["GONE"])
+        self.assertNotIn(KEY, state["items"])
+        self.assertEqual(state["items"]["octo/app#6"]["session"], MOVED)
+        self.assertEqual(info["rehomed"], [])
+
+    def test_two_items_with_the_same_agent_take_one_home(self):
+        state = tab_item()
+        state["items"]["octo/app#6"] = {"mode": "comment", "pr": 6, "branch": "feat/y",
+                                        "session": "tb3", "agent": "ap-app-5",
+                                        "phase": "working"}
+        live = {MOVED: agent_in(MOVED)}
+        info = {}
+        with fake.fake_world(all_sessions=([tab_row(MOVED)], {"hc"}, {SPACE, MOVED}),
+                             all_live=live, pr_detail=pr_detail, backend_for=scan.HC):
+            rows = scan.scan(state, info=info)[0]
+        self.assertEqual(info["rehomed"], [(KEY, MOVED)])
+        self.assertEqual([r[0] for r in rows if r[0] == "GONE"], ["GONE"])
+        self.assertNotIn("octo/app#6", state["items"])
+
+    def test_another_agent_does_not_rehome_the_item(self):
+        state = tab_item()
+        live = {MOVED: agent_in(MOVED, name="ap-app-9")}
+        with fake.fake_world(all_sessions=([tab_row(MOVED)], {"hc"}, {SPACE, MOVED}),
+                             all_live=live, pr_detail=pr_detail, backend_for=scan.HC):
+            rows = scan.scan(state)[0]
+        self.assertEqual([r[0] for r in rows], ["GONE"])
+
+    def test_the_tick_logs_the_rehome_and_no_gone_row(self):
+        state = tab_item()
+        live = {MOVED: agent_in(MOVED)}
+        with fake.fake_world(all_sessions=([tab_row(MOVED)], {"hc"}, {SPACE, MOVED}),
+                             all_live=live, pr_detail=pr_detail, backend_for=scan.HC):
+            scan.save(state)
+            code, out = run_tick("--quiet")
+            self.assertIn({"at": mock.ANY, "kind": "rehome", "key": KEY,
+                           "session": MOVED}, events())
+            self.assertNotIn("gone", [e["kind"] for e in events()])
+            with open(scan.STATE_FILE) as fh:
+                self.assertEqual(json.load(fh)["items"][KEY]["session"], MOVED)
+        self.assertEqual((code, out), (0, ""))
+
+
+if __name__ == "__main__":
+    unittest.main()

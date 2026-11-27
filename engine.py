@@ -523,14 +523,17 @@ def _cleanup(ctx, key):
     import scan
     with scan.locked():
         state = scan.load()
-        r = scan.cleanup_item(state, scan.resolve_key(state, key))
+        item_key = scan.resolve_key(state, key)
+        sess = state.get("items", {}).get(item_key, {}).get("session")
+        r = scan.cleanup_item(state, item_key)
     if not r["ok"]:
         return _fail(ctx, key, "cleanup", r["error"])
     slug = scan.split_key(key)[0]
     sent = _fan_out(ctx, slug, r["base"], r["siblings"])
     if r["discard_error"]:
+        noun = scan.host_noun(scan.backend_for(sess), sess)
         _record(ctx, key, "engine_error", "engine-error",
-                f"cleanup: removing the workspace failed: {r['discard_error']}",
+                f"cleanup: removing the {noun} failed: {r['discard_error']}",
                 action="cleanup")
     return "; ".join([f"{key}: cleaned up"] + sent)
 
