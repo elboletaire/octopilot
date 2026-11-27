@@ -22,7 +22,8 @@ the value it was given), so restart the engine after changing it:
 
 - `tab` (the default): a tab of the Octopilot space or workspace. `scan.sh host-space`
   prints the one it uses: the GUI's space where the headless, the code agent or the
-  prompter runs, or the TUI's workspace labelled `Octopilot`, else the prompter's.
+  prompter runs, or the TUI's workspace labelled `Octopilot`, else the prompter's. It prints
+  nothing with `space`, so a session brought back then opens as a space of its own.
 - `space`: a space or workspace of its own, as before. Sessions already open keep theirs.
 
 Without an Octopilot space or workspace (the launcher has not run), the worker opens as
@@ -48,8 +49,8 @@ agent there (re-homed), and the row stays. An agent herdr-app parked (`terminal.
 no open tab holds it, its claude still runs) keeps its item tracked: `WORKING` with its
 terminal's address and the `terminal.keep` command to show it, and no prompt is sent until then
 (feedback waits). A parked card you parked with `d` stays in Done; a parked PR that closed is
-`CLOSED`. Cleanup ends the parked terminal (`hc kill`) before it removes the worktree, and keeps
-the item tracked when the kill fails. Only an agent that is gone shows `GONE`.
+`CLOSED`. Cleanup and detach (`z`) end the parked terminal (`hc kill`) first, and cleanup keeps the item
+tracked when the kill fails. Only an agent that is gone shows `GONE`.
 
 **Upgrading.** Sessions already in their own spaces or workspaces keep working; there is
 nothing to migrate. Both id shapes are read: tabs as `tb…` (GUI) or `w…:t…` (TUI), spaces

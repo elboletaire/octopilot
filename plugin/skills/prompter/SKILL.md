@@ -196,7 +196,7 @@ of the `detach` event in events.jsonl. The mode is `fix` for the user's own work
     prints the tab id (`w…:t…`) and its root pane. Then `herdr agent start <agent
     name> --kind claude --pane <root pane> -- --model "$MODEL"`, with `--resume`
     added at the end to keep the old conversation.
-  - Without an Octopilot space or workspace (`$A host-space` printed nothing),
+  - Without an Octopilot space or workspace, or with WORKER_HOST=space (`$A host-space` printed nothing),
     the old steps: TUI `herdr worktree open --cwd <repo> --path <worktree>` and
     pass the workspace id (`w…`); GUI `herdr-app do space.new --folder <worktree>`
     with the same claude argv, then the label as above, and pass the space id

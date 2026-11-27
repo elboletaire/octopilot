@@ -176,11 +176,17 @@ class HostSpaceCommandTest(HostSpaceTest):
         self.assertEqual(self.run_host_space("hc"), (0, ""))
         self.assertEqual(self.run_host_space("herdr"), (0, ""))
 
-    def test_prints_the_space_whatever_worker_host_is(self):
+    def test_prints_the_space_with_worker_host_tab(self):
+        self.space("sp1")
+        self.terminal("t1", HEADLESS, **{"herdr.space": "sp1"})
+        with mock.patch.dict(os.environ, {"WORKER_HOST": "tab"}):
+            self.assertEqual(self.run_host_space("hc"), (0, "sp1\n"))
+
+    def test_prints_nothing_with_worker_host_space(self):
         self.space("sp1")
         self.terminal("t1", HEADLESS, **{"herdr.space": "sp1"})
         with mock.patch.dict(os.environ, {"WORKER_HOST": "space"}):
-            self.assertEqual(self.run_host_space("hc"), (0, "sp1\n"))
+            self.assertEqual(self.run_host_space("hc"), (0, ""))
 
     def test_host_space_is_read_only(self):
         self.assertIn("host-space", scan.READ_ONLY)

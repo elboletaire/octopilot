@@ -257,6 +257,30 @@ class ParkedAgentTest(unittest.TestCase):
 class ParkedTargetAndCleanupTest(unittest.TestCase):
     PARKED = {"session": None, "ids": [], "agent": "ap-app-5", "pane": "t9"}
 
+    def test_a_parked_detach_ends_the_terminal_instead_of_closing_the_dead_tab(self):
+        state = tab_item()
+        with mock.patch.object(scan, "hc", return_value=(0, {}, "")) as hc_call, \
+                mock.patch.object(scan.HC, "close", return_value=(1, "gone")) as close, \
+                fake.fake_world(all_sessions=([], {"hc"}, {SPACE}), backend_for=scan.HC,
+                                parked_agent=self.PARKED):
+            r = scan.detach_item(state, KEY)
+        hc_call.assert_called_once_with(["kill", "t9"])
+        close.assert_not_called()
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["msg"], f"detached {KEY} session={TAB} branch=feat/x "
+                                   "-> parked terminal t9 ended, worktree kept, untracked")
+        self.assertNotIn(KEY, state["items"])
+
+    def test_a_parked_detach_keeps_the_item_when_the_kill_fails(self):
+        state = tab_item()
+        with mock.patch.object(scan, "hc", return_value=(1, None, "busy")), \
+                fake.fake_world(all_sessions=([], {"hc"}, {SPACE}), backend_for=scan.HC,
+                                parked_agent=self.PARKED):
+            r = scan.detach_item(state, KEY)
+        self.assertEqual(r, {"ok": False, "msg": None,
+                             "error": "parked terminal t9 kill failed: busy"})
+        self.assertIn(KEY, state["items"])
+
     def test_a_parked_terminal_is_the_items_target(self):
         it = tab_item()["items"][KEY]
         with mock.patch.object(scan.HC, "agents", return_value=[self.PARKED]):

@@ -1083,6 +1083,18 @@ def parked_agent(it, session, open_ws, agents):
                  and not (set(a.get("ids") or []) & open_ws)), None)
 
 
+def kill_parked(it, sess):
+    """hc kill of the item's parked terminal, its claude runs in no tab. None when
+    there is none, else (pane, code, raw)."""
+    if backend_for(sess) is not HC:
+        return None
+    parked = parked_agent(it, sess, all_sessions()[2], HC.agents)
+    if not parked:
+        return None
+    code, _, raw = hc(["kill", parked["pane"]])
+    return parked["pane"], code, raw
+
+
 def session_age(s, live):
     """Seconds since the session did anything: the last commit on the
     worktree's branch stands in."""
@@ -2490,18 +2502,17 @@ def cleanup_item(state, key_):
     lines, discard_error = [], None
     sess = it.get("session")
     backend = backend_for(sess)
-    if backend is HC:
-        # A parked terminal keeps its claude running in no tab: end it before
-        # its worktree goes, or keep the item tracked when that fails.
-        parked = parked_agent(it, sess, all_sessions()[2], HC.agents)
-        if parked:
-            code, _, raw = hc(["kill", parked["pane"]])
-            if code != 0:
-                return {"ok": False, "msg": None, "siblings": [], "base": None,
-                        "discard_error": None,
-                        "error": f"could not end parked terminal {parked['pane']}: "
-                                 f"{raw}; {key_} stays tracked"}
-            lines.append(f"hc kill {parked['pane']}: ok")
+    # A parked terminal keeps its claude running in no tab: end it before its
+    # worktree goes, or keep the item tracked when that fails.
+    killed = kill_parked(it, sess)
+    if killed:
+        pane, code, raw = killed
+        if code != 0:
+            return {"ok": False, "msg": None, "siblings": [], "base": None,
+                    "discard_error": None,
+                    "error": f"could not end parked terminal {pane}: {raw}; "
+                             f"{key_} stays tracked"}
+        lines.append(f"hc kill {pane}: ok")
     if backend:
         code, raw = backend.discard(sess, it.get("worktree"))
         lines.append(f"{remove_label_for(backend, sess)} {sess}: "
@@ -2704,12 +2715,20 @@ def detach_item(state, k):
         return {"ok": False, "error": f"unknown item {k}", "msg": None}
     sess = it.get("session")
     backend = backend_for(sess)
-    if backend:
+    killed = kill_parked(it, sess)
+    if killed:
+        pane, code, raw = killed
+        if code != 0:
+            return {"ok": False, "msg": None,
+                    "error": f"parked terminal {pane} kill failed: {raw}"}
+        closed = f"parked terminal {pane} ended"
+    elif backend:
         code, raw = backend.close(sess)
         if code != 0:
             return {"ok": False,
                     "error": f"{host_noun(backend, sess)} close failed: {raw}",
                     "msg": None}
+        closed = f"{short_noun(sess)} closed"
     state["items"].pop(k)
     save(state)
     log_event("detach", k, branch=it.get("branch"))
@@ -2717,7 +2736,7 @@ def detach_item(state, k):
         else ", worktree kept"
     return {"ok": True, "error": None,
             "msg": (f"detached {k} session={sid(sess)} branch={it.get('branch')} "
-                    f"-> {short_noun(sess)} closed{worktree}, untracked")}
+                    f"-> {closed}{worktree}, untracked")}
 
 
 def set_paused(state, paused):
@@ -3622,7 +3641,10 @@ def dispatch(cmd, args, state):
         return 0
     if cmd == "host-space":
         # host-space: the Octopilot space (GUI) or workspace (TUI) that worker tabs open in.
-        host = octopilot_space() if spawn_backend() is HC else octopilot_workspace()
+        # With WORKER_HOST=space nothing: workers open as spaces, the old layout.
+        host = None
+        if worker_host() == "tab":
+            host = octopilot_space() if spawn_backend() is HC else octopilot_workspace()
         if host:
             print(host)
         return 0
