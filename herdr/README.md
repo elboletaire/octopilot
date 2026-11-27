@@ -24,7 +24,9 @@ the value it was given), so restart the engine after changing it:
   prints the one it uses: the GUI's space where the headless, the code agent or the
   prompter runs, or the TUI's workspace labelled `Octopilot`, else the prompter's. It prints
   nothing with `space`, so a session brought back then opens as a space of its own.
-- `space`: a space or workspace of its own, as before. Sessions already open keep theirs.
+- `space`: a space or workspace of its own, as before. Sessions already open keep theirs. It needs
+  a window: a worker opened in a space of its own with no window is not seen as open until a window
+  adopts that space, so run the launcher with herdr-app's window open.
 
 Without an Octopilot space or workspace (the launcher has not run), the worker opens as
 a space or workspace of its own, and the spawn prints `NOTE:` saying so. A remote
@@ -77,7 +79,9 @@ worker: a tab of the Octopilot space (a space of its own with `WORKER_HOST=space
 worktree, resuming its claude conversation (`--resume` when its transcript exists, else
 `--continue` in the worktree). An item whose agent is live or parked elsewhere is skipped, as is a
 TUI item (restore it by hand, see the prompter skill's "Reversing a detach" section) and one whose
-worktree is missing. A tab whose terminals are all bare shells keeps its name, place and session:
+worktree is missing (an item tracked by hand with `track` has none on record: the tick takes its
+session's checkout, and so does the restore). A tab whose terminals are all bare shells keeps its
+name, place and session:
 its claude is started in that same tab, and the shells end only once it has started (a failed start
 leaves the shells and the item as they were). The launcher runs it under the engine's locks, so a
 shell of any age is bare; run by hand, one up for 30 s or more is. A space of its own
@@ -86,6 +90,8 @@ running anything else is left alone. A session another claude has open is not
 resumed: that worker starts fresh, apart from it, and its line says so. Only `session`, `space`, `backend` and `claude_session` change on an
 item. It is refused when herdr-core does not answer or no Octopilot space is open. It takes the
 state lock per item and never `tick.lock` or `exec.lock`: the launcher holds those while it runs it.
+Afterwards, with herdr-app up, each worker tab still under Herdr's number (a tab opened with no
+window gets one) is renamed to its item's label; a refusal is noted and the run still succeeds.
 Open Octopilot runs it on every successful run, once the space and its tabs are in place; then it
 releases the locks and requests a tick. A refusal is warned about and the run still succeeds.
 

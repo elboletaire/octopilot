@@ -1,6 +1,7 @@
 """restore-sessions: reopening the herdr-app workers after a reboot. Nothing reaches
 herdr, hc or herdr-app: their calls and the transcripts are faked."""
 import contextlib
+import copy
 import io
 import json
 import os
@@ -409,10 +410,58 @@ class RestoreTest(unittest.TestCase):
         self.assertIn("started fresh, c-old is open in another claude", out)
         self.assertNotIn("claude_session", after["o/repo#1"])
 
+    def test_an_item_without_a_worktree_restores_in_its_sessions_checkout(self):
+        self.spaces = [{"id": OPEN_SPACE, "tabs": [tab(OLD_TAB)]}]
+        before = self.item("o/repo#1", OLD_TAB)
+        del before["worktree"]
+        sessions = [{"id": OLD_TAB, "path": self.wt, "worktree": {"main_repo_path": self.repo}}]
+        _, out, after, _ = self.run_restore(
+            {"o/repo#1": before},
+            all_sessions=(sessions, {"hc"}, {OLD_TAB, OPEN_SPACE}))
+        # The empty open tab gets its claude in place, in the session's checkout.
+        self.assertEqual(self.order, [("start", OLD_TAB)])
+        self.assertEqual(self.hc_start.call_args[0][1], self.wt)
+        self.assertIn(f"restored in {OLD_TAB}", out)
+
     def test_a_restore_logs_an_event(self):
         _, _, _, events = self.run_restore(
             {"o/repo#1": self.item("o/repo#1", OLD_TAB)})
         self.assertIn('"kind": "restore"', events)
+
+
+class SessionCheckoutTest(unittest.TestCase):
+    def test_a_worktree_of_the_repo_is_the_checkout_others_are_not(self):
+        rows = [{"id": "s1", "path": "/wt/a", "worktree": {"main_repo_path": "/repo"}},
+                {"id": "s2", "path": "/wt/b", "worktree": {"main_repo_path": "/other"}},
+                {"id": "s3", "path": None, "worktree": {"main_repo_path": "/repo"}}]
+        self.assertEqual(scan.session_checkout(rows, "s1", "/repo"), "/wt/a")
+        self.assertIsNone(scan.session_checkout(rows, "s2", "/repo"))
+        self.assertIsNone(scan.session_checkout(rows, "s3", "/repo"))
+        self.assertIsNone(scan.session_checkout(rows, "s1", None))
+        self.assertIsNone(scan.session_checkout(rows, "gone", "/repo"))
+
+
+class FillWorktreeTest(unittest.TestCase):
+    def test_a_tracked_item_takes_its_sessions_checkout_on_the_tick(self):
+        state = copy.deepcopy(scan.EMPTY)
+        state["me"] = "octo-user"
+        state["items"] = {"o/repo#1": {"mode": "fix", "branch": "feat/x", "session": OLD_TAB,
+                                       "backend": "hc", "phase": "working", "added": 1}}
+        sessions = [{"id": OLD_TAB, "path": "/wt/x", "worktree": {"main_repo_path": "/repo"}}]
+        with fake_world(all_sessions=(sessions, {"hc"}, {OLD_TAB}),
+                        build_registry={"o/repo": {"path": "/repo"}}):
+            scan.scan(state)
+        self.assertEqual(state["items"]["o/repo#1"]["worktree"], "/wt/x")
+
+
+class NumberedTabTest(unittest.TestCase):
+    def test_only_a_tab_under_its_number_is_renamed_to_the_item_label(self):
+        items = {"o/repo#1": {"session": OLD_TAB, "agent": "ap-repo-1", "title": "The title"},
+                 "o/repo#2": {"session": OTHER_TAB, "agent": "ap-repo-2", "title": "Other"}}
+        rows = [{"id": OLD_TAB, "title": "1"}, {"id": OTHER_TAB, "title": "Named by hand"}]
+        with mock.patch.object(scan, "app_do", return_value=(0, "", "")) as app_do:
+            scan.name_numbered_tabs({"items": items}, rows)
+        app_do.assert_called_once_with("tab.rename", ["--id", OLD_TAB, "--name", "The title"])
 
 
 class RestoreModelTest(unittest.TestCase):

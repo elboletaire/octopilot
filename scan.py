@@ -1714,6 +1714,20 @@ def boot_template(it, d, me):
     return "review-fix", None
 
 
+def session_checkout(sessions, session, repo):
+    """The checkout of an open session when it is a worktree of repo (the registry's
+    path), else None. An item tracked by hand has no checkout on record: its session's is."""
+    if not repo:
+        return None
+    for s in sessions:
+        if s.get("id") != session:
+            continue
+        main = (s.get("worktree") or {}).get("main_repo_path")
+        if s.get("path") and main and os.path.realpath(main) == os.path.realpath(repo):
+            return s["path"]
+    return None
+
+
 def rehome_of(it, sessions, live, open_ws, held):
     """-> (session, space) of the open tab or space the item's agent is live in,
     or None. A session in held is another item's: it is never taken."""
@@ -1820,6 +1834,13 @@ def scan(state, refresh=False, info=None):
 
     path_to_slug = {v["path"].rstrip("/"): k for k, v in reg.items()}
     session_paths = {s["id"]: s.get("path") for s in sessions}
+    for k, it in state.get("items", {}).items():
+        if it.get("worktree"):
+            continue
+        slug = k.split("#")[0].split("!")[0].split("?")[0]
+        path = session_checkout(sessions, it.get("session"), reg.get(slug, {}).get("path"))
+        if path:
+            it["worktree"] = path
 
     # branch -> session, per repo path
     by_branch = {}
@@ -3827,11 +3848,11 @@ def restore_item(state, k, it, ctx):
                 "skill's \"Reversing a detach\" section"), None
     if backend_for(sess) is not HC:
         return f"{k}: not on herdr-app, left alone", None
-    wt = it.get("worktree")
-    if not wt or not os.path.isdir(wt):
-        return f"{k}: worktree {wt or '(none)'} is missing, skipped", None
     slug = split_key(k)[0]
     repo = state.get("registry", {}).get(slug, {}).get("path")
+    wt = it.get("worktree") or session_checkout(ctx["sessions"], sess, repo)
+    if not wt or not os.path.isdir(wt):
+        return f"{k}: worktree {wt or '(none)'} is missing, skipped", None
     if not repo:
         return f"{k}: {slug} is not in the registry, skipped", None
     # An agent live or parked elsewhere is never closed or resumed a second time.
@@ -3919,6 +3940,23 @@ def restore_item(state, k, it, ctx):
     return line, fields
 
 
+def name_numbered_tabs(state, sessions):
+    """Renames each worker tab still under Herdr's number (a tab opened with no window
+    gets one) to its item's tab label. Best effort: a refusal is noted, not fatal."""
+    for k, it in state.get("items", {}).items():
+        sess = it.get("session")
+        row = next((s for s in sessions if s.get("id") == sess), None)
+        if not row or not is_tab(sess) or backend_for(sess) is not HC:
+            continue
+        if not re.fullmatch(r"[0-9]+", row.get("title") or ""):
+            continue
+        name = it.get("agent") or agent_name(k)
+        code, _, raw = app_do("tab.rename", ["--id", sess, "--name",
+                                             tab_label(it.get("title") or name, name)])
+        if code != 0:
+            print(f"note: tab {sess} not renamed: {raw}")
+
+
 def restore_sessions(args):
     """Reopen each tracked herdr-app worker and resume its claude; README has the flow.
     The launcher holds tick.lock and exec.lock, never taken here. The spawn runs outside
@@ -3956,6 +3994,9 @@ def restore_sessions(args):
                 else:
                     line += f"; {k} is no longer tracked, its session {fields['session']} is left open"
         print(line)
+    # Read again: the restored tabs are new ids, and a restored item's old tab is closed.
+    now_sessions, _, _ = all_sessions()
+    name_numbered_tabs(load(), now_sessions)
     return 0
 
 
