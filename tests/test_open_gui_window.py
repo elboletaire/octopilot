@@ -60,7 +60,8 @@ esac
 }
 
 # The checkout's scan.sh: core-layout prints $SHIM/core-layout.json (no spaces when there is
-# none), or null as scan.py does when the core does not answer ($SHIM/core_down). restore-sessions
+# none), or null as scan.py does when the core does not answer ($SHIM/core_down, or once more
+# calls than $SHIM/core_down_after: the first N calls answer). restore-sessions
 # and request are logged with whether the engine's locks are free (flock -n) at that moment;
 # restore-sessions exits with $SHIM/restore_rc when there is one. Every other subcommand runs
 # the real scan.sh (REAL below).
@@ -71,7 +72,12 @@ locks() {
 }
 case "$1" in
   core-layout)
+    n=$(( $(cat "$SHIM/core-calls" 2>/dev/null || echo 0) + 1 ))
+    echo "$n" > "$SHIM/core-calls"
     if [ -f "$SHIM/core_down" ]; then echo null; exit 0; fi
+    if [ -f "$SHIM/core_down_after" ] && [ "$n" -gt "$(cat "$SHIM/core_down_after")" ]; then
+      echo null; exit 0
+    fi
     if [ -f "$SHIM/core-layout.json" ]; then cat "$SHIM/core-layout.json"; else echo '[]'; fi
     exit 0 ;;
   restore-sessions)
@@ -223,6 +229,8 @@ class OpenGuiWindowTest(unittest.TestCase):
         res = self.launch()
         self.assertEqual(res.returncode, 1)
         self.assertIn(self.no_space_message(res), res.stdout + res.stderr)
+        self.assertIn("herdr-app did not answer on", res.stdout + res.stderr)
+        self.assertIn("(status 124)", res.stdout + res.stderr)
         self.assertFalse([t for t in self.trace() if t.startswith("herdr-app do")], self.trace())
 
     def test_lock_wait_says_so_before_it_blocks(self):
@@ -296,6 +304,44 @@ class OpenGuiWindowTest(unittest.TestCase):
         trace = self.trace()
         for prefix in ("hc run", "hc kill", "hc rm", "hc label", "herdr-app do", "herdr-app ls"):
             self.assertFalse([t for t in trace if t.startswith(prefix)], trace)
+
+    def test_a_failed_read_after_the_gate_makes_no_space_or_tab(self):
+        # The gate reads the layout; the read that decides a new space fails: no space.new, no tab.new.
+        self.write("window", "")
+        self.write("core_down_after", "1")
+        res = self.launch()
+        out = res.stdout + res.stderr
+        self.assertEqual(res.returncode, 1, out)
+        self.assertIn("does not answer (scan.sh core-layout)", out)
+        self.assertNotIn("nothing is changed", out)
+        trace = self.trace()
+        for prefix in ("herdr-app do space.new", "herdr-app do tab.new", "hc run", "hc kill", "hc rm",
+                       "hc label"):
+            self.assertFalse([t for t in trace if t.startswith(prefix)], trace)
+        for name in ("tick.lock", "exec.lock"):
+            held = subprocess.run(["flock", "-n", os.path.join(self.state, name), "true"])
+            self.assertEqual(held.returncode, 0, name)
+
+    def test_a_failed_read_in_a_subshell_ends_the_run_before_any_tab_is_made(self):
+        # The space and its host are shown; the layout reads fail at each point of the run in turn
+        # (some inside $(...) subshells). Wherever it fails, no tab is made and the run exits 1.
+        self.shown_host()
+        failed = 0
+        for n in range(1, 7):
+            self.write("core_down_after", str(n))
+            self.write("core-calls", "0")
+            if os.path.exists(os.path.join(self.shim, "trace")):
+                os.remove(os.path.join(self.shim, "trace"))
+            res = self.launch()
+            out = res.stdout + res.stderr
+            if "does not answer (scan.sh core-layout)" not in out:
+                continue
+            failed += 1
+            self.assertEqual(res.returncode, 1, (n, out))
+            trace = self.trace()
+            self.assertFalse([t for t in trace if t.startswith(("herdr-app do tab.new",
+                                                              "herdr-app do space.new"))], (n, trace))
+        self.assertGreater(failed, 0)
 
     def test_a_closed_space_without_a_window_is_not_stopped(self):
         # The headless's space is gone, the dashboard pane's space is open: without a window

@@ -198,12 +198,13 @@ The log's tee ignores HUP, so a pane closed mid-run still writes the whole log.
 
 A run reads the layout from herdr-core (`scan.sh core-layout`), which needs no herdr-app
 window, and finds the Octopilot space there: by a labelled terminal of this checkout, else by its
-`octopilot-dashboard` mod pane. A run never starts a window. With a space found it goes on, and it
-notes whether herdr-app has a window (`herdr-app status`, the machine it runs on). With neither
-a space nor a window it stops before it touches anything, and says so (open herdr-app on that
-computer's screen, then run Open Octopilot there). A layout that the core does not answer stops
-the run the same way, before anything is ended. A run also holds the engine's `tick.lock` and `exec.lock` while it sets
-the space up and restores the workers, and releases them before it requests a tick: a tick started
+`octopilot-dashboard` mod pane. A run never starts a window. With no space and no window
+(`herdr-app status` on the machine it runs on) it stops before it touches anything, and says so
+(open herdr-app on that computer's screen, then run Open Octopilot there). A layout that the core
+does not answer stops the run the same way, and a read that fails later ends the run at once, with
+nothing created after it. The terminal starts still use herdr-app, so a run with a space but no
+window does not finish yet (the next step moves them to herdr-core). A run also holds the engine's
+`tick.lock` and `exec.lock` while it sets the space up and restores the workers, and releases them before it requests a tick: a tick started
 meanwhile prints `tick already running` (its `tick.lock`) or `engine busy: ...` (its `exec.lock`),
 and a drain prints `engine busy: the drain retries later`. None of them acts while the locks are held.
 
