@@ -198,13 +198,14 @@ class RehomeTest(unittest.TestCase):
         self.assertEqual([r[0] for r in rows], ["CLOSED"])
         self.assertIn(KEY, state["items"])
 
-    def test_a_parked_item_you_parked_is_done_and_holds_no_slot(self):
-        state = tab_item(parked={"at": 1, "requested": False, "head": ""})
+    def test_a_held_item_you_held_is_on_hold_and_holds_no_slot(self):
+        state = tab_item(hold={"by": "you", "reason": "", "since": 1,
+                               "requested": False, "head": ""})
         parked = {"session": None, "ids": [], "agent": "ap-app-5", "pane": "t9"}
         with fake.fake_world(all_sessions=([], {"hc"}, {SPACE}), backend_for=scan.HC,
                              parked_agent=parked, pr_detail=pr_detail):
             rows = scan.scan(state)[0]
-        self.assertEqual([r[0] for r in rows], ["DONE"])
+        self.assertEqual([r[0] for r in rows], ["HOLD"])
         self.assertIn(KEY, state["items"])
 
     def test_a_parked_agent_shown_in_a_tab_is_rehomed(self):

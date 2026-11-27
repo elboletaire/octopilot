@@ -126,6 +126,14 @@ def load():
     out.update(s)
     for k, v in EMPTY.items():
         out.setdefault(k, v)
+    # The user's pause used to be `parked` ({at, head, requested}); it is a hold now.
+    for it in out.get("items", {}).values():
+        if "parked" in it:
+            parked = it.pop("parked") or {}
+            it.setdefault("hold", {"by": "you", "reason": "",
+                                   "since": parked.get("at", 0),
+                                   "head": parked.get("head"),
+                                   "requested": parked.get("requested", False)})
     return out
 
 
@@ -1516,10 +1524,10 @@ def rehome_of(it, sessions, live, open_ws, held):
     return home, rows[home].get("space")
 
 
-def report_note(rep):
-    """A report's message as one short row note. Quotes would be read as a
-    row title, and a newline would split the row."""
-    return " ".join(rep.get("msg", "").replace('"', "").split())[:80]
+def one_line(text, limit=80):
+    """Text as one short row note. Quotes would be read as a row title, and a
+    newline would split the row."""
+    return " ".join((text or "").replace('"', "").split())[:limit]
 
 
 def live_report(it, live):
@@ -1530,6 +1538,63 @@ def live_report(it, live):
             live.get(it.get("session"), {}).get("state") == "running":
         return {}
     return rep
+
+
+def hold_of(it):
+    """The item's hold, {by, reason, since, ...}, or None. Only the user's hold
+    is stored so far."""
+    return (it or {}).get("hold") or None
+
+
+def hold_wake(it, d, me, detail_of):
+    """Why a card held by you wakes, or None. A newer needs report, an approval,
+    a draft turned ready, new feedback or a re-request of review wake it; CI
+    going red does not. d is None for an item without a PR; detail_of(pr) is
+    layer_detail for a stack."""
+    h = hold_of(it)
+    rep = it.get("last_report") or {}
+    if rep.get("state") in ("blocked", "failed", "stalled", "capped") \
+            and rep.get("at", 0) > h.get("since", 0):
+        return f"report: {rep['state']}"
+    if d is None:
+        return None
+    if it["mode"] == "fix":
+        if h.get("approved") is False and d.get("reviewDecision") == "APPROVED":
+            return "approved"
+        if h.get("draft") and not d.get("isDraft"):
+            return "draft→ready"
+        fb = stack_feedback(it, detail_of)[1] if it.get("stack") \
+            else new_feedback(d, it.get("feedback_seen"))
+        if fb:
+            return "new feedback"
+    if review_requested(d, me) and (not h.get("requested")
+                                    or d.get("headRefOid") != h.get("head")):
+        return "re-requested"
+    return None
+
+
+def wake_item(it, reason):
+    """Clear the hold; the card says 'back from hold' until it moves kind."""
+    it.pop("hold")
+    it["woke"] = {"reason": reason, "kind": None}
+
+
+def woke_note(it, kind, extra):
+    """The row's extra with 'back from hold: <reason>' while the card stays the
+    kind it woke into. The first row after a wake fixes that kind; a different
+    kind drops the mark."""
+    woke = (it or {}).get("woke")
+    if not woke:
+        return extra
+    if woke["kind"] is None:
+        woke["kind"] = kind
+    elif woke["kind"] != kind:
+        it.pop("woke")
+        return extra
+    note = f"back from hold: {one_line(woke['reason'], 60)}"
+    if " -> " in ROW_TITLE.sub("", extra):
+        return f"{extra}; {note}"
+    return f"{extra} -> {note}"
 
 
 def scan(state, refresh=False, info=None):
@@ -1691,13 +1756,17 @@ def scan(state, refresh=False, info=None):
                                           "session left alone"))
                 continue
 
+        def hold_row(rk):
+            # The user's hold: no slot, and no prompt goes out until it wakes.
+            note = one_line(hold_of(it).get("reason")) or "held as you asked"
+            rows.append(("HOLD", rk, f"mode={it['mode']} {smeta} hold=you -> {note}"))
+
         def parked_row(rk):
             # herdr-app parked the agent's terminal: nothing to send to until it is
-            # shown again, so no prompt goes out, and a parked card stays in Done.
+            # shown again, so no prompt goes out, and a held card holds no slot.
             nonlocal active
-            if it.get("parked"):
-                rows.append(("DONE", rk, f"mode={it['mode']} {smeta} parked by you "
-                                         "-> waiting on merge or new activity"))
+            if hold_of(it):
+                hold_row(rk)
                 return
             active += 1
             waits = parked_feedback(it, d, lambda pr: layer_detail(k, it, pr))[1]
@@ -1715,7 +1784,7 @@ def scan(state, refresh=False, info=None):
             parked_row(k)
             continue
 
-        if it.get("phase") == "booting" and not parked_term:
+        if it.get("phase") == "booting" and not parked_term and not hold_of(it):
             active += 1
             # A reboot whose wait timed out leaves a busy agent: a BOOTING row
             # would have the engine prompt it mid-task.
@@ -1773,7 +1842,7 @@ def scan(state, refresh=False, info=None):
                     rows.append(("CLOSED", nk, f"branch={it.get('branch')} {smeta} "
                                                "-> not merged; session left alone"))
                     continue
-                if parked_term:
+                if parked_term or hold_of(it):
                     parked_row(nk)
                     continue
                 active += 1
@@ -1792,17 +1861,35 @@ def scan(state, refresh=False, info=None):
             if parked_term:
                 parked_row(k)
                 continue
+            if hold_of(it):
+                reason = hold_wake(it, None, me, None)
+                if reason is None:
+                    hold_row(k)
+                    continue
+                wake_item(it, reason)
+                revived.append((k, reason))
             rep = live_report(it, live)
             if rep.get("state") in ("blocked", "failed", "stalled"):
                 active += 1
-                note = report_note(rep) or f"agent stopped ({rep['state']})"
+                note = one_line(rep.get("msg", "")) or f"agent stopped ({rep['state']})"
                 rows.append(("BLOCKED", k, f"mode={it['mode']} {smeta} "
                                            f"report={rep['state']} -> {note}"))
                 continue
             if rep.get("state") == "held":
-                note = report_note(rep) or "held as you asked"
+                note = one_line(rep.get("msg", "")) or "held as you asked"
                 rows.append(("HOLD", k, f"mode={it['mode']} {smeta} hold=you "
                                         f"-> {note}"))
+                continue
+            # A read-only investigation's ready report is read by the user, then
+            # it is done. It holds no slot either way.
+            if it.get("read_only") and rep.get("state") == "ready":
+                if it.get("report_acked") == rep.get("at"):
+                    rows.append(("DONE", k, f"mode={it['mode']} {smeta} "
+                                            "report read"))
+                    continue
+                note = one_line(rep.get("msg", "")) or "finished"
+                rows.append(("READY", k, f"mode={it['mode']} {smeta} "
+                                         f"report to read -> {note}"))
                 continue
             st = live.get(sess, {}).get("state", "?")
             age = live.get(sess, {}).get("age_secs")
@@ -1818,29 +1905,15 @@ def scan(state, refresh=False, info=None):
         if not d:
             rows.append(("UNKNOWN", k, f"{smeta} -> gh pr view failed"))
             continue
-        # A card parked with `d` holds no slot. It is still tracked, so its
-        # merge is still seen, and new activity brings it back.
-        if it.get("parked"):
-            revive = None
-            if it["mode"] == "fix":
-                if it.get("stack"):
-                    fb = stack_feedback(it, lambda pr: layer_detail(k, it, pr))[1]
-                else:
-                    fb = new_feedback(d, it.get("feedback_seen"))
-                if fb:
-                    revive = "new feedback"
-            elif review_requested(d, me) and (
-                    not it["parked"].get("requested")
-                    or head != it["parked"].get("head")):
-                revive = ("review requested" if not it["parked"].get("requested")
-                          else "new commits, review still requested")
-            if revive:
-                it.pop("parked")
-                revived.append((k, revive))
-            else:
-                rows.append(("DONE", k, f"mode={it['mode']} {smeta} parked by you "
-                                        "-> waiting on merge or new activity"))
+        # A card held by you holds no slot. It is still tracked, so its merge
+        # is still seen, and the first sign that it needs you wakes it.
+        if hold_of(it):
+            reason = hold_wake(it, d, me, lambda pr: layer_detail(k, it, pr))
+            if reason is None:
+                hold_row(k)
                 continue
+            wake_item(it, reason)
+            revived.append((k, reason))
         active += 1
         rv = it.get("reviewed_sha") or ""
 
@@ -1865,7 +1938,7 @@ def scan(state, refresh=False, info=None):
                     if layer else ""
                 rows.append(("FEEDBACK", k,
                              f"mode=fix {smeta}{where} since={when} "
-                             f"{who} {kind} \"{snippet}\""))
+                             f"{who} {kind} \"{one_line(snippet, 60)}\""))
                 continue
 
         rounds = int(it.get("review_rounds", 0))
@@ -1904,7 +1977,7 @@ def scan(state, refresh=False, info=None):
             # A blocked or failed agent says so instead of going quiet: it keeps
             # its slot. Held is the user's pause, so it gives the slot back.
             if rep.get("state") in ("blocked", "failed", "stalled"):
-                note = report_note(rep) or f"agent stopped ({rep['state']})"
+                note = one_line(rep.get("msg", "")) or f"agent stopped ({rep['state']})"
                 rows.append(("BLOCKED", k,
                              f"mode={it['mode']} {smeta} head={head[:7]} "
                              f"report={rep['state']} "
@@ -1912,7 +1985,7 @@ def scan(state, refresh=False, info=None):
                 continue
             if rep.get("state") == "held":
                 active -= 1
-                note = report_note(rep) or "held as you asked"
+                note = one_line(rep.get("msg", "")) or "held as you asked"
                 rows.append(("HOLD", k,
                              f"mode={it['mode']} {smeta} hold=you -> {note}"))
                 continue
@@ -2165,6 +2238,8 @@ def scan(state, refresh=False, info=None):
         1 for (mp, br), s2 in by_branch.items()
         if s2["id"] not in tracked_sessions and mp in path_to_slug)
 
+    rows = [(kind, k, woke_note(items.get(k), kind, extra))
+            for kind, k, extra in rows]
     state["items"] = items
     return rows, active, len(reg), untracked
 
@@ -2848,6 +2923,63 @@ def ack_push(state, k):
     return {"ok": False, "error": f"unknown item {k}", "push_acked": None}
 
 
+def hold_item(state, k, reason=""):
+    """hold <key> [reason]: the user holds a card, with or without a PR. It holds
+    no slot until hold_wake clears it. -> {"ok", "error", "msg"}."""
+    it = state["items"].get(k)
+    if it is None:
+        return {"ok": False, "error": f"unknown item {k}", "msg": None}
+    hold = {"by": "you", "reason": " ".join(reason.split()),
+            "since": int(time.time())}
+    if it.get("pr"):
+        d = pr_detail(k.split("#")[0], it["pr"])
+        if d is None:
+            return {"ok": False, "error": f"gh pr view failed for {k}", "msg": None}
+        # A later wake is measured against these: the head, the pending request,
+        # the approval and the draft state at the time of the hold.
+        hold.update(head=d.get("headRefOid") or None,
+                    requested=review_requested(d, whoami(state)),
+                    approved=d.get("reviewDecision") == "APPROVED",
+                    draft=bool(d.get("isDraft")))
+    it["hold"] = hold
+    it.pop("woke", None)
+    it.setdefault("feedback_seen", time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                                 time.gmtime()))
+    save(state)
+    log_event("hold", k, **({"reason": one_line(hold["reason"])}
+                            if hold["reason"] else {}))
+    return {"ok": True, "error": None,
+            "msg": f"held {k} session={sid(it.get('session'))} "
+                   f"-> {short_noun(it.get('session'))} kept, holds no slot"}
+
+
+def unhold_item(state, k):
+    """unhold <key>: the user lets a card go again. -> {"ok", "error", "msg"}."""
+    it = state["items"].get(k)
+    if it is None:
+        return {"ok": False, "error": f"unknown item {k}", "msg": None}
+    it.pop("hold", None)
+    save(state)
+    log_event("unhold", k)
+    return {"ok": True, "error": None, "msg": f"unheld {k} -> holds a slot again"}
+
+
+def ack_item(state, k):
+    """ack <key>: the user has read a read-only investigation's ready report, or
+    seen a PUSHED flag. -> {"ok", "error", "msg"}."""
+    it = state["items"].get(k) or {}
+    rep = it.get("last_report") or {}
+    if it.get("read_only") and rep.get("state") == "ready":
+        it["report_acked"] = rep.get("at")
+        save(state)
+        return {"ok": True, "error": None, "msg": f"{k} report read"}
+    r = ack_push(state, k)
+    if not r["ok"]:
+        return {"ok": False, "error": r["error"], "msg": None}
+    return {"ok": True, "error": None,
+            "msg": f"{k} push_acked={str(r['push_acked'])[:7]}"}
+
+
 def detach_item(state, k):
     """Close the item's workspace or space, keep its worktree and branch, and
     drop the item so it holds no slot (it is proposed again). -> {"ok", "error",
@@ -2929,7 +3061,7 @@ ROW_FIELD = re.compile(r"(\w+)=(\S+)")
 SNAPSHOT_ITEM_FIELDS = ("mode", "branch", "session", "pr", "driver", "phase",
                         "review_rounds", "last_seen", "last_note",
                         "last_report", "added", "question", "reviewed_sha",
-                        "read_only", "parked")
+                        "read_only", "hold")
 
 
 def parse_extra(extra):
@@ -2976,6 +3108,9 @@ def snapshot_doc(state, work, rows, active, nrepos, untracked, info):
         if it:
             r["item"] = {f: it[f] for f in SNAPSHOT_ITEM_FIELDS
                          if it.get(f) is not None}
+            if it.get("hold"):
+                # dashboard.py still reads the old name, with its time.
+                r["item"]["parked"] = {"at": it["hold"].get("since")}
         d = info["details"].get(k)
         m = info["meta"].get(k)
         if d:
@@ -3647,7 +3782,7 @@ def tick(args):
             rows, active, n, untracked = scan(state, refresh="--refresh" in args,
                                               info=info)
             for k, reason in info["revived"]:
-                log_event("unpark", k, reason=reason)
+                log_event("unhold", k, reason=reason)
             for k, session in info["rehomed"]:
                 log_event("rehome", k, session=session)
             for kind, k, _ in rows:
@@ -3908,51 +4043,31 @@ def dispatch(cmd, args, state):
         print(f"tracked {k} mode={mode} branch={branch} session={sid(session)}")
         return 0
     if cmd == "ack-push":
-        # ack-push <key>: the user has seen the PUSHED flag; stop flagging this
-        # head. A re-request or a further push brings the PR back.
-        r = ack_push(state, args[1])
+        # ack-push <key>: the user has read the report or seen the PUSHED flag.
+        # A PUSHED card's new commits are acknowledged until a re-request or
+        # a further push; a read-only investigation's report is read.
+        r = ack_item(state, args[1])
         if not r["ok"]:
             print(r["error"], file=sys.stderr)
             return 1
-        print(f"{args[1]} push_acked={str(r['push_acked'])[:7]}")
+        print(r["msg"])
         return 0
-    if cmd == "park":
-        # park <key>: the dashboard's `d` moves a card to Done. Unlike detach
-        # the workspace stays open and the item stays tracked; it just holds
-        # no slot until new activity revives it (see scan()).
-        k = args[1]
-        it = state["items"].get(k)
-        if it is None:
-            print(f"unknown item {k}", file=sys.stderr)
+    if cmd in ("hold", "park"):
+        # hold <key> [reason]: the dashboard's `d` holds a card. It stays
+        # tracked, holds no slot, and wakes on new activity (see hold_wake).
+        # park is the old name.
+        r = hold_item(state, args[1], " ".join(args[2:]))
+        if not r["ok"]:
+            print(r["error"], file=sys.stderr)
             return 1
-        if not it.get("pr"):
-            print(f"{k} has no PR yet, nothing to park", file=sys.stderr)
-            return 1
-        d = pr_detail(k.split("#")[0], it["pr"])
-        if d is None:
-            print(f"gh pr view failed for {k}", file=sys.stderr)
-            return 1
-        # The head and the pending request are what a later re-request is
-        # measured against; the stamp is what new feedback is measured from.
-        it["parked"] = {"at": int(time.time()), "head": d.get("headRefOid") or None,
-                        "requested": review_requested(d, whoami(state))}
-        it.setdefault("feedback_seen", time.strftime("%Y-%m-%dT%H:%M:%SZ",
-                                                     time.gmtime()))
-        save(state)
-        log_event("park", k)
-        print(f"parked {k} session={sid(it.get('session'))} "
-              f"-> {short_noun(it.get('session'))} kept, holds no slot")
+        print(r["msg"])
         return 0
-    if cmd == "unpark":
-        k = args[1]
-        it = state["items"].get(k)
-        if it is None:
-            print(f"unknown item {k}", file=sys.stderr)
+    if cmd in ("unhold", "unpark"):
+        r = unhold_item(state, args[1])
+        if not r["ok"]:
+            print(r["error"], file=sys.stderr)
             return 1
-        it.pop("parked", None)
-        save(state)
-        log_event("unpark", k)
-        print(f"unparked {k} -> holds a slot again")
+        print(r["msg"])
         return 0
     if cmd == "detach":
         # detach <key>: close its workspace or space, keep the worktree and
@@ -4073,7 +4188,7 @@ def dispatch(cmd, args, state):
 
     print(f"unknown command: {cmd}", file=sys.stderr)
     print("usage: scan.sh [tick|drain|status|pause|resume|decline|undecline|"
-          "track|untrack|detach|park|unpark|set-phase|mark-reviewed|claim-round|heartbeat|"
+          "track|untrack|detach|hold|unhold|park|unpark|set-phase|mark-reviewed|claim-round|heartbeat|"
           "reset-rounds|review-base|"
           "mark-merged|restack|"
           "render|spawn|"
