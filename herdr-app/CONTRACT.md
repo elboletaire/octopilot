@@ -40,8 +40,8 @@ shell and prompter rows run in this viewer's herdr-app with the machine's ids
 `dashboard.sh --action`, which would drive that machine's window. Rows whose
 backend is the herdr TUI say so. The `o` key opens a row's https link on this
 computer.
-The launcher (`open-gui.sh`) checks herdr-app's window on the machine it runs on before it
-touches a space, and opens one with `systemd-run` when that machine has a graphical session
+The launcher (`open-gui.sh`) reads the layout from herdr-core (`scan.sh core-layout`) and never
+starts a herdr-app window: with no space and no window on the machine it runs on, it stops
 (see herdr/README.md).
 
 ## view.json (written atomically by `dashboard.sh --headless`, on change and at least every 5 s)
