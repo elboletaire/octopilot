@@ -66,6 +66,27 @@ esac
 ''',
 }
 
+# The checkout's scan.sh: restore-sessions and request are logged with whether the engine's
+# locks are free (flock -n) at that moment; restore-sessions exits with $SHIM/restore_rc when
+# there is one. Every other subcommand runs the real scan.sh (REAL below).
+SCAN_SHIM = '''#!/bin/sh
+locks() {
+  if flock -n "$OCTOPILOT_STATE_DIR/tick.lock" true && flock -n "$OCTOPILOT_STATE_DIR/exec.lock" true
+  then echo free; else echo held; fi
+}
+case "$1" in
+  restore-sessions)
+    echo "scan restore-sessions locks=$(locks)" >> "$SHIM/trace"
+    [ -e /proc/self/fd/8 ] && echo "scan restore-sessions 8" >> "$SHIM/fds"
+    [ -f "$SHIM/restore_rc" ] && exit "$(cat "$SHIM/restore_rc")"
+    exit 0 ;;
+  request)
+    echo "scan $* locks=$(locks)" >> "$SHIM/trace"
+    exit 0 ;;
+esac
+exec "REAL" "$@"
+'''
+
 # A terminal's `hc get --json` as the labels, foreground and creation time the launcher reads.
 def terminal_json(dir_, labels=None, fg="zsh", created_ms=0, argv=None):
     doc = {"labels": {"octopilot.dir": dir_, **(labels or {})},
@@ -97,7 +118,19 @@ class OpenGuiWindowTest(unittest.TestCase):
         with open(os.path.join(self.shim, name), "w") as fh:
             fh.write(text)
 
-    def launch(self, *args, home=None):
+    def copy_checkout(self):
+        """A checkout with the launcher and config.sh copied, and the shim scan.sh (SCAN_SHIM)."""
+        checkout = os.path.join(self.root, "octopilot")
+        os.makedirs(os.path.join(checkout, "herdr"))
+        shutil.copy(LAUNCHER, os.path.join(checkout, "herdr", "open-gui.sh"))
+        shutil.copy(os.path.join(REPO, "config.sh"), checkout)
+        scan = os.path.join(checkout, "scan.sh")
+        with open(scan, "w") as fh:
+            fh.write(SCAN_SHIM.replace('"REAL"', '"' + os.path.join(REPO, "scan.sh") + '"'))
+        os.chmod(scan, os.stat(scan).st_mode | stat.S_IEXEC)
+        return checkout
+
+    def launch(self, *args, home=None, checkout=None):
         env = {
             **os.environ,
             "SHIM": self.shim,
@@ -110,7 +143,8 @@ class OpenGuiWindowTest(unittest.TestCase):
         }
         if home:
             env["HOME"] = home  # where scan.py finds the claude transcripts
-        return subprocess.run(["bash", LAUNCHER, *args], env=env, cwd=self.root,
+        launcher = LAUNCHER if checkout is None else os.path.join(checkout, "herdr", "open-gui.sh")
+        return subprocess.run(["bash", launcher, *args], env=env, cwd=self.root,
                               capture_output=True, text=True, timeout=120)
 
     def trace(self):
@@ -150,13 +184,13 @@ class OpenGuiWindowTest(unittest.TestCase):
             {"id": "t5", "name": "scratch", "terminals": [{"terminal": "tc", "pane": "p4"}]},
         ]}]}))
 
-    def shown_host(self):
+    def shown_host(self, checkout=REPO):
         """This checkout's headless, shown in space s1 (tab OCTOPILOT, pane p1) of a running herdr-app."""
         self.running_app()
         self.write("ls-octopilot.agent=octopilot-headless.json",
                    json.dumps({"terminals": [{"address": "th"}]}))
         self.write("get-th.json", json.dumps(terminal_json(
-            os.path.realpath(REPO), {"herdr.space": "s1", "octopilot.agent": "octopilot-headless"},
+            os.path.realpath(checkout), {"herdr.space": "s1", "octopilot.agent": "octopilot-headless"},
             fg="uv")))
 
     def test_no_window_and_no_session_stops_before_anything(self):
@@ -328,6 +362,58 @@ class OpenGuiWindowTest(unittest.TestCase):
         for t in ("t-young", "t-claude"):
             self.assertFalse([line for line in trace if line.startswith((f"hc kill {t}", f"hc rm {t}"))],
                              trace)
+
+    def assert_restored_between_tabs_and_tick(self, trace):
+        """restore-sessions runs after the tabs are set up, with the locks still held; the
+        tick is requested after it, with the locks released."""
+        restore = trace.index("scan restore-sessions locks=held")
+        tabs = [i for i, t in enumerate(trace) if t.startswith("herdr-app do ")]
+        self.assertLess(max(i for i in tabs if i < restore), restore, trace)
+        self.assertLess(restore, trace.index("scan request tick locks=free"), trace)
+        self.assertNotIn("scan restore-sessions 8", trace)
+
+    def test_restore_runs_after_the_tabs_and_before_the_tick_on_the_existing_space(self):
+        checkout = self.copy_checkout()
+        self.shown_host(checkout)
+        res = self.launch(checkout=checkout)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assert_restored_between_tabs_and_tick(self.trace())
+        for name in ("tick.lock", "exec.lock"):
+            held = subprocess.run(["flock", "-n", os.path.join(self.state, name), "true"])
+            self.assertEqual(held.returncode, 0, name)
+
+    def test_restore_runs_on_a_new_space(self):
+        checkout = self.copy_checkout()
+        self.running_app()
+        res = self.launch(checkout=checkout)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assert_restored_between_tabs_and_tick(self.trace())
+
+    def test_restore_runs_on_terminals(self):
+        checkout = self.copy_checkout()
+        self.running_app()
+        res = self.launch("--terminals", checkout=checkout)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assert_restored_between_tabs_and_tick(self.trace())
+
+    def test_a_refused_restore_is_warned_about_and_the_run_succeeds(self):
+        checkout = self.copy_checkout()
+        self.shown_host(checkout)
+        self.write("restore_rc", "1")
+        res = self.launch(checkout=checkout)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("restore-sessions refused", res.stdout + res.stderr)
+        self.assertIn("scan request tick locks=free", self.trace())
+
+    def test_a_failed_launch_does_not_restore_and_releases_the_locks(self):
+        checkout = self.copy_checkout()
+        self.write("env", "HOME=/nowhere\nLANG=C\n")
+        res = self.launch(checkout=checkout)
+        self.assertEqual(res.returncode, 1, res.stdout + res.stderr)
+        self.assertFalse([t for t in self.trace() if t.startswith("scan ")], self.trace())
+        for name in ("tick.lock", "exec.lock"):
+            held = subprocess.run(["flock", "-n", os.path.join(self.state, name), "true"])
+            self.assertEqual(held.returncode, 0, name)
 
 
 if __name__ == "__main__":

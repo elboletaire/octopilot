@@ -39,11 +39,14 @@ A tab is named by its item's title. A title that is one of the launcher's tab na
 (`OCTOPILOT`, `engine`, `Octopilot (code changes)`, in any case) gets the agent's name
 after it: `engine (ap-<repo>-<number>)`.
 
-> **Closing the Octopilot space or workspace ends every worker tab.** Their worktrees
-> are kept, and their items show `GONE` and are untracked, freeing their slots. To end
-> one worker, use `z` or `del` on its row. The exception is the GUI with its engine
-> parked (the default): while its Octopilot space is closed, the ticks and drains do
-> nothing and the rows stay as they are, with no `GONE`.
+> **Closing the Octopilot space or rebooting keeps the items.** The next Open Octopilot
+> opens a window if none is up, resumes the prompter and the code agent, and restores
+> every worker with its conversation (`restore-sessions`, below). Then the first tick
+> decides each card's status: a merged PR is cleaned up, and so on. A worker tab you
+> close yourself while Octopilot runs is still dropped: its item shows `GONE` and is
+> untracked, freeing its slot. To end one worker, use `z` or `del` on its row.
+> While the GUI's Octopilot space is closed (the default, with the engine parked), the
+> ticks and drains do nothing and the rows stay as they are.
 
 A tab closed by hand does not end its session when its agent is live in another open
 tab or space (not held by another item; a tab is preferred): the session follows the
@@ -63,6 +66,8 @@ whose terminals are all bare shells, up for 30 s or more, is ended and reopened;
 anything else is left alone. Only `session`, `space`, `backend` and `claude_session` change on an
 item. It is refused when herdr-app does not answer or no Octopilot space is open. It takes the
 state lock per item and never `tick.lock` or `exec.lock`: the launcher holds those while it runs it.
+Open Octopilot runs it on every successful run, once the space and its tabs are in place; then it
+releases the locks and requests a tick. A refusal is warned about and the run still succeeds.
 
 **Upgrading.** Sessions already in their own spaces or workspaces keep working; there is
 nothing to migrate. Both id shapes are read: tabs as `tb…` (GUI) or `w…:t…` (TUI), spaces

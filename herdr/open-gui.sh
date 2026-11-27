@@ -914,6 +914,21 @@ finish() {
   if [ "$CLOSE_LAUNCHER" = 1 ]; then close_launcher; fi
 }
 
+# Runs once the space and its tabs are in place: reopens the tracked workers with their
+# conversations (restore-sessions; a refusal is warned about, never fatal), releases the engine's
+# locks, then asks for a tick so the first one decides each card. Only the success paths call it:
+# a failure exits first, and its exit releases the locks.
+restore_and_tick() {
+  # The workers' children do not keep the locks, as in herdr-app and hc above.
+  if ! env "${envs[@]}" "$DIR/scan.sh" restore-sessions 8>&- 9>&-; then
+    echo "open-gui.sh: restore-sessions refused; no worker was reopened (see above)" >&2
+  fi
+  exec 9>&- 8>&-
+  if ! env "${envs[@]}" "$DIR/scan.sh" request tick; then
+    echo "open-gui.sh: could not request a tick; the engine ticks on its own schedule" >&2
+  fi
+}
+
 # Names the space LABEL, best effort: space.new's name is not always kept, and an unnamed
 # space is called after its first terminal's folder. A refusal is warned about, never fatal.
 name_space() {
@@ -1042,6 +1057,7 @@ if [ -n "$host" ]; then
     place_tabs "$space"
     focus_main "$space"
   fi
+  restore_and_tick
   finish "$space"
   exit 0
 fi
@@ -1099,4 +1115,5 @@ else
   place_tabs "$space"
   focus_main "$space"
 fi
+restore_and_tick
 finish "$space"
