@@ -123,14 +123,14 @@ Entry:
   "actions": [Action]                               // exactly the TUI's allowed actions for this row
 }
 ```
-`space` is the herdr-app space holding an hc row's session: the Octopilot space for a worker tab (session `tb…` or `w…:t…`),
-or the session itself for an old-style session in its own space. Null for a herdr TUI row. A remote focus selects the
+`space` is the herdr-app space holding an hc row's session: the Octopilot space for a worker tab (session `tb…`),
+or the session itself for an old-style session in its own space. Null for a herdr TUI row (its `w…:t…` tabs included). A remote focus selects the
 space, then the tab.
 
 Action:
 ```jsonc
 {"id": "remove", "key": "Delete", "label": "remove",
- "confirm": "⚠ its agent is working -- press del again to remove owner/repo#12 (workspace and worktree deleted, untracked)" /* null = no confirm */,
+ "confirm": "⚠ its agent is working -- press del again to remove owner/repo#12 (tab and worktree deleted, untracked)" /* null = no confirm; "workspace and worktree deleted" for a workspace session, "worktree kept" with none */,
  "args": ["repo", "question", "read_only"] /* investigate only */}
 ```
 Row action ids (TUI key): `focus` (Enter), `peek` (v), `shell` (t), `browser` (o), `go` (g), `no` (n), `grant` (R),

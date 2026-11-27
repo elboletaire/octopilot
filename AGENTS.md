@@ -11,7 +11,8 @@ dashboard as `scan.py tick` and `scan.py drain`) reads a table built from GitHub
 (PR state, CI) and from the herdr agents, and acts on its rows. It also acts on the
 user's requests: `go N` under "Pick next" spawns a worker, and `no`, re-review,
 investigate and the rest are queued the same way. A worker is a claude in its own
-git worktree and herdr workspace, named `ap-<repo>-<number>`. It implements an issue
+git worktree, in a tab of the Octopilot space or workspace (`herdr/README.md`, Worker
+tabs), named `ap-<repo>-<number>`. It implements an issue
 or fixes a PR, then the review-fix loop runs. When a PR merges, the engine cleans up.
 
 The user watches the dashboard (TUI or GUI) and talks to a prompter chat. Both

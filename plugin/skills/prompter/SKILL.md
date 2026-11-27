@@ -31,7 +31,8 @@ for it. You never act yourself.
   - `WORKING`: running. `DONE`: finished, with a detail such as "parked by
     you -> waiting on merge or new activity", "review posted -> not yours to
     merge" or "new commits ... -> waiting on re-request".
-  - `GONE`: its session was removed by hand.
+  - `GONE`: its session was closed by hand and its agent is not live in another
+    tab of the Octopilot space (when it is, the session follows the agent, re-homed).
   - `PROPOSE`: pick-next candidates. `UNCLONED`, `STALE` and `UNKNOWN` are
     notes: report them with their one-line reason.
 
@@ -111,7 +112,7 @@ Resolve every target to a full key before queueing:
   GitHub number and needs its repo. If several repos match, ask which one, then
   queue `owner/repo#N`.
 - "this", titles and session names are matched through snapshot.json, `$A status`,
-  `herdr-app ls` (GUI) or `herdr workspace list` (TUI), then queued as the key.
+  `herdr-app ls` (GUI) or `herdr tab list` (TUI), then queued as the key.
 - A set ("all the dependabot ones") becomes one `go <key>` per item. Ask once
   for the whole set, with its count, when a wind-down or cap question applies.
 
@@ -171,17 +172,25 @@ explains the steps, and the user runs them. The branch is the `branch=` field
 of the `detach` event in events.jsonl. The mode is `fix` for the user's own work
 (their PR, or an issue) and `comment` for a review-only PR. Then:
 
-- Bring the worktree back as a session. Its path is the one `git -C <repo>
-  worktree list` shows for the branch. TUI: `herdr worktree open --cwd <repo>
-  --path <worktree>`, start claude in it, and pass the workspace id (`w…`).
-  Start `claude --resume` there instead of a fresh claude to keep the old
-  conversation; a resumed session needs no send below.
-  GUI: `herdr-app do space.new --folder <worktree>` with the claude command
-  (see `herdr/open-gui.sh`; `claude --resume` for the old conversation), then
-  label its terminal `hc label <t> octopilot.agent=<agent name>` (the
-  `ap-<repo>-<n>` name) and pass the space
-  id (`sp…`) that `space.new` prints. The label comes first, so `track` finds
-  the agent.
+- Bring the worktree back as a session, as a tab of the Octopilot space or
+  workspace (`$A host-space` prints its id; with none, a space or workspace of
+  its own, as below). Its path is the one `git -C <repo> worktree list` shows
+  for the branch. Start `claude --resume` in it instead of a fresh claude to
+  keep the old conversation; a resumed session needs no send below.
+  - GUI, a tab: `herdr-app do tab.new --space <space> --folder <worktree> --name
+    <title> --argv <claude argv> --focus false` (see `herdr/open-gui.sh`), then
+    label its terminal `hc label <t> octopilot.agent=<agent name>` (the
+    `ap-<repo>-<n>` name), and pass the tab id (`tb…`) that `tab.new` prints.
+    The label comes first, so `track` finds the agent.
+  - TUI, a tab: `herdr tab create --workspace <ws> --cwd <worktree> --label
+    <title> --no-focus --env OCTOPILOT_DIR=<dir> --env OCTOPILOT_STATE_DIR=<state
+    dir>`, then `herdr agent start <agent name> --kind claude --pane <pane>`
+    on the root pane it prints (`-- --resume` after the name keeps the old
+    conversation, through claude's picker), and pass the tab id (`w…:t…`).
+  - Without an Octopilot space or workspace, the old steps: TUI `herdr worktree
+    open --cwd <repo> --path <worktree>` and pass the workspace id (`w…`); GUI
+    `herdr-app do space.new --folder <worktree>` with the claude command, then
+    the label as above, and pass the space id (`sp…`) that `space.new` prints.
 - Then `$A track <key> <mode> <branch> <session> [pr]`, with the session id
   from the step above and the optional `pr` number for a PR item.
 - For a `fix` item with a fresh claude (not resumed), send its first prompt

@@ -5,13 +5,52 @@ prompter on the left and the live dashboard (`../dashboard.sh`) on the right.
 The dashboard updates by itself, and the engine acts on the table without anyone
 asking it to.
 
-Every work session is a herdr workspace on its worktree, grouped under its
-repo's workspace, with a claude agent named `ap-<repo>-<number>`. The engine is
-not an agent: the dashboard runs it as `scan.py tick` and `scan.py drain`.
+Every work session is a tab on its worktree, in the Octopilot space (herdr-app) or
+workspace (herdr TUI), with a claude agent named `ap-<repo>-<number>` (see Worker
+tabs). The engine is not an agent: the dashboard runs it as `scan.py tick` and
+`scan.py drain`.
 
 The prompter and the code agent start on `MODEL_PROMPTER` and `MODEL_CODE` (config.sh, passed
 to claude as `--model`), in both the TUI and the GUI launcher, not on the global default; a running
 one keeps its model.
+
+## Worker tabs
+
+`WORKER_HOST` (config.sh, read at each spawn) picks where a worker opens:
+
+- `tab` (the default): a tab of the Octopilot space or workspace. `scan.sh host-space`
+  prints the one it uses: the GUI's space where the headless, the code agent or the
+  prompter runs, or the TUI's workspace labelled `Octopilot`, else the prompter's.
+- `space`: a space or workspace of its own, as before. Sessions already open keep theirs.
+
+Without an Octopilot space or workspace (the launcher has not run), the worker opens as
+a space or workspace of its own, and the spawn prints `NOTE:` saying so. A remote
+Octopilot space (see `CONTRACT.md`) is not used: workers open on this computer.
+
+`SETTLE_WORKER_TABS` (GUI only; herdr has no settle) settles each new worker tab at
+spawn: herdr-app's `tab.settle` takes it out of the lists, still running. It comes back
+when you open it (`⏎`, or the dashboard's focus) or when its agent needs you. `0`
+leaves the tab shown.
+
+A tab is named by its item's title. A title that is one of the launcher's tab names
+(`OCTOPILOT`, `engine`, `Octopilot (code changes)`, in any case) gets the agent's name
+after it: `engine (ap-<repo>-<number>)`.
+
+> **Closing the Octopilot space or workspace ends every worker tab.** Their worktrees
+> are kept, and their items show `GONE` and are untracked, freeing their slots. To end
+> one worker, use `z` or `del` on its row.
+
+A tab closed by hand does not end its session when its agent is live in another tab of
+the Octopilot space: the session follows the agent to that tab (re-homed), and the row
+stays. Only an agent that is gone shows `GONE`.
+
+**Upgrading.** Sessions already in their own spaces or workspaces keep working; there is
+nothing to migrate. Both id shapes are read: tabs as `tb…` (GUI) or `w…:t…` (TUI), spaces
+and workspaces as `sp…` or `w…`.
+
+**Rolling back** past this step: first detach or finish the tab sessions (`z`, or `del`
+once their work is merged), or set `WORKER_HOST=space` and let the tab sessions drain.
+Older code cannot handle tab ids.
 
 ## Setup
 
@@ -60,10 +99,12 @@ status_indicators = "symbols"
 sidebar_width = 34
 
 [ui.sidebar.agents]
-rows = [["state_icon", "workspace"],
+rows = [["state_icon", "workspace", "tab"],
         ["$ap_kind", "$ap_pr", "$ap_rounds", "$ap_ci"],
         ["$ap_note"]]
 ```
+
+`tab` shows each worker's tab name beside its workspace.
 
 Notifications: the dashboard sends a desktop notification (`notify-send`) when
 an item enters 🔴 Needs you -- once per item and reason, never on repeats --
@@ -260,8 +301,10 @@ kept, or nothing on the live checkout. Checked with `claude --settings
 the worktree, and `arxiu-bibliotecaria@inline` and `taller@inline` remain.
 
 Only the GUI spawns carry `OCTOPILOT_DIR`, `OCTOPILOT_STATE_DIR` and the
-`--settings` override. TUI workers spawned by a worktree's octopilot get
-neither, so they run the live scan.sh and plugin.
+`--settings` override. A TUI worker opened as a workspace (`WORKER_HOST=space`) gets
+neither, so it runs the live scan.sh and plugin. A TUI tab worker gets the two
+variables (`tab create --env`), but not the `--settings` override, so it loads the
+installed plugin.
 
 Close the test space with `herdr-app do space.close --id <space> --confirmed true`.
 
@@ -317,7 +360,7 @@ the warning is harmless.
 | 🔴 Needs you | `CAPPED`, `READY`, `PUSHED`, `STALLED`, `CLOSED`, agents waiting on a question, and agents whose last report was `blocked`/`failed`/`stalled`/`capped` |
 | ⏭ Next tick | `MERGED`, `REVIEW`, `FEEDBACK`, `BOOTING` -- what the engine does on its next tick |
 | 🟡 Running | `WORKING`, and anything spawned since the last GitHub refresh |
-| ✔ Done | `DONE`, `GONE`, and cards you parked with `d` (they keep their workspace and hold no slot; new feedback or a re-requested review brings them back). Done rows without a workspace are hidden; `D` shows them |
+| ✔ Done | `DONE`, `GONE`, and cards you parked with `d` (they keep their tab or workspace and hold no slot; new feedback or a re-requested review brings them back). Done rows without a tab or workspace are hidden; `D` shows them |
 | ⚪ Pick next | `PROPOSE` |
 
 Agent state comes from herdr every 3s, heartbeats, rounds and reports the moment
@@ -340,19 +383,19 @@ requests, queued for the engine.
 | Key | Does |
 |---|---|
 | `↑↓` / `jk` | move |
-| `⏎` | go to the agent, in its own workspace |
+| `⏎` | go to the agent: in the GUI, its space, then its tab (a settled one comes back), then the agent's terminal; in the TUI, the agent's pane |
 | `v` | the agent in a popup over the dashboard; `ctrl+b q` closes it and leaves the agent running |
 | `a` | go to the prompter (refused when none runs) |
-| `t` | shell in the item's worktree |
+| `t` | shell in the item's worktree: in the GUI, a new tab in its space (the Octopilot space for a worker tab) |
 | `o` | PR or issue in the browser, opened on the computer you are at (the mod runs `xdg-open`, `open` or `start`), not on the octopilot's machine; no URL: `dashboard.sh --action browser` |
 | `g` / `n` | on a Pick next row: queue `go <key>` / `no <key>` for the engine (press twice; past `WIND_DOWN_AT`, or with the slots full (`ACTIVE + UNTRACKED` at `MAX_ACTIVE`), the second press confirms starting anyway, and the alert's `g` sends it with `(confirmed past wind-down)` and/or `(confirmed over cap)`) |
 | `R` | on a CAPPED row: grant another `MAX_REVIEW_ROUNDS` review rounds (press twice) |
 | `e` / `x` | on a PUSHED (stale) row: queue a re-review / ack the new commits (press twice) |
 | `i` | start an investigation: type the repo, the question, and whether it is read-only. Past `WIND_DOWN_AT` or with the slots full, the second press confirms starting anyway, as for `g` |
 | `P` | pause / resume octopilot (press twice) |
-| `z` | detach a tracked item: closes its workspace, keeps the worktree, stops tracking it (press twice) |
-| `del` / `⌫` | remove a tracked item: deletes its workspace and worktree, stops tracking it (press twice). Refused on MERGED and RESTACK rows: the engine handles those |
+| `z` | detach a tracked item: closes its tab (or its workspace or space), keeps the worktree, stops tracking it (press twice) |
+| `del` / `⌫` | remove a tracked item: deletes its tab (or its workspace or space) and worktree, stops tracking it (press twice). The confirm says what goes: `tab and worktree deleted`, `workspace and worktree deleted`, or `worktree kept` for an item with no session. Refused on MERGED and RESTACK rows: the engine handles those |
 | `r` | refresh from GitHub now |
-| `d` | on a tracked card: move it to Done / back (press twice). It keeps its workspace and holds no slot; the engine still merges and cleans up |
+| `d` | on a tracked card: move it to Done / back (press twice). It keeps its tab or workspace and holds no slot; the engine still merges and cleans up |
 | `D` | show / hide done rows (DONE, GONE) |
 | `q` | quit |
