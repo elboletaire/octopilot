@@ -112,10 +112,13 @@ OCTOPILOT_BACKEND="${OCTOPILOT_BACKEND:-herdr}"
 # OCTOPILOT_STATE_DIR is set.
 OCTOPILOT_ENGINE="${OCTOPILOT_ENGINE:-on}"
 
-# Where worker sessions open: a tab in the Octopilot space or workspace (tab), or
-# a space or workspace of their own (space, the old layout).
+# Where worker sessions open: a tab of the Octopilot space (GUI) or workspace (TUI)
+# (tab), or a space or workspace of their own (space, the old layout). With no
+# Octopilot one open, a worker gets its own, with a note. See herdr/README.md.
 WORKER_HOST="${WORKER_HOST:-tab}"
-# Settle each new worker tab at spawn (1), or leave it as herdr opened it (0).
+# GUI only: settle each new worker tab at spawn (1) -- herdr-app's tab.settle takes
+# it out of the lists, still running, until it is opened or its agent needs you --
+# or leave it shown (0). The TUI has no settle.
 SETTLE_WORKER_TABS="${SETTLE_WORKER_TABS:-1}"
 
 # OCTOPILOT_STATE_DIR in the environment points octopilot at another state

@@ -1,9 +1,9 @@
 # Octopilot
 
 An engine for coding agents. It reads the GitHub issues and PRs of your repos,
-proposes the next work, and spawns a Claude in its own git worktree and herdr
-workspace for each one: it implements an issue or fixes a PR, runs the review-fix
-loop, and cleans up when the PR merges. You watch a live dashboard (a herdr TUI, or
+proposes the next work, and spawns a Claude in its own git worktree for each one,
+as a tab of the Octopilot space (GUI) or workspace (TUI): it implements an issue or
+fixes a PR, runs the review-fix loop, and cleans up when the PR merges. You watch a live dashboard (a herdr TUI, or
 herdr-app mods) and talk to the engine through a prompter.
 
 ## Requirements
