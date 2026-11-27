@@ -62,7 +62,8 @@ class NotifyTest(NotifyBase):
     def test_first_run_is_silent_and_records_every_cause(self):
         self.run_notify(card("o/r#1", "READY:abc"))
         self.desktop.assert_not_called()
-        self.assertEqual(self.saved(), {"v": 2, "seen": {"o/r#1": ["READY:abc"]}})
+        self.assertEqual(self.saved(), {"v": 2, "needs": ["o/r#1"],
+                                        "seen": {"o/r#1": ["READY:abc"]}})
 
     def test_once_per_cause_and_a_new_cause_notifies_again(self):
         self.run_notify(card("o/r#1", "READY:abc"))
@@ -184,6 +185,19 @@ class EpisodeTest(NotifyBase):
         self.run_notify()
         self.run_notify(woken(NOW - 100))  # the same wake again: quiet
         self.assertEqual(self.desktop.call_count, 2)
+
+    def test_a_restart_mid_wait_does_not_notify_the_same_wait(self):
+        self.write_file({"v": 2, "needs": ["o/r#1"],
+                         "seen": {"o/r#1": [f"asking:{NOW - 600}"]}})
+        self.model.needs_before = set()  # a fresh dashboard
+        self.run_notify(placed(episode_item(NOW - 300), ag={"state": "waiting"}))
+        self.desktop.assert_not_called()
+        self.assertEqual(self.saved()["seen"]["o/r#1"], [f"asking:{NOW - 300}"])
+
+    def test_a_stall_without_last_seen_is_stamped_by_added(self):
+        it = episode_item(None, added=NOW - 3000)
+        self.assertEqual(placed(it, stalled=True)["cause"],
+                         f"stalled:{NOW - 3000}")
 
     def test_an_empty_read_neither_prunes_nor_writes(self):
         self.write_file({"v": 2, "seen": {"o/r#1": ["READY:abc"]}})

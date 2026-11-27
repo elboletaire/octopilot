@@ -566,12 +566,11 @@ class Model:
         of Needs and back with the same cause stays quiet, and a new cause
         (a new head, a new report) notifies again. The first run, with no
         notified.json or one of an older format, only records the causes
-        already there, so a fresh dashboard does not replay old news."""
+        already there, so a fresh dashboard does not replay old news. The
+        file's "needs" list (missing: empty) is the Needs set at the last
+        write, which the wait guard reads across a restart."""
         needs_now = {e["key"] for e in data["needs"]}
-        # Still in Needs you since the last tick: the same wait, however its
-        # last_seen moved.
-        stayed = needs_now & self.needs_before
-        self.needs_before = needs_now
+        before, self.needs_before = self.needs_before, needs_now
         if self.snap is None or not shutil.which("notify-send"):
             return
         with self.lock:
@@ -589,6 +588,10 @@ class Model:
                          and sent.get("v") == NOTIFIED_VERSION)
             seen = {} if first else {k: set(c) for k, c in
                                      (sent.get("seen") or {}).items()}
+            # Still in Needs you since the last tick, before or across a
+            # restart: the same wait, however its last_seen moved.
+            kept = set() if first else set(sent.get("needs") or [])
+            stayed = needs_now & (before | kept)
             for e in data["needs"]:
                 causes = seen.setdefault(e["key"], set())
                 cause = e["cause"] or e["why"] or "needs you"
@@ -604,7 +607,7 @@ class Model:
                 if not first:
                     desktop(f"🔴 {short(e['key'])}: {notify_text(e)}",
                             f"{e['title']}\n{(e['note'] or '')[:200]}")
-            out = {"v": NOTIFIED_VERSION,
+            out = {"v": NOTIFIED_VERSION, "needs": sorted(needs_now),
                    "seen": {k: sorted(c) for k, c in seen.items()
                             if k in tracked}}
             if first or out != sent:
@@ -886,7 +889,7 @@ def column_of(row, it, ag, ctx):
                      f"send:{failing['reason']}:{failing['at']}")
     if agent == "waiting":
         # The episode: the last sign of life before the question.
-        return needs("asking", f"asking:{it.get('last_seen')}")
+        return needs("asking", f"asking:{it.get('last_seen') or it.get('added')}")
     if kind in ("REVIEW", "BOOTING", "FEEDBACK") or agent == "running":
         return "running", extras
     hold = scan.hold_of(it) or {}
@@ -917,7 +920,7 @@ def column_of(row, it, ag, ctx):
         # and the report's time of a BLOCKED one.
         episode = {"READY": row.get("head"), "PUSHED": row.get("head"),
                    "CAPPED": f"{row.get('head')}:{it.get('review_rounds')}",
-                   "STALLED": it.get("last_seen"),
+                   "STALLED": it.get("last_seen") or it.get("added"),
                    "BLOCKED": (it.get("last_report") or {}).get("at")}
         cause = f"{why}:{episode[kind] or ''}" if kind in episode else why
         # A card the user woke from a hold notifies once for its wake.
@@ -930,7 +933,8 @@ def column_of(row, it, ag, ctx):
     if kind == "DONE":
         return "done", extras
     if ctx.get("stalled"):
-        return needs("stalled", f"stalled:{it.get('last_seen')}")
+        return needs("stalled",
+                     f"stalled:{it.get('last_seen') or it.get('added')}")
     return "running", extras
 
 
@@ -1408,10 +1412,12 @@ def kitchen_view(evs):
 
 
 def ball_state(item, done_kind):
-    """readKitchen's ballState: the snapshot's READY, CAPPED and DONE, else the
-    agent's last report, else cooking once a session exists."""
-    if done_kind in ("READY", "CAPPED", "DONE"):
-        return {"READY": "ready", "CAPPED": "capped", "DONE": "done"}[done_kind]
+    """readKitchen's ballState: the snapshot's READY and CAPPED, else the
+    agent's last report, else cooking once a session exists. A DONE row is
+    not a ball: the board keeps Done items off the pan, and a DONE row whose
+    agent runs is drawn by its agent."""
+    if done_kind in ("READY", "CAPPED"):
+        return {"READY": "ready", "CAPPED": "capped"}[done_kind]
     report = item.get("last_report") or {}
     state = report.get("state") if isinstance(report, dict) else None
     if state in ("ready", "capped", "stalled"):
@@ -1907,8 +1913,10 @@ class Dashboard:
             label = "held: paused" if eng["paused"] else eng["label"]
             badge = [Text(f"⏭ {label}", no_wrap=True, overflow="ellipsis",
                           style="cyan")]
-        return (self.two_lines(title, width) + [status] + badge
-                + self.two_lines(e["note"] or "", width, "dim"))
+        # An empty note under a badge is a blank line: leave it out.
+        note = [] if badge and not e["note"] else \
+            self.two_lines(e["note"] or "", width, "dim")
+        return self.two_lines(title, width) + [status] + badge + note
 
     def card(self, e, color, body):
         sel = e["key"] == self.sel_key

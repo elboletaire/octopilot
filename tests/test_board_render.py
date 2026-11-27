@@ -102,6 +102,17 @@ class CardBadgeTest(unittest.TestCase):
                             "paused": True})
         self.assertIn("⏭ held: paused", self.body(e))
 
+    def test_an_empty_note_under_a_badge_is_no_blank_line(self):
+        e = entry("o/r#1", {"action": "cleanup", "label": "cleaning up",
+                            "paused": False})
+        e["note"] = ""
+        self.assertTrue(self.body(e).endswith("⏭ cleaning up"))
+
+    def test_a_done_row_on_a_live_agent_is_not_a_done_ball(self):
+        self.assertEqual(dashboard.ball_state({"session": "w1"}, "DONE"),
+                         "cooking")
+        self.assertEqual(dashboard.ball_state({}, "DONE"), "raw")
+
     def test_no_badge_when_nothing_is_pending(self):
         self.assertNotIn("⏭", self.body(entry("o/r#1")))
 
