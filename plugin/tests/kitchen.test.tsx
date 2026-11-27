@@ -1,7 +1,7 @@
 import type { EngineInterface, RenderInput } from 'claude-code'
 import { expect, test } from 'claude-code/testing'
 
-import { newEvents, react, readKitchen } from '../hooks/feed'
+import { engineActing, newEvents, react, readEngine, readKitchen } from '../hooks/feed'
 import { COLUMNS, ROWS, encode, paint } from '../hooks/scene'
 
 const BAND = {
@@ -53,10 +53,10 @@ test('/takoyaki opens the kitchen above the prompt', async ($, on) => {
   await closed.unmount()
 })
 
-test('/octopilot:messenger opens the kitchen on its own', async ($, on) => {
+test('/octopilot:prompter opens the kitchen on its own', async ($, on) => {
   on('ui.render', engineBand)
   on('command.run', () => ({ text: '' }))
-  await $.command.run({ ...TAKOYAKI, command: 'octopilot:messenger' })
+  await $.command.run({ ...TAKOYAKI, command: 'octopilot:prompter' })
   const ui = await $.ui.mount({ plugin: 'octopilot', surface: 'terminal', ...BAND })
   expect(await ui.find({ type: 'Raster', key: 'kitchen' })).toBeDefined()
   await ui.unmount()
@@ -126,6 +126,47 @@ test('reports set the chef’s mood', () => {
   expect(react({ at: 1, kind: 'report', key: 'o/r#1', state: 'blocked' }).mood).toBe('sad')
   expect(react({ at: 1, kind: 'merged', key: 'o/r#1' }).burst).toBe('heart')
   expect(react({ at: 1, kind: 'spawn', key: 'o/r#1', title: 'X' }).line?.text).toBe('new order r#1 X')
+})
+
+test('the engine’s decisions show in the kitchen’s log', () => {
+  const skip = react({ at: 1, kind: 'engine-skip', key: 'budget', reason: 'act budget spent', left: 'go o/r#3' })
+  expect(skip.line).toEqual({ at: 1, text: 'skipped: go o/r#3', tone: 'bad' })
+  expect(skip.key).toBeUndefined()
+  expect(react({ at: 1, kind: 'engine-skip', reason: 'act budget spent' }).line?.text).toBe(
+    'skipped: act budget spent',
+  )
+
+  const held = react({ at: 1, kind: 'held', key: 'o/r#3', reason: 'at the cap' })
+  expect(held.line).toEqual({ at: 1, text: 'held r#3: at the cap', tone: 'info' })
+  expect(held.mood).toBe('worried')
+  expect(react({ at: 1, kind: 'held', reason: 'kitchen closed' }).line?.text).toBe('held request: kitchen closed')
+
+  const refused = react({ at: 1, kind: 'go-refused', key: 'o/r#8', verb: 'go', reason: 'issue is closed' })
+  expect(refused.line).toEqual({ at: 1, text: 'go r#8 refused: issue is closed', tone: 'bad' })
+  expect(refused.mood).toBe('sad')
+  expect(react({ at: 1, kind: 'request-refused', verb: 'no', reason: 'nothing tracked' }).line).toEqual({
+    at: 1,
+    text: 'no refused: nothing tracked',
+    tone: 'bad',
+  })
+
+  const started = react({ at: 1, kind: 'go', key: 'o/r#3', title: 'Fix the thing' })
+  expect(started.line).toEqual({ at: 1, text: 'started r#3 Fix the thing', tone: 'good' })
+})
+
+test('the band follows the engine’s state while its view is fresh', () => {
+  const view = (state: string, generatedAt: number) =>
+    JSON.stringify({ v: 1, generated_at: generatedAt, header: { engine: { state } } })
+  const acting = readEngine(view('acting', 100))
+  expect(acting).toEqual({ acting: true, at: 100000 })
+  expect(engineActing(acting, 100000 + 14999)).toBe(true)
+  expect(engineActing(acting, 100000 + 15001)).toBeUndefined()
+  expect(engineActing(readEngine(view('idle', 100)), 101000)).toBe(false)
+
+  // No view, an older view without the engine header, or junk: the caller falls back.
+  expect(readEngine('not json')).toBeUndefined()
+  expect(readEngine(JSON.stringify({ v: 1, generated_at: 100, header: {} }))).toBeUndefined()
+  expect(engineActing(undefined, 0)).toBeUndefined()
 })
 
 test('the scene packs into a full raster', () => {

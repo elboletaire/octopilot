@@ -2,12 +2,12 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { LogLine } from '../types'
-import { newEvents, react, readKitchen } from './feed'
-import type { OctopilotEvent, Kitchen, Reaction } from './feed'
+import { engineActing, newEvents, react, readEngine, readKitchen } from './feed'
+import type { EngineView, OctopilotEvent, Kitchen, Reaction } from './feed'
 import { COLUMNS, PALETTE, ROWS, encode, holeX, paint, step } from './scene'
 import type { Mood, Particle, Scene } from './scene'
 
-const ORCH_AGENT = 'octopilot' // scan.py's ORCH_AGENT
+const PROMPTER_AGENT = 'octopilot-prompter' // scan.py's PROMPTER_AGENT
 const RASTER = 'kitchen'
 const FRAME_MS = 100
 const POLL_MS = 1000
@@ -51,11 +51,12 @@ const k = {
   moodUntil: 0,
   focus: -1,
   particles: [] as Particle[],
-  isWorking: false,
+  isWorking: false, // the prompter's own turn: the fallback without a fresh engine view
+  engine: undefined as EngineView | undefined,
   lastActivity: Date.now(),
   lastFrame: Date.now(),
   cursor: { at: 0, seen: [] as string[] },
-  mtimes: { state: 0, events: 0, snapshot: 0 },
+  mtimes: { state: 0, events: 0, snapshot: 0, view: 0 },
   stateDir: '',
   demo: undefined as { step: number; balls: Kitchen['balls'] } | undefined,
   isBlitting: false,
@@ -101,9 +102,14 @@ function burst(kind: NonNullable<Reaction['burst']>, hole: number) {
   }
 }
 
+// The engine acts (view.json's header.engine.state); without a fresh view, the prompter's own turn.
+function working(): boolean {
+  return engineActing(k.engine, now()) ?? k.isWorking
+}
+
 function resting(): Mood {
   if (k.kitchen.paused) return 'sleep'
-  if (k.isWorking) return 'busy'
+  if (working()) return 'busy'
   if (now() - k.lastActivity > DOZE_MS) return 'doze'
   return 'idle'
 }
@@ -121,7 +127,7 @@ function frame(): Scene {
     balls: k.kitchen.balls,
     boxed: k.kitchen.boxed,
     holes: k.kitchen.holes,
-    isWorking: k.isWorking,
+    isWorking: working(),
     focus: k.focus,
     particles: k.particles,
   }
@@ -154,6 +160,14 @@ async function refreshHeader($: EngineInterface) {
 
 async function pollFiles($: EngineInterface) {
   if (!k.active || k.demo) return
+  const viewFile = `${k.stateDir}/view.json`
+  const view = await $.fs.stat(viewFile).catch(() => undefined)
+  if (!view) k.engine = undefined
+  else if (view.mtimeMs !== k.mtimes.view) {
+    k.mtimes.view = view.mtimeMs
+    k.engine = readEngine(await $.fs.read(viewFile).catch(() => ''))
+  }
+
   const stateFile = `${k.stateDir}/state.json`
   const eventsFile = `${k.stateDir}/events.jsonl`
 
@@ -241,13 +255,13 @@ async function activate($: EngineInterface, isOn: boolean) {
   }
 }
 
-// The orchestrator is the herdr TUI agent named ORCH_AGENT, or, in the Herdr
-// app, the hc terminal labelled octopilot.agent=<ORCH_AGENT>.
-async function isOrchestrator($: EngineInterface) {
-  return (await isTuiOrchestrator($)) || (await isGuiOrchestrator($))
+// The prompter is the herdr TUI agent named PROMPTER_AGENT, or, in the Herdr
+// app, the hc terminal labelled octopilot.agent=<PROMPTER_AGENT>.
+async function isPrompter($: EngineInterface) {
+  return (await isTuiPrompter($)) || (await isGuiPrompter($))
 }
 
-async function isGuiOrchestrator($: EngineInterface) {
+async function isGuiPrompter($: EngineInterface) {
   const terminal = await $.env.get('HC_TERMINAL_ID')
   if (!terminal) return false
   const got = await $.process
@@ -256,13 +270,13 @@ async function isGuiOrchestrator($: EngineInterface) {
   if (!got || got.exitCode !== 0) return false
   try {
     const data = JSON.parse(got.stdout) as { labels?: Record<string, string> }
-    return data.labels?.['octopilot.agent'] === ORCH_AGENT
+    return data.labels?.['octopilot.agent'] === PROMPTER_AGENT
   } catch {
     return false
   }
 }
 
-async function isTuiOrchestrator($: EngineInterface) {
+async function isTuiPrompter($: EngineInterface) {
   const pane = await $.env.get('HERDR_PANE_ID')
   if (!pane) return false
   const got = await $.process
@@ -271,15 +285,15 @@ async function isTuiOrchestrator($: EngineInterface) {
   if (!got || got.exitCode !== 0) return false
   try {
     const data = JSON.parse(got.stdout) as { result?: { agent?: { name?: string } } }
-    return data.result?.agent?.name === ORCH_AGENT
+    return data.result?.agent?.name === PROMPTER_AGENT
   } catch {
     return false
   }
 }
 
-async function detectOrchestrator($: EngineInterface) {
+async function detectPrompter($: EngineInterface) {
   for (let i = 0; i < DETECT_TRIES && !k.active; i++) {
-    if (await isOrchestrator($)) return activate($, true)
+    if (await isPrompter($)) return activate($, true)
     await $.clock.sleep(DETECT_MS)
   }
 }
@@ -308,7 +322,7 @@ export const register: Register = on => {
 
     // A reload keeps the session's state: pick the kitchen up where it was.
     if (await read($, isActive)) await activate($, true)
-    else void detectOrchestrator($)
+    else void detectPrompter($)
 
     return next(e)
   })
@@ -317,7 +331,7 @@ export const register: Register = on => {
     if ((e.args ?? '').trim() === 'demo') {
       k.demo = k.demo ? undefined : { step: 0, balls: [] }
       if (!k.demo) {
-        k.mtimes = { state: 0, events: 0, snapshot: 0 }
+        k.mtimes = { state: 0, events: 0, snapshot: 0, view: 0 }
         k.kitchen = { balls: [], boxed: [], paused: false, holes: 6 }
       }
       await activate($, true)
@@ -333,17 +347,8 @@ export const register: Register = on => {
     return { text: isOn ? 'Takoyaki kitchen open.' : 'Takoyaki kitchen closed.' }
   })
 
-  // The orchestrator's own scan is the surest sign this session drives octopilot.
-  on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
-    // The skill calls it as `$A <cmd>` with A=.../scan.sh, so accept both spellings.
-    if (!k.active && /(octopilot\/scan\.sh|\$A)"?\s+(scan|inbox|doorbell|pause|resume)\b/.test(e.command)) {
-      await activate($, true)
-    }
-    return next(e)
-  })
-
   // Slash commands run through command.run, never prompt.submit.
-  on('command.run', { command: 'octopilot:messenger' }, async ($, e, next) => {
+  on('command.run', { command: 'octopilot:prompter' }, async ($, e, next) => {
     if (!k.active) await activate($, true)
     return next(e)
   })

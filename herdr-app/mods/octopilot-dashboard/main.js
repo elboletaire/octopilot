@@ -10,8 +10,8 @@ import {
 } from "herdr";
 import {
   CONFIRM_MS, FLASH_MS, KITCHEN_S, GLOBAL_KEYS, ROW_KEYS, arrange, resolveSel,
-  entryOf, stepSel, jumpSel, keyName, actionKey, parseAnswer, slugOf, isRepoKey, viewError, isStale,
-  ownPane, shownTab, keyboardFree,
+  entryOf, stepSel, jumpSel, keyName, actionKey, parseAnswer, confirmArgs, slugOf, isRepoKey, viewError, isStale,
+  ownPane, shownTab, keyboardFree, remoteSteps,
 } from "./model.js";
 import {
   header, paused, column, pickPanel, activityPanel, notesRow, statusLine, actionBar,
@@ -271,7 +271,13 @@ export default class OctopilotDashboard extends View {
     }
     this.busy = true;
     cx.spawn(async () => {
-      const res = await runAction(on, p.dir, p.state_dir, p.action, p.key, { ...(p.args ?? {}), confirmed: 1 });
+      const res = await runAction(on, p.dir, p.state_dir, p.action, p.key, confirmArgs(p.args, p.holds));
+      // A hold that came up since the alert opened is shown again, not sent.
+      if (res.kitchen) {
+        this.openDialog("kitchen", { action: p.action, key: p.key, args: p.args, message: res.message, holds: res.holds });
+        closeOverlay(p.overlay);
+        return;
+      }
       notify({
         title: "Octopilot", body: res.message || (res.ok ? "started" : "failed"),
         level: res.ok ? "success" : "error",
@@ -301,7 +307,7 @@ export default class OctopilotDashboard extends View {
     cx.spawn(async (cx) => {
       const res = await runAction(on, p.dir, p.state_dir, p.action, null, args);
       if (res.kitchen) {
-        this.openDialog("kitchen", { action: p.action, args, message: res.message });
+        this.openDialog("kitchen", { action: p.action, args, message: res.message, holds: res.holds });
         closeOverlay(p.overlay);
       } else if (res.ok) {
         notify({ title: "Octopilot", body: res.message, level: "success" });
@@ -519,20 +525,17 @@ export default class OctopilotDashboard extends View {
     }
     if (entry?.backend !== "hc") return this.say(`this row lives in the herdr TUI on ${on}`, false, cx);
     if (!entry.session) return this.say("no session for this row", false, cx);
-    if (id === "focus") {
-      run("space.select", { id: `${on}/${entry.session}` });
-      if (entry.pane) run("agent.focus", { terminal: addressOn(on, entry.pane) });
-      return this.say("focused", true, cx);
-    }
     if (id === "peek") {
       if (!entry.pane) return this.say("no live agent for this row", false, cx);
       this.watchPeek();
       run("terminal.peek", { terminal: addressOn(on, entry.pane) });
       return this.say("peeked", true, cx);
     }
-    if (!entry.path) return this.say("no worktree for this row", false, cx);
-    run("tab.new", { space: `${on}/${entry.session}`, folder: entry.path });
-    return this.say("new tab opened", true, cx);
+    if (id === "shell" && !entry.path) return this.say("no worktree for this row", false, cx);
+    const steps = remoteSteps(id, entry, on);
+    if (steps.length === 0) return this.say("no space for this row", false, cx);
+    for (const step of steps) run(step.cmd, step.args);
+    return this.say(id === "focus" ? "focused" : "new tab opened", true, cx);
   }
 
   openUrl(url, cx) {
@@ -561,7 +564,7 @@ export default class OctopilotDashboard extends View {
     if (id === "peek" || id === "prompter") this.watchPeek();
     cx.spawn(async (cx) => {
       const res = await runAction(w.on, w.dir, w.stateExplicit, id, key, args);
-      if (res.kitchen) this.openDialog("kitchen", { action: id, key, args, message: res.message });
+      if (res.kitchen) this.openDialog("kitchen", { action: id, key, args, message: res.message, holds: res.holds });
       else this.say(res.message || (res.ok ? "done" : "failed"), res.ok, cx);
       cx.notify();
     });

@@ -1,4 +1,4 @@
-# Octopilot configuration. Sourced by scan.sh and the messenger skill.
+# Octopilot configuration. Sourced by scan.sh.
 
 # Repos where every open PR is a candidate regardless of author (canonical
 # slugs -- resolved via `gh repo view`, NOT directory names. vocdoni/ui-scaffold
@@ -36,9 +36,8 @@ REVIEW_LEVEL_FOLLOWUP="high"
 REVIEW_LEVEL_COMMENT="high"
 
 # Model pinned per spawned session, by the prompt that CREATES it. Written
-# explicitly onto the `claude` command line, so a worker never inherits the
-# orchestrator's model -- running octopilot on haiku still gets you opus
-# workers. Later prompts (rebase, address-feedback) land in an existing
+# explicitly onto the `claude` command line, so a worker never runs on the user's
+# default model -- a prompter on haiku still gets you opus workers. Later prompts (rebase, address-feedback) land in an existing
 # session and run on whatever it was spawned with; the model cannot be changed
 # without restarting the session, which would destroy its conversation.
 #
@@ -51,6 +50,9 @@ MODEL_WORK='claude-opus-5-5[1m]'               # issue -> implementation, ambigu
 MODEL_INVESTIGATE='claude-fable-5-2[1m]'       # open-ended question
 MODEL_REVIEW_FIX='claude-opus-5-5[1m]'         # own/assigned PR: rebase, 3 review rounds, CI waits -- the longest-lived session
 MODEL_REVIEW_COMMENT='claude-opus-5-5[1m]'     # public review of someone else's PR
+# Full model id the launchers pin on the prompter and the code-changes claude, never the global default.
+MODEL_PROMPTER="${MODEL_PROMPTER:-claude-opus-5-5[1m]}"
+MODEL_CODE="${MODEL_CODE:-claude-opus-5-5[1m]}"
 
 # Agent-tool aliases for the two review passes (settings.json pins each to a full id).
 # Pass 1 wants recall; pass 2 filters its false positives.
@@ -91,24 +93,33 @@ STALE_HOURS=48
 # ancient org issue ever assigned to you shows up as a candidate.
 ISSUE_MAX_AGE_DAYS=120
 
-# Address of the orchestrator, where agent reports and dashboard commands are
-# sent: "herdr:<agent name>". Empty means
-# "whichever agent last ran a scan", which the scan records itself -- leave it
-# empty unless that guesses wrong.
-OCTOPILOT_ORCH=""
-
-# Folder the herdr plugin starts the orchestrator in. Claude asks once whether
-# to trust it. ~/src holds the clones on every workstation; the skill itself
-# is global, so it works from any folder.
+# Folder of the Octopilot space: the herdr plugin and open-gui.sh start its
+# panes there. Claude asks once whether to trust it. ~/src holds the clones on
+# every workstation.
 OCTOPILOT_ORCH_CWD="$HOME/src"
 
-# How often the dashboard re-reads GitHub (a read-only scan), in seconds. Agent
-# state and octopilot events update instantly; only PR/CI data waits for this.
+# How often the dashboard re-reads GitHub (through tick, or a read-only snapshot
+# in a worktree), in seconds.
+# Agent state and octopilot events update instantly; only PR/CI data waits for this.
 DASHBOARD_REFRESH_SECS=120
 
 # Backend new sessions spawn on: herdr (the TUI, default) or hc (the herdr-app
 # GUI); running sessions keep theirs.
 OCTOPILOT_BACKEND="${OCTOPILOT_BACKEND:-herdr}"
+
+# Each tick's action on what it finds: off, plan (logs, changes nothing) or on
+# (the engine acts). A checkout other than the live one stays off unless
+# OCTOPILOT_STATE_DIR is set.
+OCTOPILOT_ENGINE="${OCTOPILOT_ENGINE:-on}"
+
+# Where worker sessions open: a tab of the Octopilot space (GUI) or workspace (TUI)
+# (tab), or a space or workspace of their own (space, the old layout). With no
+# Octopilot one open, a worker gets its own, with a note. See herdr/README.md.
+WORKER_HOST="${WORKER_HOST:-tab}"
+# GUI only: settle each new worker tab at spawn (1) -- herdr-app's tab.settle takes
+# it out of the lists, still running, until it is opened or its agent needs you --
+# or leave it shown (0). The TUI has no settle.
+SETTLE_WORKER_TABS="${SETTLE_WORKER_TABS:-1}"
 
 # OCTOPILOT_STATE_DIR in the environment points octopilot at another state
 # (a sandbox, a second profile); unset, it is the usual XDG state dir.

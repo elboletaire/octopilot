@@ -1,10 +1,11 @@
 # Octopilot
 
-An orchestrator for coding agents. It reads the GitHub issues and PRs of your
-repos, proposes the next work, and spawns a Claude in its own git worktree and
-herdr workspace for each one: it implements an issue or fixes a PR, runs the
-review-fix loop, and cleans up when the PR merges. You watch a live dashboard
-(a herdr TUI, or herdr-app mods) and talk to the orchestrator through a prompter.
+An engine for coding agents. It reads the GitHub issues and PRs of your repos,
+proposes the next work, and spawns a Claude in its own git worktree for each one,
+as a tab of the Octopilot space (GUI) or workspace (TUI): it implements an issue or
+fixes a PR, runs the review-fix loop, and cleans up when the PR merges. You watch a
+live dashboard (a herdr TUI, or herdr-app mods) and talk to the engine through a
+prompter.
 
 ## Requirements
 
@@ -36,8 +37,8 @@ use their own code. The live checkout is the one whose plugin settings.json load
 
 ### Claude plugin
 
-The orchestrator's skills and the takoyaki kitchen above its prompt are a Claude
-Code plugin, loaded through `CLAUDE_CODE_PLUGIN_DIRS`. Point it at the plugin
+The prompter's skill and the takoyaki band in its claude are a Claude Code plugin,
+loaded through `CLAUDE_CODE_PLUGIN_DIRS`. Point it at the plugin
 folder of your checkout, for example in `~/.claude/settings.json`:
 
 ```json
@@ -52,7 +53,8 @@ Use the path of your clone. Several plugin dirs are separated by `:`.
 
 ## Layout
 
-- `scan.py`, `scan.sh`: the state engine, and its wrapper
+- `engine.py`: the engine (planner and executor), run by `scan.py tick` and `drain`
+- `scan.py`, `scan.sh`: the state, and its wrapper
 - `dashboard.py`, `dashboard.sh`: the TUI (and `--headless`, which writes `view.json`)
 - `config.sh`: repos, clone roots, models and limits; each is overridable by an env var
 - `prompts/`: the worker and loop prompts

@@ -48,7 +48,7 @@
     {
       "id": "7f1c2a10-0006",
       "role": "assistant",
-      "text": "🌇 It's 09:05, before wind-down. Queued **go acme/widgets#402** (the one that needs you). I'll tell you when the orchestrator picks it up.",
+      "text": "🌇 It's 09:05, before wind-down. Queued **go acme/widgets#402** (the one that needs you). I'll tell you when the engine picks it up.",
       "at": "2026-11-25T09:05:09Z",
       "tools": [
         "Bash: $A wind-down",

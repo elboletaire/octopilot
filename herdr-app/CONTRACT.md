@@ -11,10 +11,10 @@ actions. `$DIR` is the octopilot code dir (`props().dir`, else
 
 | piece | where | role |
 |---|---|---|
-| headless dashboard | `dashboard.sh --headless` in an hc terminal (parked engine terminal, no pane, see herdr/README.md) | runs every dashboard loop (GitHub refresh, doorbell, notifications, desktop notify, sidebar tokens) and writes `$STATE_DIR/view.json` |
+| headless dashboard | `dashboard.sh --headless` in an hc terminal (parked engine terminal, no pane, see herdr/README.md) | runs every dashboard loop (the GitHub refresh with `scan.py tick`, the engine's `drain`, notifications, desktop notify, sidebar tokens) and writes `$STATE_DIR/view.json` |
 | `octopilot-dashboard` mod | pane in the Octopilot tab | renders view.json, keyboard + mouse, sends actions |
 | `octopilot-chat` mod | pane in the Octopilot tab | the prompter as a chat over its hc terminal |
-| `octopilot-kitchen` mod | pane above the `octopilot-chat` mod, in the Octopilot tab, 300 px tall (split down from the chat, then swapped above it by open-gui.sh) | the takoyaki kitchen chef: reads view.json `pan` and `kitchen`, and `scan.sh speech` for the orchestrator's last message. Props: `dir`, `state_dir`, `pane_name`. Its pane is named (role and checkout hash) by open-gui.sh with `pane.rename`, and the mod finds its pane by `pane_name` (its machine, see Remote spaces) |
+| `octopilot-kitchen` mod | pane above the `octopilot-chat` mod, in the Octopilot tab, 300 px tall (split down from the chat, then swapped above it by open-gui.sh) | the takoyaki kitchen chef: reads view.json `pan` and `kitchen`, and `scan.sh speech` for the engine's last lines. Props: `dir`, `state_dir`, `pane_name`. Its pane is named (role and checkout hash) by open-gui.sh with `pane.rename`, and the mod finds its pane by `pane_name` (its machine, see Remote spaces) |
 | `herdr/open-gui.sh` | launcher | builds the space, starts terminals with `--session-id` (through the user's shell, so the gateway env reaches claude), shows the engine terminals in a third tab (`--hide-engine` parks them), gives the code agent its own tab (its claude, never parked), opens the mods: the OCTOPILOT tab is the kitchen over the chat on the left, the dashboard on the right |
 | `octopilot-launcher` mod | palette entry "Open Octopilot" (no view) | runs `herdr/open-gui.sh --close-launcher` in a new tab |
 | `herdr-app/install.sh` | installer | symlinks mods into `~/.config/herdr-app/mods/`, removes links of ours that point into this checkout's mods but whose mod (folder without `mod.json`) is gone, and deletes that folder when it holds only herdr's generated files (`gpui-kit.d.ts`, `jsconfig.json`; never a foreign link, a real folder, or a folder with any other file), adds the `octopilot` program to `programs.json`, removes a `layouts/octopilot.json` of ours (older versions wrote one; no layout is written now); `--key` also binds ctrl-alt-o |
@@ -34,8 +34,9 @@ reads nothing and refuses its sends with a notice. `watchFolder` is local only:
 a remote copy polls `view.json` every 2 s. A bare terminal from `scan.sh` (`t7`)
 is `<machine>/t7` for herdr. The dashboard's focus, peek,
 shell and prompter rows run in this viewer's herdr-app with the machine's ids
-(`<machine>/<session>` for the space, `<machine>/<pane>` for the terminal,
-`space.select`, `agent.focus`, `terminal.peek`, `tab.new`), not through
+(`<machine>/<space>` for the space, `<machine>/<session>` for a tab session,
+`<machine>/<pane>` for the terminal: `space.select`, `tab.select`, `agent.focus`,
+`terminal.peek`, `tab.new`; see `remoteSteps` in the dashboard's `model.js`), not through
 `dashboard.sh --action`, which would drive that machine's window. Rows whose
 backend is the herdr TUI say so. The `o` key opens a row's https link on this
 computer.
@@ -52,7 +53,12 @@ Mods treat a view whose `generated_at` is older than 15 s as stale (no headless 
     "active": 4, "max_active": 6, "untracked": 1,
     "github": {"state": "ok|stale|old|refreshing|none", "age_s": 42, "error": null},
     "last_tick_s": 120,                             // seconds ago, null = never
-    "orch_label": "octopilot",
+    "engine": {"mode": "on|plan|off", "state": "off|idle|scanning|acting|stale",
+               "since_s": 42, "last": Last},        // the engine (scan.py tick and drain). state: off = mode off;
+                                                    // idle; scanning = a GitHub pass; acting = running actions
+                                                    // (pan.busy); stale = one tick or drain running past 900 s.
+                                                    // since_s: seconds that state has held, null when idle or off.
+                                                    // last: the engine's last printed lines, null before its first run
     "paused": false,
     "wind_down": {"state": "yes|no|off", "at": "16:00"}
   },
@@ -71,6 +77,9 @@ Mods treat a view whose `generated_at` is older than 15 s as stale (no headless 
 }
 ```
 
+Last (the engine's last output, `header.engine.last`): `{"at": 1732530000.0, "verb": "tick|drain", "lines": ["…"]}`,
+the last 12 non-empty lines the engine command printed, `verb` being the command that printed them.
+
 Log (one kitchen line, takoyaki's feed.ts `react()`):
 ```jsonc
 {"at": 1732530000.0, "kind": "report", "mood": "happy", "text": "ready repo#12: …", "good": true,
@@ -83,7 +92,7 @@ Pan (takoyaki's pan and chef, from feed.ts `readKitchen()` and register.tsx `fra
 ```jsonc
 {
   "holes": 6,                                       // header max_active
-  "paused": false, "busy": false,                   // busy = the orchestrator's agent is running
+  "paused": false, "busy": false,                   // busy = the engine is acting (header.engine.state == "acting")
   "balls": [{"key": "owner/repo#12", "label": "repo#12",
              "state": "raw|cooking|ready|capped|burnt|stalled",
              "heat": 0.4,                           // cooking age / 25 min, capped at 1 (feed.ts browns them)
@@ -109,16 +118,19 @@ Entry:
   "rounds": 1, "max_rounds": 3, "quiet_s": 600, "stalled": false, "needs": false, "why": "ready to merge",
   "driver": "agent|orchestrator|null",              // who drives the item; rounds is 0 (not null) for agent
   "note": "…", "pick_kind": "issue|review only|adopt PR|your PR",
-  "session": "sp…|w…|null", "backend": "hc|herdr|null", "pane": "t7|null", "path": "/…|null",
+  "session": "tb…|w…:t…|sp…|w…|null", "space": "sp…|null", "backend": "hc|herdr|null", "pane": "t7|null", "path": "/…|null",
   "branch": "…", "pr": 12, "stack": 1, "open": true, "parked": false, "tracked": true,
   "actions": [Action]                               // exactly the TUI's allowed actions for this row
 }
 ```
+`space` is the herdr-app space holding an hc row's session: the Octopilot space for a worker tab (session `tb…`),
+or the session itself for an old-style session in its own space. Null for a herdr TUI row (its `w…:t…` tabs included). A remote focus selects the
+space, then the tab.
 
 Action:
 ```jsonc
 {"id": "remove", "key": "Delete", "label": "remove",
- "confirm": "⚠ its agent is working -- press del again to remove owner/repo#12 (workspace and worktree deleted, untracked)" /* null = no confirm */,
+ "confirm": "⚠ its agent is working -- press del again to remove owner/repo#12 (tab and worktree deleted, untracked)" /* null = no confirm; "workspace and worktree deleted" for a workspace session, "worktree kept" with none */,
  "args": ["repo", "question", "read_only"] /* investigate only */}
 ```
 Row action ids (TUI key): `focus` (Enter), `peek` (v), `shell` (t), `browser` (o), `go` (g), `no` (n), `grant` (R),
@@ -130,9 +142,17 @@ filtering uses `hidden`/`open` fields).
 ## Actions: `dashboard.sh --action <id> [key] [--arg name=value …]`
 
 Runs the same code path as the TUI key (refusals, messages, wind-down rules). Prints one JSON line:
-`{"ok": true, "message": "queued for the orchestrator: go …"}`.
-`go` past wind-down without `--arg confirmed=1` returns `{"ok": false, "kitchen": true, "message": "🍳 The kitchen is closed (past 16:00)"}`;
-the mod shows the kitchen-closed dialog and re-sends with `confirmed=1`. Same for `investigate`.
+`{"ok": true, "message": "queued 'go …'"}`.
+`go` past wind-down without `--arg confirmed=1` returns `{"ok": false, "kitchen": true, "holds": ["wind-down"], "message": "🍳 The kitchen is closed (past 16:00)"}`;
+the mod shows the held-start dialog ("Start held") and re-sends with `confirmed=1`. Same for `investigate`.
+At the cap (slots in use, as the header counts them, plus items started since the snapshot, `>= MAX_ACTIVE`) a go or
+investigate gets the same answer with `"holds": ["cap"]` and `"message": "⚠ At the cap: 6/6 slots in use"`; both holds
+at once give both lines in one message (joined by `\n`) and `"holds": ["wind-down", "cap"]`. `kitchen` means
+"held, needs a second press" for either hold.
+The second press re-sends with `--arg confirmed=1 --arg holds=wind-down,cap`, the names the dialog showed. Each hold
+that applies then gets its marker (`(confirmed past wind-down)`, `(confirmed over cap)`) and nothing else. If a hold
+that was not shown has come up since, the answer is the held one again (`kitchen: true`, with the current `holds`)
+and nothing is queued. `confirmed=1` alone is the older form: it confirms every hold that applies now.
 `refresh` kicks the headless daemon (it must start a GitHub refresh within a second); with no daemon running
 (view.json older than 15 s) it returns `{"ok": false, "message": "no headless dashboard running"}`.
 Every call prints exactly one JSON line and exits 0, usage errors included. A row action on a row whose
@@ -142,7 +162,7 @@ Focus/peek/shell on hc rows may be done by the mod directly with `run()` using `
 
 ## Speech and chat (scan.py)
 
-Both agents are started by open-gui.sh with `claude --session-id <uuid>` and labelled
+The prompter and the code agent are started by open-gui.sh with `claude --session-id <uuid>` and labelled
 `octopilot.session=<uuid>`. The transcript is found from the claude running in the
 terminal: `hc get <t> --json` gives `foreground.pid` (when `foreground.name` is
 `claude`), `~/.claude/sessions/<pid>.json` gives its `sessionId` (used only when its
@@ -150,13 +170,15 @@ terminal: `hc get <t> --json` gives `foreground.pid` (when `foreground.name` is
 `~/.claude/projects/*/<sessionId>.jsonl`. A `/clear` starts a new session, so this
 follows it; the `octopilot.session` label is only the fallback when no claude is in
 the foreground (a live session with no transcript yet gives none, not the stale
-label). There is no guess from the terminal's folder (the orchestrator and the
-prompter share one). The chat reports the session it read; with `--after`, a session
+label). There is no guess from the terminal's folder (other claude sessions, the
+user's own included, may run in the prompter's folder). The chat reports the session it read; with `--after`, a session
 that changed (unknown anchor, or no transcript yet) answers `"reset": true`.
 
-- `scan.sh speech --json` → `{"agent": "hc:t7", "terminal": "t7", "status": "working|blocked|idle|done|offline",
-  "paused": false, "text": "<last orchestrator assistant message, markdown>", "at": "<ISO>", "seq": 41}`
-  (`seq` is a CRC-32 of the message id and text: it changes whenever the text does).
+- `scan.sh speech --json` → `{"agent": "hc:t7", "terminal": "t7", "status": "working|blocked|idle|offline",
+  "paused": false, "text": "- <engine line>\n- …", "at": "<ISO>", "seq": 41}`
+  (`text` and `at` are `header.engine.last`'s lines as `- ` bullets and its time. `working` while the engine acts,
+  `blocked` for a hung run, `offline` with no view or the engine off. `seq` is a CRC-32 of `at` and the text: it
+  changes whenever they do).
 - `scan.sh chat --json [--after <id>] [--limit 50]` → `{"terminal": "t8", "session": "<uuid>", "status": "…",
   "blocked": {"kind": "permission|question|auth", "msg": "…"} | null, "reset": false,
   "messages": [{"id": "<transcript uuid>", "role": "user|assistant", "text": "markdown", "at": "<ISO>", "tools": ["Bash: $A status"]}]}`.
