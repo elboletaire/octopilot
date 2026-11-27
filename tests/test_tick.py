@@ -167,15 +167,45 @@ class TickWhileOctopilotClosedTest(unittest.TestCase):
             with open(scan.STATE_FILE) as fh:
                 self.assertEqual(fh.read(), before)
             self.assertFalse(os.path.exists(scan.SNAPSHOT_FILE))
-            self.assertFalse(os.path.exists(scan.EVENTS_FILE))
+            self.assertEqual([e["kind"] for e in events()], ["closed"])
         self.assertEqual((code, out), (0, "octopilot closed: its space is gone; "
                                           "run Open Octopilot\n"))
+
+    def test_the_notice_and_the_closed_event_come_once_per_closing(self):
+        with fake.fake_world(octopilot_closed=True, pr_detail=pr_detail):
+            scan.save(new_state())
+            _, first = run_tick()
+            _, again = run_tick()
+            self.assertIn("octopilot closed", first)
+            self.assertEqual(again, "")
+            self.assertEqual([e["kind"] for e in events()], ["closed"])
+
+    def test_a_quiet_closed_tick_prints_nothing_but_logs_the_closing(self):
+        with fake.fake_world(octopilot_closed=True, pr_detail=pr_detail):
+            scan.save(new_state())
+            code, out = run_tick("--quiet")
+            self.assertEqual((code, out), (0, ""))
+            self.assertEqual([e["kind"] for e in events()], ["closed"])
+
+    def test_the_space_back_clears_the_marker_and_the_tick_runs_again(self):
+        with fake.fake_world(pr_detail=pr_detail):
+            scan.save(new_state())
+            with mock.patch.object(scan, "octopilot_closed", return_value=True):
+                run_tick("--quiet")
+            self.assertTrue(os.path.exists(scan.CLOSED_FILE))
+            code, out = run_tick("--quiet")
+            self.assertFalse(os.path.exists(scan.CLOSED_FILE))
+            with open(scan.STATE_FILE) as fh:
+                saved = json.load(fh)
+        self.assertEqual((code, out), (0, ""))
+        self.assertEqual(saved["items"][KEY]["pending_rerequest"], HEAD)
 
     def test_tick_runs_as_today_when_herdr_app_does_not_answer(self):
         with mock.patch.object(scan, "OCTOPILOT_BACKEND", "hc"), \
                 mock.patch.object(scan.HC, "spaces", return_value=None), \
                 mock.patch.object(scan, "own_labels", side_effect=headless_in("sp1")), \
-                fake.fake_world(pr_detail=pr_detail):
+                fake.fake_world(octopilot_closed=scan.octopilot_closed,
+                                pr_detail=pr_detail):
             scan.save(new_state())
             code, out = run_tick("--quiet")
             with open(scan.STATE_FILE) as fh:

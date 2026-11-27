@@ -66,6 +66,8 @@ VIEW_FILE = os.path.join(os.path.dirname(STATE_FILE), "view.json")
 VIEW_STALE_SECS = 15  # three times dashboard.py's VIEW_EVERY
 # One tick at a time: a tick that finds it held returns at once.
 TICK_LOCK = os.path.join(os.path.dirname(STATE_FILE), "tick.lock")
+# Present while the GUI's Octopilot space is closed (see octopilot_closed()).
+CLOSED_FILE = os.path.join(os.path.dirname(STATE_FILE), "space-closed")
 # Held by each engine phase that acts (engine.run_rows), taken after the state
 # lock is released: its steps take that lock one at a time.
 EXEC_LOCK = os.path.join(os.path.dirname(STATE_FILE), "exec.lock")
@@ -3810,11 +3812,20 @@ def tick(args):
         except OSError:
             print("tick already running")
             return 0
-        with locked():
-            if octopilot_closed():
-                # Every worker tab is gone with the space: keep the rows, untouched.
+        if octopilot_closed():
+            # Every worker tab is gone with the space: keep the rows, untouched.
+            # The check calls herdr-app, so it runs outside the state lock.
+            with locked():
+                entered = not os.path.exists(CLOSED_FILE)
+                if entered:
+                    open(CLOSED_FILE, "w").close()
+                    log_event("closed")
+            if entered and "--quiet" not in args:
                 print("octopilot closed: its space is gone; run Open Octopilot")
-                return 0
+            return 0
+        with locked():
+            if os.path.exists(CLOSED_FILE):
+                os.remove(CLOSED_FILE)
             state = load()
             info = {}
             rows, active, n, untracked = scan(state, refresh="--refresh" in args,
@@ -3874,6 +3885,10 @@ def drain(args):
     """drain [--quiet] [--plan]: handle the inbox's requests in order, then the
     queued sends. The dashboard runs it quiet when a request lands; --quiet
     hides only the off and busy notices, never the outcome lines."""
+    if octopilot_closed():
+        if "--quiet" not in args:
+            print("octopilot closed: nothing drained")
+        return 0
     mode = engine_mode(args)
     if mode == "off":
         if "--quiet" not in args:
