@@ -664,12 +664,16 @@ class HcBackend:
 
     def target(self, it):
         """The terminal of an item's agent: the one labelled with its name, else
-        any agent in its space."""
-        found = [a for a in self.agents() if session_matches(a, it.get("session"))]
+        any agent in its space, else the parked terminal of that name."""
+        agents = self.agents()
+        found = [a for a in agents if session_matches(a, it.get("session"))]
         for a in found:
             if it.get("agent") and a["agent"] == it["agent"]:
                 return a["pane"]
-        return found[0]["pane"] if found else None
+        if found:
+            return found[0]["pane"]
+        return next((a["pane"] for a in agents
+                     if it.get("agent") and a["agent"] == it["agent"]), None)
 
     def find(self, name):
         """-> "hc:<terminal>" of the live terminal labelled octopilot.agent=<name>,
@@ -1068,14 +1072,15 @@ def all_agents():
     return [a for backend in BACKENDS.values() for a in backend.agents()]
 
 
-def parked_agent(it, session):
-    """The hc agent of an item whose session is a herdr-app tab or space that is
-    gone, when herdr-app parked the agent's terminal (no space or tab left, its
-    claude still running). None otherwise."""
+def parked_agent(it, session, open_ws, agents):
+    """The herdr-app agent of an item whose session is gone, when its terminal is
+    labelled with the agent's name and no open tab or space holds it: herdr-app
+    parked it (terminal.park), its claude still runs. agents() gives HC.agents().
+    None otherwise."""
     if backend_for(session) is not HC or not it.get("agent"):
         return None
-    return next((a for a in HC.agents()
-                 if a.get("agent") == it["agent"] and not a.get("ids")), None)
+    return next((a for a in agents() if a.get("agent") == it["agent"]
+                 and not (set(a.get("ids") or []) & open_ws)), None)
 
 
 def session_age(s, live):
@@ -1526,6 +1531,14 @@ def scan(state, refresh=False, info=None):
     # ---- tracked items
     # Every item's session: a re-home never takes one of them.
     held = {it.get("session") for it in items.values()}
+    # herdr-app's agents, listed on first use this scan (only a gone item asks).
+    hc_listed = []
+
+    def hc_agents():
+        if not hc_listed:
+            hc_listed.append(HC.agents())
+        return hc_listed[0]
+
     for k, it in list(items.items()):
         slug = k.split("#")[0].split("!")[0].split("?")[0]
         d = details.get(k)
@@ -1533,37 +1546,32 @@ def scan(state, refresh=False, info=None):
         smeta = f"session={sid(sess)}"
 
         # A session closed by hand: an item whose agent is live elsewhere follows
-        # it (rehome_of); otherwise it is untracked and frees its slot. A merged
-        # PR still goes through MERGED below. Only when its backend answered:
-        # silence is not removal.
+        # it (rehome_of); an agent herdr-app parked stays tracked (parked_term, below);
+        # otherwise it is untracked and frees its slot. A merged PR still goes
+        # through MERGED below. Only when its backend answered: silence is not removal.
+        parked_term = None
         if sess and sess not in open_ws \
                 and listed(answered, sess) and not (
                 it.get("pr") and d and d.get("state") == "MERGED"):
             home = rehome_of(it, sessions, live, open_ws, held)
-            term = parked_agent(it, sess) if home is None else None
-            if term:
-                # herdr-app parked its terminal: no tab to follow, but the claude runs.
-                active += 1
-                rows.append(("WORKING", k, f"mode={it['mode']} {smeta} parked in "
-                                           "herdr-app with no tab: `herdr-app do "
-                                           f"terminal.keep --terminal {term['pane']}` "
-                                           "shows it"))
-                continue
             if home is None:
-                items.pop(k)
-                rows.append(("GONE", k, f"{smeta} removed outside octopilot "
-                                        "-> untracked, slot freed"))
-                continue
-            # Its agent is live in another tab or space: the item follows it.
-            sess, space = home
-            held.add(sess)
-            it["session"], it["backend"] = sess, backend_for(sess).name
-            if space:
-                it["space"] = space
+                parked_term = parked_agent(it, sess, open_ws, hc_agents)
+                if parked_term is None:
+                    items.pop(k)
+                    rows.append(("GONE", k, f"{smeta} removed outside octopilot "
+                                            "-> untracked, slot freed"))
+                    continue
             else:
-                it.pop("space", None)
-            smeta = f"session={sid(sess)}"
-            rehomed.append((k, sess))
+                # Its agent is live in another tab or space: the item follows it.
+                sess, space = home
+                held.add(sess)
+                it["session"], it["backend"] = sess, backend_for(sess).name
+                if space:
+                    it["space"] = space
+                else:
+                    it.pop("space", None)
+                smeta = f"session={sid(sess)}"
+                rehomed.append((k, sess))
 
         if it.get("pr") and d and d.get("state") == "MERGED":
             # A fix stack whose bottom merged, with layers still open, is
@@ -1600,6 +1608,20 @@ def scan(state, refresh=False, info=None):
                                           f"layer=#{cl['pr']} -> not merged; "
                                           "session left alone"))
                 continue
+
+        if parked_term:
+            # herdr-app parked the agent's terminal: nothing to send to until it is
+            # shown again, so no prompt goes out, and a parked card stays in Done.
+            if it.get("parked"):
+                rows.append(("DONE", k, f"mode={it['mode']} {smeta} parked by you "
+                                        "-> waiting on merge or new activity"))
+                continue
+            active += 1
+            rows.append(("WORKING", k, f"mode={it['mode']} {smeta} parked in herdr-app "
+                                       "with no tab: `herdr-app do terminal.keep "
+                                       f"--terminal {parked_term['pane']}` shows it; "
+                                       "feedback waits until then"))
+            continue
 
         if it.get("phase") == "booting":
             active += 1
@@ -2468,6 +2490,18 @@ def cleanup_item(state, key_):
     lines, discard_error = [], None
     sess = it.get("session")
     backend = backend_for(sess)
+    if backend is HC:
+        # A parked terminal keeps its claude running in no tab: end it before
+        # its worktree goes, or keep the item tracked when that fails.
+        parked = parked_agent(it, sess, all_sessions()[2], HC.agents)
+        if parked:
+            code, _, raw = hc(["kill", parked["pane"]])
+            if code != 0:
+                return {"ok": False, "msg": None, "siblings": [], "base": None,
+                        "discard_error": None,
+                        "error": f"could not end parked terminal {parked['pane']}: "
+                                 f"{raw}; {key_} stays tracked"}
+            lines.append(f"hc kill {parked['pane']}: ok")
     if backend:
         code, raw = backend.discard(sess, it.get("worktree"))
         lines.append(f"{remove_label_for(backend, sess)} {sess}: "

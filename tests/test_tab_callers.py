@@ -164,6 +164,7 @@ class RehomeTest(unittest.TestCase):
             rows = scan.scan(state)[0]
         self.assertEqual([r[0] for r in rows], ["WORKING"])
         self.assertIn("terminal.keep --terminal t9", rows[0][2])
+        self.assertIn("feedback waits", rows[0][2])
         self.assertEqual(state["items"][KEY]["session"], TAB)
 
     def test_the_real_check_keeps_a_parked_agents_item_tracked(self):
@@ -174,6 +175,36 @@ class RehomeTest(unittest.TestCase):
                                 parked_agent=REAL_PARKED_AGENT, pr_detail=pr_detail):
             rows = scan.scan(state)[0]
         self.assertEqual([r[0] for r in rows], ["WORKING"])
+        self.assertIn(KEY, state["items"])
+
+    def test_herdr_app_is_listed_once_per_scan_for_gone_items(self):
+        state = tab_item()
+        state["items"]["octo/app#6"] = {"mode": "comment", "pr": 6, "branch": "feat/y",
+                                        "session": "tb3", "agent": "ap-app-6",
+                                        "phase": "working"}
+        with mock.patch.object(scan.HC, "agents", return_value=[]) as agents, \
+                fake.fake_world(all_sessions=([], {"hc"}, {SPACE}), backend_for=scan.HC,
+                                parked_agent=REAL_PARKED_AGENT, pr_detail=pr_detail):
+            scan.scan(state)
+        self.assertEqual(agents.call_count, 1)
+
+    def test_a_parked_closed_pr_is_still_closed(self):
+        state = tab_item(pr=5)
+        parked = {"session": None, "ids": [], "agent": "ap-app-5", "pane": "t9"}
+        closed = {"headRefOid": "abc1234", "state": "CLOSED"}
+        with fake.fake_world(all_sessions=([], {"hc"}, {SPACE}), backend_for=scan.HC,
+                             parked_agent=parked, pr_detail=lambda slug, pr: closed):
+            rows = scan.scan(state)[0]
+        self.assertEqual([r[0] for r in rows], ["CLOSED"])
+        self.assertIn(KEY, state["items"])
+
+    def test_a_parked_item_you_parked_is_done_and_holds_no_slot(self):
+        state = tab_item(parked={"at": 1, "requested": False, "head": ""})
+        parked = {"session": None, "ids": [], "agent": "ap-app-5", "pane": "t9"}
+        with fake.fake_world(all_sessions=([], {"hc"}, {SPACE}), backend_for=scan.HC,
+                             parked_agent=parked, pr_detail=pr_detail):
+            rows = scan.scan(state)[0]
+        self.assertEqual([r[0] for r in rows], ["DONE"])
         self.assertIn(KEY, state["items"])
 
     def test_a_parked_agent_shown_in_a_tab_is_rehomed(self):
@@ -191,20 +222,28 @@ class RehomeTest(unittest.TestCase):
 
 
 class ParkedAgentTest(unittest.TestCase):
-    def parked(self, agents, session=TAB, backend=scan.HC):
+    def parked(self, agents, session=TAB, open_ws=frozenset({SPACE}), backend=scan.HC):
         it = tab_item()["items"][KEY]
-        with mock.patch.object(scan.HC, "agents", return_value=agents), \
-                mock.patch.object(scan, "backend_for", return_value=backend):
-            return scan.parked_agent(it, session)
+        with mock.patch.object(scan, "backend_for", return_value=backend):
+            return scan.parked_agent(it, session, set(open_ws), lambda: agents)
 
     def test_a_terminal_with_no_space_or_tab_is_parked(self):
         agents = [{"session": None, "ids": [], "agent": "ap-app-5", "pane": "t9"}]
         self.assertEqual(self.parked(agents)["pane"], "t9")
 
-    def test_a_terminal_in_a_tab_is_not_parked(self):
+    def test_a_terminal_whose_tab_is_closed_is_parked(self):
+        agents = [{"session": None, "ids": [MOVED], "agent": "ap-app-5", "pane": "t9"}]
+        self.assertEqual(self.parked(agents, open_ws={SPACE})["pane"], "t9")
+
+    def test_a_terminal_whose_space_is_still_open_is_not_parked(self):
         agents = [{"session": SPACE, "ids": [SPACE, MOVED], "agent": "ap-app-5",
                    "pane": "t9"}]
-        self.assertIsNone(self.parked(agents))
+        self.assertIsNone(self.parked(agents, open_ws={SPACE}))
+
+    def test_a_terminal_in_an_open_tab_is_not_parked(self):
+        agents = [{"session": SPACE, "ids": [SPACE, MOVED], "agent": "ap-app-5",
+                   "pane": "t9"}]
+        self.assertIsNone(self.parked(agents, open_ws={SPACE, MOVED}))
 
     def test_another_agents_parked_terminal_is_not_this_items(self):
         agents = [{"session": None, "ids": [], "agent": "ap-app-9", "pane": "t9"}]
@@ -213,6 +252,38 @@ class ParkedAgentTest(unittest.TestCase):
     def test_a_session_that_is_not_herdr_app_is_never_parked(self):
         agents = [{"session": None, "ids": [], "agent": "ap-app-5", "pane": "t9"}]
         self.assertIsNone(self.parked(agents, session="w1", backend=None))
+
+
+class ParkedTargetAndCleanupTest(unittest.TestCase):
+    PARKED = {"session": None, "ids": [], "agent": "ap-app-5", "pane": "t9"}
+
+    def test_a_parked_terminal_is_the_items_target(self):
+        it = tab_item()["items"][KEY]
+        with mock.patch.object(scan.HC, "agents", return_value=[self.PARKED]):
+            self.assertEqual(scan.HC.target(it), "t9")
+
+    def test_a_parked_cleanup_ends_the_terminal_before_the_discard(self):
+        state = tab_item()
+        with mock.patch.object(scan, "hc", return_value=(0, {}, "")) as hc_call, \
+                mock.patch.object(scan.HC, "discard", return_value=(0, "")) as discard, \
+                fake.fake_world(all_sessions=([], {"hc"}, {SPACE}), backend_for=scan.HC,
+                                parked_agent=self.PARKED):
+            r = scan.cleanup_item(state, KEY)
+        hc_call.assert_called_once_with(["kill", "t9"])
+        discard.assert_called_once()
+        self.assertIn("hc kill t9: ok", r["msg"])
+        self.assertNotIn(KEY, state["items"])
+
+    def test_a_parked_cleanup_keeps_the_item_when_the_kill_fails(self):
+        state = tab_item()
+        with mock.patch.object(scan, "hc", return_value=(1, None, "busy")), \
+                mock.patch.object(scan.HC, "discard", return_value=(0, "")) as discard, \
+                fake.fake_world(all_sessions=([], {"hc"}, {SPACE}), backend_for=scan.HC,
+                                parked_agent=self.PARKED):
+            r = scan.cleanup_item(state, KEY)
+        discard.assert_not_called()
+        self.assertFalse(r["ok"])
+        self.assertIn(KEY, state["items"])
 
 
 class RehomeEventsTest(unittest.TestCase):
