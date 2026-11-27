@@ -49,7 +49,7 @@ Mods treat a view whose `generated_at` is older than 15 s as stale (no headless 
 {
   "v": 1, "generated_at": 1732530000.0,           // epoch seconds
   "header": {
-    "needs": 2, "running": 3, "pick": 14,           // running counts running + next tick
+    "needs": 2, "running": 3, "hold": 1, "pick": 14, // running counts the Running column only; hold = On hold
     "active": 4, "max_active": 6, "untracked": 1,
     "github": {"state": "ok|stale|old|refreshing|none", "age_s": 42, "error": null},
     "last_tick_s": 120,                             // seconds ago, null = never
@@ -62,11 +62,11 @@ Mods treat a view whose `generated_at` is older than 15 s as stale (no headless 
     "paused": false,
     "wind_down": {"state": "yes|no|off", "at": "16:00"}
   },
-  "columns": [                                      // always these four, in this order
-    {"id": "running", "title": "🟡 Running",   "entries": [Entry]},
-    {"id": "orch",    "title": "⏭ Next tick", "entries": [Entry]},
-    {"id": "needs",   "title": "🔴 Needs you", "entries": [Entry]},
-    {"id": "done",    "title": "💤 Done",      "entries": [Entry], "hidden": 3}  // hidden = not shown unless show_all_done
+  "columns": [                                      // always these four, in this order; mods find them by id and skip unknown ids
+    {"id": "running", "title": "🟡 Running", "hint": "agents at work, their own CI waits and review loops included; ⏭ = the engine acts on it next", "entries": [Entry]},
+    {"id": "needs",   "title": "🔴 Needs you", "hint": "waiting on you", "entries": [Entry]},
+    {"id": "hold",    "title": "💤 On hold", "hint": "waiting on someone else, or held by you; holds no slot", "entries": [Entry]},
+    {"id": "done",    "title": "✔ Done",      "hint": "finished; holds no slot", "entries": [Entry], "hidden": 3}  // hidden = its entry count; shown only when the user toggles D
   ],
   "pick": [ {"repo": "owner/repo", "entries": [Entry]} ],   // scan order, never re-sorted; Entry.index = the # shown
   "notes": [ {"kind": "UNCLONED|STALE|UNKNOWN", "key": "owner/repo#12"} ],
@@ -76,6 +76,11 @@ Mods treat a view whose `generated_at` is older than 15 s as stale (no headless 
   "global_actions": [Action]                        // refresh, pause|resume, investigate, toggle_done, prompter
 }
 ```
+
+A card the engine is about to act on (MERGED, RESTACK, REVIEW, BOOTING, FEEDBACK) stays in Running with an `engine`
+badge, unless its agent waits for the user (then Needs you). A card whose engine action failed is in Needs you.
+Held by you or waiting on a reviewer or author is On hold; a finished card is Done. Each column's entries are the
+ones whose `section` is that column's id.
 
 Last (the engine's last output, `header.engine.last`): `{"at": 1732530000.0, "verb": "tick|drain", "lines": ["…"]}`,
 the last 12 non-empty lines the engine command printed, `verb` being the command that printed them.
@@ -103,6 +108,8 @@ Pan (takoyaki's pan and chef, from feed.ts `readKitchen()` and register.tsx `fra
                                                     // one per tracked item not DONE, oldest first, at most holes
   "shelf": [{"key": "owner/repo#7", "label": "repo#7"}],   // the oldest 8 DONE items (scene.ts boxed.slice(0, 8)), oldest first
   "shelf_total": 3,                                 // all DONE items, for "N on the shelf" (register.tsx)
+  "hold": [{"key": "owner/repo#9", "label": "repo#9"}],   // the On hold items, oldest first, capped like shelf (8)
+  "hold_total": 1,                                  // all On hold items
   "chef": {"mood": "happy", "since": 1732530000.0,  // the transient mood, else the rest mood
            "ms": 4000,                              // the transient mood's duration; 0 when resting
            "resting": "sleep|busy|doze|idle"}       // paused, busy, idle for 10 min (doze), else idle
@@ -119,10 +126,17 @@ Entry:
   "driver": "agent|orchestrator|null",              // who drives the item; rounds is 0 (not null) for agent
   "note": "…", "pick_kind": "issue|review only|adopt PR|your PR",
   "session": "tb…|w…:t…|sp…|w…|null", "space": "sp…|null", "backend": "hc|herdr|null", "pane": "t7|null", "path": "/…|null",
-  "branch": "…", "pr": 12, "stack": 1, "open": true, "parked": false, "tracked": true,
+  "branch": "…", "pr": 12, "stack": 1, "open": true, "tracked": true,
+  "hold": {"by": "you", "reason": "waiting on the schema"} /* or null; by: you (held by the user), reviewer, author */,
+  "parked": true,                                   // alias: true when hold.by is "you"
+  "engine": {"action": "cleanup", "label": "cleaning up", "held": false} /* the ⏭ badge: the engine's next action on this card, or null; held = true while the engine is paused */,
+  "cause": "report:failed:1732530000" /* the reason string notifications key on, or null */,
+  "report": "blocked|failed|stalled|capped|held|ready|null" /* the agent's live report state (cause of a BLOCKED row, held of a HOLD row), else null */,
   "actions": [Action]                               // exactly the TUI's allowed actions for this row
 }
 ```
+`kind` is one of the scan's row kinds, now including `BLOCKED` (the agent reported blocked, failed or stalled; `report` gives which) and
+`HOLD` (held by you, or waiting on a reviewer or author). `DONE` is finished only.
 `space` is the herdr-app space holding an hc row's session: the Octopilot space for a worker tab (session `tb…`),
 or the session itself for an old-style session in its own space. Null for a herdr TUI row (its `w…:t…` tabs included). A remote focus selects the
 space, then the tab.
@@ -134,10 +148,12 @@ Action:
  "args": ["repo", "question", "read_only"] /* investigate only */}
 ```
 Row action ids (TUI key): `focus` (Enter), `peek` (v), `shell` (t), `browser` (o), `go` (g), `no` (n), `grant` (R),
-`rereview` (e), `ack` (x), `detach` (z), `park` / `unpark` (d), `remove` (Del, or Shift+Backspace on a Mac).
+`rereview` (e), `ack` (x), `detach` (z), `hold` / `unhold` (d; `park` / `unpark` are accepted aliases for `--action`),
+`remove` (Del, or Shift+Backspace on a Mac). `ack` marks a PUSHED row, or a read-only investigation's `ready` report,
+as read: it then goes to Done.
 Global ids: `refresh` (r), `pause` / `resume` (P), `investigate` (i), `prompter` (a). `toggle_done` (D) and
-`fold_all` (C), folding and selection are mod-side only (the mod passes `--show-all-done` state to nothing: Done
-filtering uses `hidden`/`open` fields).
+`fold_all` (C), folding and selection are mod-side only. The Done column shows none of its entries unless the user
+toggles D (the mod shows "+N hidden" from `hidden`).
 
 ## Actions: `dashboard.sh --action <id> [key] [--arg name=value …]`
 
