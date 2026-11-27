@@ -293,17 +293,13 @@ class Hosts:
         return scan.send_to(address, text)
 
     def focus(self, session, live):
-        """Bring the item's agent forward in its own backend, or its workspace
-        or space."""
+        """Bring the session forward in its own backend: its tab, space or
+        workspace, and the item's agent in it."""
+        backend = scan.backend_for(session)
+        if backend is None:
+            return False
         target = (live.get(session) or {}).get("pane")
-        if scan.backend_for(session) is scan.HC:
-            if target:
-                return scan.HC.focus(session, target, timeout=10)[0]
-            code, _, _ = scan.app_do("space.select", ["--id", session], timeout=10)
-            return code == 0
-        args = ["agent", "focus", target] if target else \
-            ["workspace", "focus", session]
-        return scan.herdr(args, timeout=10)[0] == 0
+        return backend.focus(session, target, timeout=10)[0]
 
     def publish(self, entries):
         """Octopilot's view of each herdr agent, as pane metadata tokens the
@@ -760,12 +756,18 @@ class Model:
         else:
             pick_kind = "your PR"
         sinfo = sessions.get(sess, {}) if sess else {}
+        # herdr-app's space holds the session; a tab is not one. The TUI has none.
+        space = None
+        if scan.backend_for(sess) is scan.HC:
+            space = (sinfo.get("space") or it.get("space")
+                     or (None if scan.is_tab(sess) else sess))
         pr = it.get("pr") or (split_key(key)[1] if split_key(key)[2] == "pr"
                               else None)
         return {"kind": kind, "key": key, "title": row.get("title") or
                 it.get("branch") or "", "url": row.get("url"),
                 "checks": row.get("checks"), "draft": row.get("draft"),
-                "session": sess, "agent": agent_state, "stalled": stalled,
+                "session": sess, "space": space, "agent": agent_state,
+                "stalled": stalled,
                 "rounds": it.get("review_rounds"), "driver": it.get("driver"),
                 "quiet": quiet, "note": note, "needs": needs,
                 "pick_kind": pick_kind, "path": sinfo.get("path"),
@@ -939,7 +941,7 @@ def focus_row(model, e):
         # From the GUI, a TUI session comes forward in the herdr TUI, not here: say so.
         gui_on_tui = scan.OCTOPILOT_BACKEND == "hc" and scan.backend_for(e["session"]) is scan.HERDR
         return Result(True, "focused in the herdr TUI (this session lives there)" if gui_on_tui else "")
-    return Result(False, f"could not focus workspace {e['session']}")
+    return Result(False, f"could not focus session {e['session']}")
 
 
 def peek_row(model, e):
@@ -964,7 +966,9 @@ def shell_row(model, e, suspend=None):
     herdr popup, or else `suspend` runs one in the dashboard's own terminal."""
     path = e["path"]
     if scan.backend_for(e["session"]) is scan.HC:
-        code, _, raw = scan.app_do("tab.new", ["--space", e["session"],
+        if not e["space"]:
+            return Result(False, "no space for this row")
+        code, _, raw = scan.app_do("tab.new", ["--space", e["space"],
                                                "--folder", path], timeout=10)
         if code != 0:
             return Result(False, f"new tab failed: {raw[:100]}")
@@ -995,8 +999,11 @@ def row_refusal(model, aid, e):
     if aid == "focus":
         return None if e["session"] else "no session for this row"
     if aid == "shell":
-        return (None if e["path"] and os.path.isdir(e["path"])
-                else "no worktree for this row")
+        if not (e["path"] and os.path.isdir(e["path"])):
+            return "no worktree for this row"
+        if scan.backend_for(e["session"]) is scan.HC and not e["space"]:
+            return "no space for this row"
+        return None
     if aid in ("go", "no"):
         return None if kind == "PROPOSE" else \
             "go/no only applies to Pick next rows"
@@ -1068,7 +1075,8 @@ def row_confirm(model, aid, e):
         busy = ("⚠ its agent is working -- " if e["kind"] in
                 ("WORKING", "BOOTING", "REVIEW", "FEEDBACK") else "")
         # An item without a workspace is only untracked by cleanup.
-        gone = ("workspace and worktree deleted" if it.get("session")
+        gone = ("tab and worktree deleted" if scan.is_tab(it.get("session"))
+                else "workspace and worktree deleted" if it.get("session")
                 else "worktree kept")
         return f"{busy}press del (⌫) again to remove {key} ({gone}, untracked)"
     return None
@@ -1342,7 +1350,7 @@ def entry_view(model, e, section, index=None):
         "quiet_s": None if e["quiet"] is None else int(e["quiet"]),
         "stalled": e["stalled"], "needs": e["needs"], "why": e["why"],
         "note": e["note"], "pick_kind": e["pick_kind"],
-        "session": e["session"],
+        "session": e["session"], "space": e["space"],
         "backend": backend.name if backend else None,
         "pane": e["pane"], "path": e["path"], "branch": e["branch"],
         "pr": int(pr) if str(pr or "").isdigit() else None,

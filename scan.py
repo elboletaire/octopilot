@@ -440,7 +440,7 @@ class HerdrBackend:
                               "--timeout", "60000"], timeout=90)
         return code, raw
 
-    def focus(self, session, target):
+    def focus(self, session, target, timeout=60):
         """The agent's pane, else the tab or workspace the session is."""
         if target:
             args = ["agent", "focus", target]
@@ -448,7 +448,7 @@ class HerdrBackend:
             args = ["tab", "focus", session]
         else:
             args = ["workspace", "focus", session]
-        code, _, raw = herdr(args)
+        code, _, raw = herdr(args, timeout=timeout)
         return code == 0, raw
 
     def rename(self, entry, name):
