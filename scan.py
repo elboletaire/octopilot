@@ -3567,24 +3567,35 @@ SHELLS = ("zsh", "bash", "sh", "fish")
 def terminal_state(term, now_ms):
     """Whether a terminal is a bare shell: "bare" for a shell started more than
     BARE_SHELL_MS ago, "young" for one still starting, else "busy" (anything
-    else in the foreground, or a terminal hc cannot read)."""
+    else in the foreground, or a terminal hc cannot read). Under the launcher
+    (OCTOPILOT_LAUNCHER_LOCKED=1, which holds the engine's locks) no shell is
+    still starting, so every shell is bare."""
     code, info, _ = hc(["get", term, "--json"], timeout=10)
     if code != 0 or not isinstance(info, dict):
         return "busy"
     if (info.get("foreground") or {}).get("name") not in SHELLS:
         return "busy"
+    if os.environ.get("OCTOPILOT_LAUNCHER_LOCKED") == "1":
+        return "bare"
     if now_ms - (info.get("created_ms") or 0) > BARE_SHELL_MS:
         return "bare"
     return "young"
 
 
 def end_terminal(term):
-    """hc kill, then hc rm, of a bare shell -> (code, raw) of the first failure."""
-    for args in (["kill", term], ["rm", term]):
-        code, _, raw = hc(args)
-        if code != 0:
-            return code, raw
-    return 0, ""
+    """hc kill, wait (bounded) until hc lists the terminal no more, then hc rm of a
+    bare shell -> (code, raw) of the first failure."""
+    code, _, raw = hc(["kill", term])
+    if code != 0:
+        return code, raw
+    for _ in range(10):
+        code, data, _ = hc(["ls", "--json"], timeout=10)
+        if code != 0 or not any(t.get("address") == term
+                                for t in (data or {}).get("terminals", [])):
+            break
+        time.sleep(0.5)
+    code, _, raw = hc(["rm", term])
+    return code, raw
 
 
 def session_terminals(spaces, session):
@@ -3618,73 +3629,81 @@ def restore_model(k, it):
     template pins (see spawn_item and boot_template)."""
     if it.get("model"):
         return it["model"]
+    # The template choice of spawn_item, in its order.
     _, _, kind = split_key(k)
-    if kind == "issue":
-        tmpl = "work"
-    elif kind == "investigate":
-        tmpl = "investigate"
-    elif it.get("stack"):
+    tmpl = {"issue": "work", "investigate": "investigate"}.get(
+        kind, "review-fix" if it.get("mode") == "fix" else "review-comment")
+    if kind == "pr" and it.get("mode") == "comment" and not it.get("stack") \
+            and it.get("reviewed_sha"):
+        tmpl = "re-review"
+    if it.get("stack"):
         tmpl = "adopt-stack" if it.get("mode") == "fix" else "review-stack"
-    elif it.get("mode") == "fix":
-        tmpl = "review-fix"
-    else:
-        tmpl = "review-comment"
+    if it.get("read_only"):
+        tmpl = "investigate-readonly"
     return MODEL_FOR.get(tmpl, "")
 
 
 def restore_item(state, k, it, ctx):
     """Reopen one herdr-app item's session and resume its claude -> (the line to
-    print, whether the item changed). ctx: what restore_sessions read once."""
+    print, the four keys to write back or None). A None value is a key to drop.
+    Takes no state lock: restore_sessions writes the keys back. ctx: what
+    restore_sessions read once."""
     sess = it.get("session")
     if backend_for(sess) is HERDR:
         return (f"{k}: herdr TUI worker, restore not supported: see the prompter "
-                "skill's manual steps"), False
+                "skill's \"Reversing a detach\" section"), None
     if backend_for(sess) is not HC:
-        return f"{k}: not on herdr-app, left alone", False
+        return f"{k}: not on herdr-app, left alone", None
     wt = it.get("worktree")
     if not wt or not os.path.isdir(wt):
-        return f"{k}: worktree {wt or '(none)'} is missing, skipped", False
+        return f"{k}: worktree {wt or '(none)'} is missing, skipped", None
     slug = split_key(k)[0]
     repo = state.get("registry", {}).get(slug, {}).get("path")
     if not repo:
-        return f"{k}: {slug} is not in the registry, skipped", False
+        return f"{k}: {slug} is not in the registry, skipped", None
     # An agent live or parked elsewhere is never closed or resumed a second time.
     home = rehome_of(it, ctx["sessions"], ctx["live"], ctx["open"], ctx["held"])
     if home:
-        return f"{k}: its agent is live in {home[0]}, left alone", False
+        return f"{k}: its agent is live in {home[0]}, left alone", None
     parked = parked_agent(it, sess, ctx["open"], HC.agents)
     if parked:
         return (f"{k}: its agent is parked in terminal {parked['pane']}, "
-                "left alone"), False
+                "left alone"), None
     if sess in ctx["open"]:
         # Open with a live agent, the session is fine. Only bare shells are restored.
         if sess in ctx["live"]:
-            return f"{k}: its agent is live in {sess}, left alone", False
+            return f"{k}: its agent is live in {sess}, left alone", None
         terms = session_terminals(ctx["spaces"], sess)
         if not terms and labelled_terminals(sess):
             return (f"{k}: a terminal is labelled for {sess}, still starting: "
-                    "left alone"), False
+                    "left alone"), None
         now_ms = int(time.time() * 1000)
         states = {t: terminal_state(t, now_ms) for t in terms}
         busy = [t for t, st in states.items() if st == "busy"]
         if busy:
             return (f"{k}: terminal {busy[0]} in {sess} runs something other than "
-                    "a shell: left alone"), False
+                    "a shell: left alone"), None
         if "young" in states.values():
-            return f"{k}: a shell in {sess} is still starting, left alone", False
+            return f"{k}: a shell in {sess} is still starting, left alone", None
         for t in terms:
             code, raw = end_terminal(t)
             if code != 0:
-                return f"{k}: could not end terminal {t}: {raw}, left as it is", False
+                return f"{k}: could not end terminal {t}: {raw}, left as it is", None
         code, raw = HC.close(sess)
-        if code != 0:
-            return f"{k}: closing {sess} failed: {raw}, left as it is", False
+        # A tab that is already gone (its shells ended it) is closed all the same.
+        if code != 0 and HC.gone(sess, 1) is not True:
+            return f"{k}: closing {sess} failed: {raw}, left as it is", None
     name = it.get("agent") or agent_name(k)
     claude = it.get("claude_session")
     resume = claude if transcript_file(claude) else None
+    # A session another claude has open is never resumed twice: this one starts
+    # apart from it, and --continue (which may pick that session) is not used either.
+    shared = resume is not None and session_live(resume)
+    if shared:
+        resume = None
     # Without a transcript in the worktree's folder, --continue has nothing to
     # resume: neither flag starts a fresh session.
-    cont = resume is None and worktree_has_transcript(wt)
+    cont = resume is None and not shared and worktree_has_transcript(wt)
     title = it.get("title") or name
     model = restore_model(k, it)
     try:
@@ -3695,29 +3714,24 @@ def restore_item(state, k, it, ctx):
             host = HC.spawn_tab(ctx["space"], k, repo, wt, title, model, name=name,
                                 resume=resume, cont=cont)
     except SystemExit as err:
-        return f"{k}: reopening failed: {err}", False
-    it["session"] = host["session"]
-    it["backend"] = host["backend"]
-    if host.get("space"):
-        it["space"] = host["space"]
-    else:
-        it.pop("space", None)
-    if host.get("claude_session"):
-        it["claude_session"] = host["claude_session"]
-    else:
-        it.pop("claude_session", None)
+        return f"{k}: reopening failed: {err}", None
+    fields = {"session": host["session"], "backend": host["backend"],
+              "space": host.get("space") or None,
+              "claude_session": host.get("claude_session") or None}
     log_event("restore", k, session=host["session"])
     how = (f"resumed {resume}" if resume else "continued the last conversation"
-           if cont else "started fresh, no transcript to resume")
+           if cont else f"started fresh, {claude} is open in another claude" if shared
+           else "started fresh, no transcript to resume")
     line = f"{k}: restored in {host['session']} ({how})"
     if host.get("warning"):
         line += f"; WARNING: {host['warning']}"
-    return line, True
+    return line, fields
 
 
 def restore_sessions(args):
     """Reopen each tracked herdr-app worker and resume its claude; README has the flow.
-    The launcher holds tick.lock and exec.lock, never taken here; the state is per item.
+    The launcher holds tick.lock and exec.lock, never taken here. The spawn runs outside
+    the state lock; the lock is taken to write back the item's four keys, if still tracked.
     Refused (exit 1) without herdr-app or an Octopilot space."""
     sessions, answered, open_ws = all_sessions()
     spaces = HC.spaces() if HC.name in answered else None
@@ -3734,14 +3748,22 @@ def restore_sessions(args):
            "live": all_live(), "space": space,
            "held": {it.get("session") for it in state["items"].values()}}
     for k in list(state["items"]):
-        with locked():
-            state = load()
-            it = state["items"].get(k)
-            if it is None:
-                continue
-            line, changed = restore_item(state, k, it, ctx)
-            if changed:
-                save(state)
+        it = load()["items"].get(k)
+        if it is None:
+            continue
+        line, fields = restore_item(state, k, it, ctx)
+        if fields:
+            with locked():
+                current = load()
+                if k in current["items"]:
+                    for key, value in fields.items():
+                        if value is None:
+                            current["items"][k].pop(key, None)
+                        else:
+                            current["items"][k][key] = value
+                    save(current)
+                else:
+                    line += f"; {k} is no longer tracked, its session {fields['session']} is left open"
         print(line)
     return 0
 

@@ -301,6 +301,41 @@ class RestoreTest(unittest.TestCase):
         self.assertEqual(after["o/repo#1"]["session"], NEW_SPACE)
         self.assertNotIn("space", after["o/repo#1"])
 
+    def test_a_tab_already_gone_at_close_is_restored_all_the_same(self):
+        self.spaces = [{"id": OPEN_SPACE, "tabs": [tab(OLD_TAB)]}]
+        mock.patch.object(scan.HC, "close", return_value=(1, "no such tab")).start()
+        mock.patch.object(scan.HC, "gone", return_value=True).start()
+        code, out, after, _ = self.run_restore(
+            {"o/repo#1": self.item("o/repo#1", OLD_TAB)},
+            all_sessions=([], {"hc"}, {OLD_TAB, OPEN_SPACE}))
+        self.assertEqual(self.spawn_tab.call_count, 1)
+        self.assertIn(f"restored in {NEW_TAB}", out)
+        self.assertEqual(after["o/repo#1"]["session"], NEW_TAB)
+
+    def test_a_failed_close_of_a_tab_still_open_is_left_alone(self):
+        self.spaces = [{"id": OPEN_SPACE, "tabs": [tab(OLD_TAB)]}]
+        before = self.item("o/repo#1", OLD_TAB)
+        mock.patch.object(scan.HC, "close", return_value=(1, "busy")).start()
+        mock.patch.object(scan.HC, "gone", return_value=False).start()
+        _, out, after, _ = self.run_restore(
+            {"o/repo#1": before},
+            all_sessions=([], {"hc"}, {OLD_TAB, OPEN_SPACE}))
+        self.assertEqual(self.spawn_tab.call_count, 0)
+        self.assertIn(f"closing {OLD_TAB} failed: busy", out)
+        self.assertEqual(after["o/repo#1"], before)
+
+    def test_a_session_another_claude_has_open_starts_fresh_apart_from_it(self):
+        self.transcripts = {"c-old"}
+        self.write_transcript(self.wt)
+        with mock.patch.object(scan, "session_live", return_value=True):
+            _, out, after, _ = self.run_restore(
+                {"o/repo#1": self.item("o/repo#1", OLD_TAB)})
+        kwargs = self.spawn_tab.call_args[1]
+        self.assertIsNone(kwargs["resume"])
+        self.assertFalse(kwargs["cont"])
+        self.assertIn("started fresh, c-old is open in another claude", out)
+        self.assertNotIn("claude_session", after["o/repo#1"])
+
     def test_a_restore_logs_an_event(self):
         _, _, _, events = self.run_restore(
             {"o/repo#1": self.item("o/repo#1", OLD_TAB)})
@@ -322,9 +357,60 @@ class RestoreModelTest(unittest.TestCase):
         for k, extra, model in cases:
             self.assertEqual(scan.restore_model(k, extra), model, k)
 
+    def test_the_model_of_a_read_only_investigation_and_a_re_review(self):
+        models = {"investigate": "m-inv", "investigate-readonly": "m-ro",
+                  "re-review": "m-re", "review-comment": "m-cm"}
+        with mock.patch.dict(scan.MODEL_FOR, models):
+            self.assertEqual(scan.restore_model("o/repo?look", {"read_only": True}), "m-ro")
+            self.assertEqual(scan.restore_model("o/repo?look", {}), "m-inv")
+            self.assertEqual(scan.restore_model(
+                "o/repo#4", {"mode": "comment", "reviewed_sha": "abc"}), "m-re")
+            self.assertEqual(scan.restore_model("o/repo#4", {"mode": "comment"}), "m-cm")
+
     def test_an_items_own_model_wins(self):
         self.assertEqual(scan.restore_model("o/repo#4", {"mode": "fix", "model": "m-x"}),
                          "m-x")
+
+
+class TerminalStateTest(unittest.TestCase):
+    NOW = 1_000_000
+
+    def state(self, created, flag):
+        info = (0, {"foreground": {"name": "zsh"}, "created_ms": created}, "")
+        env = {"OCTOPILOT_LAUNCHER_LOCKED": "1"} if flag else {}
+        with mock.patch.object(scan, "hc", return_value=info), \
+                mock.patch.dict(os.environ, env):
+            if not flag:
+                os.environ.pop("OCTOPILOT_LAUNCHER_LOCKED", None)
+            return scan.terminal_state("t1", self.NOW)
+
+    def test_a_young_shell_is_young_until_the_launcher_marks_the_restore(self):
+        self.assertEqual(self.state(self.NOW - 1000, flag=False), "young")
+        self.assertEqual(self.state(self.NOW - 1000, flag=True), "bare")
+        self.assertEqual(self.state(self.NOW - 60000, flag=False), "bare")
+
+
+class EndTerminalTest(unittest.TestCase):
+    def test_kill_waits_until_the_terminal_is_listed_no_more_then_rm(self):
+        listed = [{"terminals": [{"address": "t1"}]}, {"terminals": [{"address": "t1"}]},
+                  {"terminals": []}]
+        calls = []
+
+        def fake_hc(args, timeout=60):
+            calls.append(list(args))
+            return (0, listed.pop(0), "") if args[0] == "ls" else (0, None, "")
+
+        with mock.patch.object(scan, "hc", side_effect=fake_hc), \
+                mock.patch.object(scan.time, "sleep") as sleep:
+            self.assertEqual(scan.end_terminal("t1"), (0, ""))
+        self.assertEqual(calls, [["kill", "t1"], ["ls", "--json"], ["ls", "--json"],
+                                 ["ls", "--json"], ["rm", "t1"]])
+        self.assertEqual(sleep.call_count, 2)
+
+    def test_a_failed_kill_is_the_failure(self):
+        with mock.patch.object(scan, "hc", return_value=(1, None, "no terminal")) as hc:
+            self.assertEqual(scan.end_terminal("t1"), (1, "no terminal"))
+        self.assertEqual(hc.call_count, 1)
 
 
 class SpawnResumeTest(unittest.TestCase):

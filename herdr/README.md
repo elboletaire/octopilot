@@ -63,9 +63,11 @@ tracked when the kill fails. Only an agent that is gone shows `GONE`.
 worker: a tab of the Octopilot space (a space of its own with `WORKER_HOST=space`) on its
 worktree, resuming its claude conversation (`--resume` when its transcript exists, else
 `--continue` in the worktree). An item whose agent is live or parked elsewhere is skipped, as is a
-TUI item (restore it by hand, see the prompter skill) and one whose worktree is missing. A tab
-whose terminals are all bare shells, up for 30 s or more, is ended and reopened; one running
-anything else is left alone. Only `session`, `space`, `backend` and `claude_session` change on an
+TUI item (restore it by hand, see the prompter skill's "Reversing a detach" section) and one whose
+worktree is missing. A tab whose terminals are all bare shells is ended and reopened (the launcher
+runs it under the engine's locks, so a shell of any age is bare; run by hand, one up for 30 s or
+more is); one running anything else is left alone. A session another claude has open is not
+resumed: that worker starts fresh, apart from it, and its line says so. Only `session`, `space`, `backend` and `claude_session` change on an
 item. It is refused when herdr-app does not answer or no Octopilot space is open. It takes the
 state lock per item and never `tick.lock` or `exec.lock`: the launcher holds those while it runs it.
 Open Octopilot runs it on every successful run, once the space and its tabs are in place; then it
@@ -199,8 +201,10 @@ runs on). After a reboot or a logout there is none: with a graphical session on 
 computer (`WAYLAND_DISPLAY` or `DISPLAY` in the systemd user environment) the run opens the
 window with `systemd-run --user` and waits up to 30 s for it; without one it stops before
 it touches the space, and says so (log in on that computer, or run herdr-app there, then
-run Open Octopilot again). A run also holds the engine's `tick.lock` and `exec.lock` until it
-exits: a tick or a drain started meanwhile prints `tick already running` and acts on nothing.
+run Open Octopilot again). A run also holds the engine's `tick.lock` and `exec.lock` while it sets
+the space up and restores the workers, and releases them before it requests a tick: a tick started
+meanwhile prints `tick already running` (its `tick.lock`) or `engine busy: ...` (its `exec.lock`),
+and a drain prints `engine busy: the drain retries later`. None of them acts while the locks are held.
 
 To recover from the Mac when the Octopilot space is on caprica and caprica's window is gone:
 open a space on caprica (`herdr-app do space.new --machine caprica`, or the new-space dialog),
