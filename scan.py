@@ -928,6 +928,11 @@ def is_tab(session):
     return bool(HERDR_TAB.match(session or "") or HC_TAB.match(session or ""))
 
 
+def short_noun(session):
+    """What a detach or park leaves open, short: a tab, else the workspace."""
+    return "tab" if is_tab(session) else "workspace"
+
+
 def host_noun(backend, session):
     """What the session's host is called in messages: a tab for a tab id."""
     if HC_TAB.match(session or ""):
@@ -1415,6 +1420,20 @@ def boot_template(it, d, me):
     return "review-fix", None
 
 
+def rehome_of(it, sessions, live, open_ws):
+    """-> (session, space) of the open tab or space the item's agent is live in,
+    or None. A worker moved by hand to another tab keeps its item."""
+    name = it.get("agent")
+    rows = {s["id"]: s for s in sessions}
+    homes = [sess for sess, a in live.items()
+             if name and a.get("agent") == name and sess in open_ws
+             and sess in rows and sess != it.get("session")]
+    if not homes:
+        return None
+    home = next((h for h in homes if is_tab(h)), homes[0])
+    return home, rows[home].get("space")
+
+
 def scan(state, refresh=False, info=None):
     """Reconcile and return the table rows.
 
@@ -1483,10 +1502,13 @@ def scan(state, refresh=False, info=None):
     # Revivals are reported, not logged, here: snapshot() runs this on a
     # copy and must not write the event log. dispatch() logs them on save.
     revived = []
+    # Re-homed items, as (key, session): the tick logs them, as it does revivals.
+    rehomed = []
     if info is not None:
         info["details"] = details
         info["meta"] = meta
         info["revived"] = revived
+        info["rehomed"] = rehomed
 
     rows = []
     active = 0
@@ -1505,10 +1527,21 @@ def scan(state, refresh=False, info=None):
         if sess and sess not in open_ws \
                 and listed(answered, sess) and not (
                 it.get("pr") and d and d.get("state") == "MERGED"):
-            items.pop(k)
-            rows.append(("GONE", k, f"{smeta} removed outside octopilot "
-                                    "-> untracked, slot freed"))
-            continue
+            home = rehome_of(it, sessions, live, open_ws)
+            if home is None:
+                items.pop(k)
+                rows.append(("GONE", k, f"{smeta} removed outside octopilot "
+                                        "-> untracked, slot freed"))
+                continue
+            # Its agent is live in another tab or space: the item follows it.
+            sess, space = home
+            it["session"], it["backend"] = sess, backend_for(sess).name
+            if space:
+                it["space"] = space
+            else:
+                it.pop("space", None)
+            smeta = f"session={sid(sess)}"
+            rehomed.append((k, sess))
 
         if it.get("pr") and d and d.get("state") == "MERGED":
             # A fix stack whose bottom merged, with layers still open, is
@@ -2415,7 +2448,8 @@ def cleanup_item(state, key_):
     backend = backend_for(sess)
     if backend:
         code, raw = backend.discard(sess, it.get("worktree"))
-        lines.append(f"{backend.remove_label} {sess}: {'ok' if code == 0 else raw}")
+        lines.append(f"{remove_label_for(backend, sess)} {sess}: "
+                     f"{'ok' if code == 0 else raw}")
         if code != 0:
             discard_error = raw
     if key_ not in state["handled_merges"]:
@@ -2617,7 +2651,8 @@ def detach_item(state, k):
     if backend:
         code, raw = backend.close(sess)
         if code != 0:
-            return {"ok": False, "error": f"{backend.noun} close failed: {raw}",
+            return {"ok": False,
+                    "error": f"{host_noun(backend, sess)} close failed: {raw}",
                     "msg": None}
     state["items"].pop(k)
     save(state)
@@ -2626,7 +2661,7 @@ def detach_item(state, k):
         else ", worktree kept"
     return {"ok": True, "error": None,
             "msg": (f"detached {k} session={sid(sess)} branch={it.get('branch')} "
-                    f"-> workspace closed{worktree}, untracked")}
+                    f"-> {short_noun(sess)} closed{worktree}, untracked")}
 
 
 def set_paused(state, paused):
@@ -2789,7 +2824,8 @@ def reboot(state, k):
     backend = backend_for(it.get("session"))
     target = backend.target(it) if backend else None
     if not target:
-        print(f"{k}: no live agent in workspace {it.get('session')}",
+        where = host_noun(backend, it.get("session")) if backend else "workspace"
+        print(f"{k}: no live agent in {where} {it.get('session')}",
               file=sys.stderr)
         return 1
     ok, err = send_to(f"{backend.prefix}{target}", "/clear")
@@ -3392,6 +3428,8 @@ def tick(args):
                                               info=info)
             for k, reason in info["revived"]:
                 log_event("unpark", k, reason=reason)
+            for k, session in info["rehomed"]:
+                log_event("rehome", k, session=session)
             for kind, k, _ in rows:
                 if kind == "GONE":
                     log_event("gone", k)
@@ -3615,9 +3653,10 @@ def dispatch(cmd, args, state):
                   "herdr-app space (sp<hex>) or herdr-app tab (tb<hex>) id",
                   file=sys.stderr)
             return 1
-        _, answered, open_ws = all_sessions()
+        sessions, answered, open_ws = all_sessions()
         if listed(answered, session) and session not in open_ws:
-            print(f"{session} is not an open {backend.noun}", file=sys.stderr)
+            print(f"{session} is not an open {host_noun(backend, session)}",
+                  file=sys.stderr)
             return 1
         reviewed = None
         if pr and mode == "comment":
@@ -3630,6 +3669,9 @@ def dispatch(cmd, args, state):
         # Name its agent so it can be addressed.
         it = state["items"][k]
         it["backend"] = backend.name
+        space = next((s.get("space") for s in sessions if s["id"] == session), None)
+        if space:
+            it["space"] = space
         occupant = backend.live().get(session) or {}
         if occupant.get("agent"):
             it["agent"] = occupant["agent"]
@@ -3675,7 +3717,7 @@ def dispatch(cmd, args, state):
         save(state)
         log_event("park", k)
         print(f"parked {k} session={sid(it.get('session'))} "
-              "-> workspace kept, holds no slot")
+              f"-> {short_noun(it.get('session'))} kept, holds no slot")
         return 0
     if cmd == "unpark":
         k = args[1]

@@ -55,7 +55,7 @@ class TickEngineTest(unittest.TestCase):
                    "registry": {REPO: {"path": "/repo", "base": "main"}}})
 
     def scan(self, state, info=None, refresh=False):
-        info.update(revived=[], details={}, meta={})
+        info.update(revived=[], rehomed=[], details={}, meta={})
         return ROWS, 2, 1, 0
 
     def tick(self, args=(), engine=None):
