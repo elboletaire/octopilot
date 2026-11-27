@@ -5,7 +5,7 @@ import { arrange, resolveSel, stepSel, jumpSel, soloPane, ownPane, shownTab, key
 const view = {
   columns: [
     { id: "running", entries: [{ key: "a1", open: true }, { key: "a2", open: true }] },
-    { id: "orch", entries: [] },
+    { id: "hold", entries: [] },
     { id: "needs", entries: [{ key: "n1", open: true }] },
     { id: "done", entries: [] },
   ],

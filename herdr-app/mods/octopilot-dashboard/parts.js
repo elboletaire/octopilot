@@ -6,10 +6,11 @@ import { div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import {
   AGENT_GLYPH, CI_GLYPH, ago, liveAge, elapsed, pickSummary, FLASH_MS, isRepoKey, isStale, engineLabel,
+  engineBadge, holdLabel,
 } from "./model.js";
 
 // Column id -> the theme colour its title, count and card edge take.
-export const COLUMN_TONE = { running: "working", orch: "accent", needs: "blocked", done: "done" };
+export const COLUMN_TONE = { running: "working", needs: "blocked", hold: "accent", done: "done" };
 const ACTIVITY_TONE = { report: "accent", spawn: "working", cleanup: "done", capped: "blocked" };
 // The key each global action answers to, for its button's hint.
 const GLOBAL_HINT = { refresh: "r", pause: "P", resume: "P", investigate: "i", prompter: "a", toggle_done: "D", fold_all: "C" };
@@ -90,6 +91,7 @@ export function header(v, t, now) {
       .child(div().text_size(12.5).font_semibold().text_color(h.needs ? t.blocked : t.dim)
         .child(`🔴 ${h.needs} needs you`))
       .child(div().text_size(12.5).text_color(t.working).child(`🟡 ${h.running} running`))
+      .when(h.hold != null, (el) => el.child(div().text_size(12.5).text_color(t.muted).child(`💤 ${h.hold} on hold`)))
       .child(div().text_size(12.5).text_color(t.muted).child(`⚪ ${h.pick} to pick`))
       .when(h.active != null, (el) => el.child(div().text_size(12.5).text_color(t.muted)
         .child(`${h.active}/${h.max_active} slots`
@@ -120,6 +122,8 @@ function card(v, t, e, tone, now) {
   const stalled = Boolean(e.stalled) || e.kind === "STALLED";
   const agent = e.agent ? AGENT_GLYPH[e.agent] ?? ["?", "dim"] : null;
   const ci = CI_GLYPH[e.checks];
+  const engine = engineBadge(e.engine);
+  const hold = holdLabel(e.hold);
   return v_flex().id(`card-${e.key}`).relative().overflow_hidden().flex_none()
     .rounded(12).border_1().border_color(sel ? t[tone] : t.border)
     .when(sel, (el) => el.border_l(3)).bg(sel ? t.raised : t.background).pl(sel ? 12 : 14).pr(12).py(9).gap(5).cursor_pointer()
@@ -136,8 +140,10 @@ function card(v, t, e, tone, now) {
       .when(Boolean(agent), (el) => el.child(div().text_color(t[agent[1]]).child(agent[0])))
       .child(e.kind.toLowerCase())
       .when(e.rounds != null, (el) => el.child(`${e.rounds}/${e.max_rounds}`))
+      .when(Boolean(engine), (el) => el.child(pill(t, engine, t.working)))
       .child(div().flex_1())
       .child(div().text_color(stalled ? t.blocked : t.dim).child(ago(quiet))))
+    .when(Boolean(hold), (el) => el.child(div().text_size(11).text_color(t.accent).truncate().child(hold)))
     .when(Boolean(e.note), (el) => el.child(div().h(30).overflow_hidden().text_size(11)
       .line_height("15px").text_color(t.dim).child(e.note)));
 }

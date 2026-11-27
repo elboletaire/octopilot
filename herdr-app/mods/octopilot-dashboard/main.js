@@ -88,7 +88,7 @@ export default class OctopilotDashboard extends View {
     this.peeking = null;   // the peek this pane opened, until focus comes back: see followPeek
     this.tabShown = null;  // whether this pane's tab was the shown one on the last tick: see followTab
     this.scrolls = {
-      running: ScrollHandle.new(), orch: ScrollHandle.new(), needs: ScrollHandle.new(),
+      running: ScrollHandle.new(), needs: ScrollHandle.new(), hold: ScrollHandle.new(),
       done: ScrollHandle.new(), pick: ScrollHandle.new(),
     };
     if (checking()) return;
@@ -331,8 +331,7 @@ export default class OctopilotDashboard extends View {
   }
 
   doneLabel(view) {
-    const done = view.columns.find((c) => c.id === "done");
-    const hidden = done ? done.entries.filter((e) => !e.open).length : 0;
+    const hidden = view.columns.find((c) => c.id === "done")?.hidden ?? 0;
     if (this.showDone) return "hide done";
     return hidden ? `show done (+${hidden} hidden)` : "show done";
   }
