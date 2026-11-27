@@ -25,8 +25,9 @@ PLANNED = {"MERGED": "cleanup", "RESTACK": "restack", "REVIEW": "review",
 Action = namedtuple("Action", "kind key data")
 
 # Rows built from a tracked item. GONE is left out: its item was just dropped.
-TRACKED = {"BOOTING", "CAPPED", "CLOSED", "DONE", "FEEDBACK", "MERGED", "PUSHED",
-           "READY", "RESTACK", "REVIEW", "STALLED", "UNKNOWN", "WORKING"}
+TRACKED = {"BLOCKED", "BOOTING", "CAPPED", "CLOSED", "DONE", "FEEDBACK", "HOLD",
+           "MERGED", "PUSHED", "READY", "RESTACK", "REVIEW", "STALLED", "UNKNOWN",
+           "WORKING"}
 
 
 def locate_item(state, key):

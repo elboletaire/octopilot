@@ -1516,6 +1516,12 @@ def rehome_of(it, sessions, live, open_ws, held):
     return home, rows[home].get("space")
 
 
+def report_note(rep):
+    """A report's message as one short row note. Quotes would be read as a
+    row title, and a newline would split the row."""
+    return " ".join(rep.get("msg", "").replace('"', "").split())[:80]
+
+
 def live_report(it, live):
     """The item's last report while its agent has shown no sign of life since,
     else {}: a later heartbeat, or a running agent, makes it history."""
@@ -1789,13 +1795,14 @@ def scan(state, refresh=False, info=None):
             rep = live_report(it, live)
             if rep.get("state") in ("blocked", "failed", "stalled"):
                 active += 1
+                note = report_note(rep) or f"agent stopped ({rep['state']})"
                 rows.append(("BLOCKED", k, f"mode={it['mode']} {smeta} "
-                                           f"report={rep['state']} "
-                                           f"-> {rep.get('msg', '')[:80]}"))
+                                           f"report={rep['state']} -> {note}"))
                 continue
             if rep.get("state") == "held":
-                rows.append(("HOLD", k, f"mode={it['mode']} {smeta} hold=you -> "
-                                        f"{rep.get('msg', '')[:80] or 'held as you asked'}"))
+                note = report_note(rep) or "held as you asked"
+                rows.append(("HOLD", k, f"mode={it['mode']} {smeta} hold=you "
+                                        f"-> {note}"))
                 continue
             st = live.get(sess, {}).get("state", "?")
             age = live.get(sess, {}).get("age_secs")
@@ -1897,17 +1904,17 @@ def scan(state, refresh=False, info=None):
             # A blocked or failed agent says so instead of going quiet: it keeps
             # its slot. Held is the user's pause, so it gives the slot back.
             if rep.get("state") in ("blocked", "failed", "stalled"):
+                note = report_note(rep) or f"agent stopped ({rep['state']})"
                 rows.append(("BLOCKED", k,
                              f"mode={it['mode']} {smeta} head={head[:7]} "
                              f"report={rep['state']} "
-                             f"rounds={rounds}/{MAX_REVIEW_ROUNDS} "
-                             f"-> {rep.get('msg', '')[:80]}"))
+                             f"rounds={rounds}/{MAX_REVIEW_ROUNDS} -> {note}"))
                 continue
             if rep.get("state") == "held":
                 active -= 1
+                note = report_note(rep) or "held as you asked"
                 rows.append(("HOLD", k,
-                             f"mode={it['mode']} {smeta} hold=you -> "
-                             f"{rep.get('msg', '')[:80] or 'held as you asked'}"))
+                             f"mode={it['mode']} {smeta} hold=you -> {note}"))
                 continue
             if rep.get("state") == "ready" and rep.get("sha") \
                     and cmp_head.startswith(rep["sha"]):

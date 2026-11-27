@@ -5,6 +5,7 @@ import unittest
 from unittest import mock
 
 from tests import fake
+import engine
 import scan
 
 ME = "octo-user"
@@ -99,6 +100,41 @@ class HoldRowsTest(unittest.TestCase):
                 mock.patch("scan.time.time", return_value=LATER):
             rows, _, _, _ = scan.scan(state)
         self.assertEqual([kind for kind, k, _ in rows if k == KEY], ["WORKING"])
+
+
+class HoldNoteTest(unittest.TestCase):
+    def test_a_quoted_multi_line_message_stays_one_note(self):
+        msg = 'wait for "infra"\nfix the\tdb'
+        rows, _ = scan_at(agent_item(last_report=report("blocked", msg=msg)))
+        text = rows[0][1]
+        self.assertNotIn('"', text)
+        self.assertNotIn("\n", text)
+        self.assertTrue(text.endswith("-> wait for infra fix the db"), text)
+        self.assertEqual(scan.parse_extra(text)["fields"]["report"], "blocked")
+        self.assertNotIn("title", scan.parse_extra(text))
+
+    def test_an_empty_blocked_message_says_the_agent_stopped(self):
+        rows, _ = scan_at(agent_item(last_report=report("failed", msg="")))
+        self.assertTrue(rows[0][1].endswith("-> agent stopped (failed)"), rows[0][1])
+
+    def test_an_empty_held_message_says_held_as_you_asked(self):
+        rows, _ = scan_at(no_pr_item(last_report=report("held", msg="")))
+        self.assertTrue(rows[0][1].endswith("-> held as you asked"), rows[0][1])
+
+
+class HoldReviewedHeadTest(unittest.TestCase):
+    def test_a_blocked_agent_on_its_reviewed_head_is_not_ready(self):
+        rows, active = scan_at(agent_item(reviewed_sha=HEAD,
+                                          last_report=report("blocked")))
+        self.assertEqual([kind for kind, _ in rows], ["BLOCKED"])
+        self.assertEqual(active, 1)
+
+
+class HoldEngineTest(unittest.TestCase):
+    def test_blocked_and_hold_rows_are_tracked_but_not_planned(self):
+        for kind in ("BLOCKED", "HOLD"):
+            self.assertIn(kind, engine.TRACKED)
+            self.assertNotIn(kind, engine.PLANNED)
 
 
 class HoldSnapshotTest(unittest.TestCase):
