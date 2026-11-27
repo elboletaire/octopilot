@@ -400,8 +400,9 @@ class SpawnWorkspaceTest(BackendCase):
         scan.octopilot_workspace.return_value = None
         fake = self.herdr(self.open_answers())
         host = scan.HERDR.spawn("fix#1", "/repo", self.wt, "t", None)
-        self.assertEqual(host["warning"], "no Octopilot workspace: the worker opens "
-                                          "as its own workspace")
+        self.assertEqual(host["note"], "no Octopilot workspace: the worker opens "
+                                       "as its own workspace")
+        self.assertNotIn("warning", host)
         self.assertEqual(host["session"], "w12")
         self.assertEqual(fake.argvs("tab", "create"), [])
 
@@ -438,11 +439,10 @@ class TabLabelTest(unittest.TestCase):
                          "vocdoni-app#4 fix")
 
 
-class AddWarningTest(unittest.TestCase):
-    def test_the_note_leads_any_startup_warning(self):
-        self.assertEqual(scan.add_warning({"session": "w1"}, "a")["warning"], "a")
-        host = scan.add_warning({"warning": "blocked"}, "a")
-        self.assertEqual(host["warning"], "a; blocked")
+class AddNoteTest(unittest.TestCase):
+    def test_a_note_is_kept_apart_from_a_startup_warning(self):
+        host = scan.add_note({"warning": "blocked"}, "a")
+        self.assertEqual(host, {"warning": "blocked", "note": "a"})
 
 
 if __name__ == "__main__":

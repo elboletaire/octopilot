@@ -509,7 +509,7 @@ class HerdrBackend:
         warning = self.start_agent(pane, name, path, wt, model, f"workspace {ws}")
         if warning:
             host["warning"] = warning
-        return add_warning(host, note) if note else host
+        return add_note(host, note) if note else host
 
     def spawn_tab(self, ws, key_, path, wt, title, model):
         """A tab of workspace ws on the worktree, its root pane running claude."""
@@ -799,7 +799,7 @@ class HcBackend:
             sp = octopilot_space()
             if sp:
                 return self.spawn_tab(sp, key_, path, wt, title, model)
-            return add_warning(
+            return add_note(
                 self.spawn_space(key_, path, wt, title, model),
                 "no Octopilot space open; the worker gets a space of its own")
         return self.spawn_space(key_, path, wt, title, model)
@@ -1015,9 +1015,10 @@ def tab_label(title, name):
     return title
 
 
-def add_warning(host, note):
-    """The host with note as its warning, ahead of any startup warning."""
-    host["warning"] = f"{note}; {host['warning']}" if host.get("warning") else note
+def add_note(host, note):
+    """The host with note: what the spawn did instead of what was asked, not a
+    startup problem, so it never holds back the first prompt."""
+    host["note"] = note
     return host
 
 
@@ -2195,9 +2196,10 @@ def spawn_item(state, key_, branch, title, new_branch, question=None,
     add_worktree has created the worktree, which is left in place.
 
     -> {"ok", "error", "key", "template", "base", "slug", "prev", "stack",
-    "warning", "model"}: ok is always True here (refusals raise), template is
-    the prompt to render, prev the sha a re-review follows (or None), stack the
-    parsed layers (or None), warning the host's startup warning (or None)."""
+    "warning", "note", "model"}: ok is always True here (refusals raise), template
+    is the prompt to render, prev the sha a re-review follows (or None), stack the
+    parsed layers (or None), warning the host's startup warning (or None), note
+    what the host did instead of what was asked (or None)."""
     me = whoami(state)
     slug, num, kind = split_key(key_)
     reg = state.get("registry", {})
@@ -2257,7 +2259,7 @@ def spawn_item(state, key_, branch, title, new_branch, question=None,
     item = {"mode": mode, "branch": branch, "pr": num if kind == "pr" else None,
             "reviewed_sha": reviewed, "phase": "working", "added": int(time.time()),
             "driver": "agent" if mode == "fix" else "orchestrator"}
-    item.update({k: v for k, v in host.items() if k != "warning"})
+    item.update({k: v for k, v in host.items() if k not in ("warning", "note")})
     if stack:
         item["stack"] = stack
     if question:
@@ -2270,7 +2272,8 @@ def spawn_item(state, key_, branch, title, new_branch, question=None,
               title=title)
     return {"ok": True, "error": None, "key": key_, "template": tmpl, "base": base,
             "slug": slug, "prev": reviewed, "stack": stack,
-            "warning": host.get("warning"), "model": model}
+            "warning": host.get("warning"), "note": host.get("note"),
+            "model": model}
 
 
 def spawn(state, key_, branch, title, new_branch, question=None,
@@ -2283,6 +2286,8 @@ def spawn(state, key_, branch, title, new_branch, question=None,
     where = f"agent={it['agent']} worktree={it['worktree']}"
     print(f"spawned {key_} mode={it['mode']} branch={branch} "
           f"session={it['session']} {where} model={r['model'] or 'default'}")
+    if r["note"]:
+        print(f"NOTE: {r['note']}")
     if r["warning"]:
         print(f"WARNING: {r['warning']}")
     tmpl, prev = r["template"], r["prev"]

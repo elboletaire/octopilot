@@ -340,8 +340,9 @@ class HcSpawnTest(unittest.TestCase):
         self.space = None
         host, _ = self.spawn()
         self.assertEqual([c for c, _ in self.app_calls], ["space.new"])
-        self.assertEqual(host["warning"], "no Octopilot space open; the worker gets "
-                                          "a space of its own")
+        self.assertEqual(host["note"], "no Octopilot space open; the worker gets "
+                                       "a space of its own")
+        self.assertNotIn("warning", host)
         self.assertEqual(host["session"], "sp7")
         self.assertNotIn("space", host)
 
