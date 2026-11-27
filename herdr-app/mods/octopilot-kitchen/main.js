@@ -7,7 +7,7 @@ import { v_flex, h_flex, TextView } from "gpui-base";
 import { exec, readTextFile, watchFolder, run, theme, props, shared, home, window, placement, openOverlay, closeOverlay, checking, panes, spaces } from "herdr";
 import { clip } from "./clip.js";
 import { SCENE, BOX, SPRITE } from "./atlas.js";
-import { derive, holeAt, spriteBox, boatBox, offlineReason, WALK_MS, LOG_LINES } from "./kitchen.js";
+import { derive, holeAt, spriteBox, boatBox, holdBox, HOLD, HOLD_SLOTS, offlineReason, WALK_MS, LOG_LINES } from "./kitchen.js";
 import { paneLayout, bubbleRows, PANE, PANE_DEFAULT } from "./layout.js";
 import { machineCache, addressOn } from "./machine.js";
 
@@ -27,6 +27,8 @@ const MOTION = {
 };
 // Fixed colours for what is written on the art, which keeps its own palette in every theme.
 const INK = { chip: "#1b2430cc", hover: "#1b2430", text: "#fff3dc", dim: "#000000" };
+// The On hold boats are faded, so they read apart from the served ones on the shelf.
+const HELD_OPACITY = 0.45;
 
 // A path the layout (props) or another mod (shared) set, or null.
 function setting(prop, sharedKey) {
@@ -374,6 +376,10 @@ export default class Kitchen extends View {
       piece("bg", BOX.bg),
       piece("shelf", BOX.shelf),
       ...Array.from({ length: m.boats }, (_v, i) => piece("boat", boatBox(i))),
+      ...Array.from({ length: m.held }, (_v, i) => piece("boat", holdBox(i)).opacity(HELD_OPACITY)),
+      m.heldMore > 0
+        ? div().absolute().left((HOLD.x + HOLD_SLOTS * HOLD.pitch) * K).top(HOLD.y * K).child(this.chip(`+${m.heldMore}`))
+        : null,
       this.chef(m),
       piece("counter", BOX.counter),
       ...this.flames(m),

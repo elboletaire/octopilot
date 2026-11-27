@@ -48,6 +48,13 @@ export function boatBox(i) {
 }
 export const SHELF_SLOTS = SHELF.rows.length * SHELF.perRow;
 
+// The On hold tray: half-size boats in the gap under the shelf, one row, the chef's pan below.
+export const HOLD = { x: SHELF.x - 8, y: 102, pitch: 19, scale: 0.5 };
+export const HOLD_SLOTS = 8;
+export function holdBox(i) {
+  return [HOLD.x + i * HOLD.pitch, HOLD.y, SHELF.boat.w * HOLD.scale, SHELF.boat.h * HOLD.scale];
+}
+
 // The event's mood while its time lasts, then what the chef rests in.
 export function chefMood(chef, nowMs) {
   const resting = RESTING.includes(chef?.resting) ? chef.resting : "idle";
@@ -117,9 +124,10 @@ export function logLines(kitchen, max = LOG_LINES) {
   }));
 }
 
-export function headerLine({ onPan, holes, shelf, paused, offline }) {
+export function headerLine({ onPan, holes, shelf, hold = 0, paused, offline }) {
   return `🐙 takoyaki kitchen · ${onPan}/${holes} on the pan`
     + (shelf > 0 ? ` · ${shelf} on the shelf` : "")
+    + (hold > 0 ? ` · ${hold} on hold` : "")
     + (paused ? " · paused" : "")
     + (offline ? " · offline" : "");
 }
@@ -144,6 +152,9 @@ export function derive(view, nowMs, walk = 0, logMax = LOG_LINES) {
   const holes = clamp(Math.round(Number(pan?.holes ?? header.max_active) || 6), 1, MAX_HOLES);
   const balls = list(pan?.balls).slice(0, holes);
   const shelf = list(pan?.shelf).slice(0, SHELF_SLOTS);
+  // Older view.json have no hold: the tray is simply empty.
+  const hold = list(pan?.hold).slice(0, HOLD_SLOTS);
+  const holdTotal = Number(pan?.hold_total) || list(pan?.hold).length;
   const last = newest(kitchen);
   // Without `pan` (an older backend) the newest event stands in for the chef.
   const chef = pan?.chef ?? (last ? { mood: last.mood, since: last.at, ms: last.ms, resting: "idle" } : null);
@@ -181,11 +192,14 @@ export function derive(view, nowMs, walk = 0, logMax = LOG_LINES) {
     balls: balls.map((b, i) => ({ sprite: ballSprite(b), state: b.state, label: b.label ?? b.key ?? "", focus: i === focus })),
     focus,
     boats: shelf.length,
+    held: hold.length,
+    heldMore: Math.max(0, holdTotal - hold.length),
     burst,
     header: headerLine({
       onPan: pan ? balls.length : Number(header.active) || 0,
       holes,
       shelf: Number(pan?.shelf_total) || list(pan?.shelf).length,
+      hold: Number(header.hold) || 0,
       paused,
       offline,
     }),
