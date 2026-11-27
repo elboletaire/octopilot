@@ -35,6 +35,7 @@ EMPTY = {
     "record_launcher_sessions": None,
     "terminal_state": "busy",
     "end_terminal": (0, ""),
+    "labelled_terminals": [],
 }
 
 

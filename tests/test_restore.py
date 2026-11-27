@@ -4,6 +4,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import shutil
 import tempfile
 import unittest
@@ -38,6 +39,8 @@ class RestoreTest(unittest.TestCase):
         self.spaces = [{"id": OPEN_SPACE, "tabs": []}]
         mock.patch.dict(os.environ, {"WORKER_HOST": "tab"}).start()
         mock.patch.object(scan, "plugin_settings", return_value="").start()
+        self.projects = os.path.join(folder, "projects")
+        mock.patch.object(scan, "PROJECTS_DIR", self.projects).start()
         mock.patch.object(scan, "octopilot_space", return_value=OPEN_SPACE).start()
         mock.patch.object(scan, "transcript_file", side_effect=lambda s: (
             f"/t/{s}.jsonl" if s in self.transcripts else None)).start()
@@ -48,6 +51,13 @@ class RestoreTest(unittest.TestCase):
         self.spawn_space = mock.patch.object(
             scan.HC, "spawn_space", side_effect=self.fake_spawn(NEW_SPACE)).start()
         self.addCleanup(mock.patch.stopall)
+
+    def write_transcript(self, wt):
+        """A transcript in the worktree's claude project folder, as claude names it."""
+        folder = re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(wt))
+        os.makedirs(os.path.join(self.projects, folder), exist_ok=True)
+        with open(os.path.join(self.projects, folder, "t.jsonl"), "w"):
+            pass
 
     def fake_close(self, session):
         self.order.append(("close", session))
@@ -139,7 +149,8 @@ class RestoreTest(unittest.TestCase):
         self.assertEqual({k: v for k, v in now.items() if k not in keys},
                          {k: v for k, v in before.items() if k not in keys})
 
-    def test_without_a_transcript_the_last_conversation_continues(self):
+    def test_a_worktree_transcript_continues_the_last_conversation(self):
+        self.write_transcript(self.wt)
         code, out, after, _ = self.run_restore(
             {"o/repo#1": self.item("o/repo#1", OLD_TAB)})
         kwargs = self.spawn_tab.call_args[1]
@@ -147,6 +158,62 @@ class RestoreTest(unittest.TestCase):
         self.assertTrue(kwargs["cont"])
         self.assertIn("continued the last conversation", out)
         self.assertNotIn("claude_session", after["o/repo#1"])
+
+    def test_without_any_transcript_it_starts_fresh(self):
+        code, out, after, _ = self.run_restore(
+            {"o/repo#1": self.item("o/repo#1", OLD_TAB)})
+        kwargs = self.spawn_tab.call_args[1]
+        self.assertIsNone(kwargs["resume"])
+        self.assertFalse(kwargs["cont"])
+        self.assertIn("started fresh, no transcript to resume", out)
+        self.assertNotIn("claude_session", after["o/repo#1"])
+
+    def test_a_bare_tab_whose_agent_is_live_elsewhere_is_not_closed(self):
+        self.spaces = [{"id": OPEN_SPACE, "tabs": [tab(OLD_TAB, "t1")]}]
+        before = self.item("o/repo#1", OLD_TAB)
+        sessions = [{"id": OTHER_TAB, "space": OPEN_SPACE, "path": self.wt}]
+        live = {OTHER_TAB: {"session": OTHER_TAB, "agent": "ap-repo-1",
+                            "state": "idle"}}
+        _, out, after, _ = self.run_restore(
+            {"o/repo#1": before},
+            all_sessions=(sessions, {"hc"}, {OLD_TAB, OTHER_TAB, OPEN_SPACE}),
+            all_live=live,
+            terminal_state=lambda term, now_ms: "bare",
+            end_terminal=self.fake_end)
+        self.assertEqual(self.order, [])
+        self.assertEqual(self.spawn_tab.call_count, 0)
+        self.assertIn(f"its agent is live in {OTHER_TAB}, left alone", out)
+        self.assertEqual(after["o/repo#1"], before)
+
+    def test_a_bare_tab_whose_agent_is_parked_is_not_closed(self):
+        self.spaces = [{"id": OPEN_SPACE, "tabs": [tab(OLD_TAB, "t1")]}]
+        before = self.item("o/repo#1", OLD_TAB)
+        _, out, _, _ = self.run_restore(
+            {"o/repo#1": before},
+            all_sessions=([], {"hc"}, {OLD_TAB, OPEN_SPACE}),
+            parked_agent={"pane": "t9", "agent": "ap-repo-1", "ids": []},
+            terminal_state=lambda term, now_ms: "bare",
+            end_terminal=self.fake_end)
+        self.assertEqual(self.order, [])
+        self.assertIn("parked in terminal t9, left alone", out)
+
+    def test_an_empty_tab_with_a_labelled_terminal_is_left_alone(self):
+        self.spaces = [{"id": OPEN_SPACE, "tabs": [tab(OLD_TAB)]}]
+        before = self.item("o/repo#1", OLD_TAB)
+        _, out, after, _ = self.run_restore(
+            {"o/repo#1": before},
+            all_sessions=([], {"hc"}, {OLD_TAB, OPEN_SPACE}),
+            labelled_terminals=lambda t: ["t7"] if t == OLD_TAB else [])
+        self.assertEqual(self.order, [])
+        self.assertIn(f"a terminal is labelled for {OLD_TAB}", out)
+        self.assertEqual(after["o/repo#1"], before)
+
+    def test_an_empty_tab_nothing_labelled_is_closed_and_reopened(self):
+        self.spaces = [{"id": OPEN_SPACE, "tabs": [tab(OLD_TAB)]}]
+        self.run_restore(
+            {"o/repo#1": self.item("o/repo#1", OLD_TAB)},
+            all_sessions=([], {"hc"}, {OLD_TAB, OPEN_SPACE}))
+        self.assertEqual(self.order, [("close", OLD_TAB), ("spawn", "o/repo#1")])
 
     def test_a_rehomed_agent_is_skipped(self):
         before = self.item("o/repo#1", OLD_TAB)

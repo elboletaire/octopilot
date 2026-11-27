@@ -3559,6 +3559,22 @@ def session_terminals(spaces, session):
     return addresses
 
 
+def worktree_has_transcript(wt):
+    """Whether claude has a transcript for the worktree's folder, which --continue
+    resumes. claude names the project folder after the path, non-alphanumerics as -."""
+    folder = re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(wt))
+    return bool(glob.glob(os.path.join(PROJECTS_DIR, folder, "*.jsonl")))
+
+
+def labelled_terminals(tab):
+    """The addresses of the hc terminals labelled herdr.tab=<tab>: a claude still
+    starting may carry it before it shows as an agent."""
+    code, data, _ = hc(["ls", "--json", "--label", f"herdr.tab={tab}"], timeout=10)
+    if code != 0:
+        return []
+    return [t["address"] for t in (data or {}).get("terminals", [])]
+
+
 def restore_model(k, it):
     """The model an item's session was spawned on: its own, else the one its
     template pins (see spawn_item and boot_template)."""
@@ -3594,11 +3610,22 @@ def restore_item(state, k, it, ctx):
     repo = state.get("registry", {}).get(slug, {}).get("path")
     if not repo:
         return f"{k}: {slug} is not in the registry, skipped", False
+    # An agent live or parked elsewhere is never closed or resumed a second time.
+    home = rehome_of(it, ctx["sessions"], ctx["live"], ctx["open"], ctx["held"])
+    if home:
+        return f"{k}: its agent is live in {home[0]}, left alone", False
+    parked = parked_agent(it, sess, ctx["open"], HC.agents)
+    if parked:
+        return (f"{k}: its agent is parked in terminal {parked['pane']}, "
+                "left alone"), False
     if sess in ctx["open"]:
         # Open with a live agent, the session is fine. Only bare shells are restored.
         if sess in ctx["live"]:
             return f"{k}: its agent is live in {sess}, left alone", False
         terms = session_terminals(ctx["spaces"], sess)
+        if not terms and labelled_terminals(sess):
+            return (f"{k}: a terminal is labelled for {sess}, still starting: "
+                    "left alone"), False
         now_ms = int(time.time() * 1000)
         states = {t: terminal_state(t, now_ms) for t in terms}
         busy = [t for t, st in states.items() if st == "busy"]
@@ -3614,26 +3641,21 @@ def restore_item(state, k, it, ctx):
         code, raw = HC.close(sess)
         if code != 0:
             return f"{k}: closing {sess} failed: {raw}, left as it is", False
-    else:
-        home = rehome_of(it, ctx["sessions"], ctx["live"], ctx["open"], ctx["held"])
-        if home:
-            return f"{k}: its agent is live in {home[0]}, left alone", False
-        parked = parked_agent(it, sess, ctx["open"], HC.agents)
-        if parked:
-            return (f"{k}: its agent is parked in terminal {parked['pane']}, "
-                    "left alone"), False
     name = it.get("agent") or agent_name(k)
     claude = it.get("claude_session")
     resume = claude if transcript_file(claude) else None
+    # Without a transcript in the worktree's folder, --continue has nothing to
+    # resume: neither flag starts a fresh session.
+    cont = resume is None and worktree_has_transcript(wt)
     title = it.get("title") or name
     model = restore_model(k, it)
     try:
         if worker_host() == "space":
             host = HC.spawn_space(k, repo, wt, title, model, name=name,
-                                  resume=resume, cont=resume is None)
+                                  resume=resume, cont=cont)
         else:
             host = HC.spawn_tab(ctx["space"], k, repo, wt, title, model, name=name,
-                                resume=resume, cont=resume is None)
+                                resume=resume, cont=cont)
     except SystemExit as err:
         return f"{k}: reopening failed: {err}", False
     it["session"] = host["session"]
@@ -3647,7 +3669,8 @@ def restore_item(state, k, it, ctx):
     else:
         it.pop("claude_session", None)
     log_event("restore", k, session=host["session"])
-    how = f"resumed {resume}" if resume else "continued the last conversation"
+    how = (f"resumed {resume}" if resume else "continued the last conversation"
+           if cont else "started fresh, no transcript to resume")
     line = f"{k}: restored in {host['session']} ({how})"
     if host.get("warning"):
         line += f"; WARNING: {host['warning']}"
@@ -3655,14 +3678,9 @@ def restore_item(state, k, it, ctx):
 
 
 def restore_sessions(args):
-    """restore-sessions: after a reboot or a closed Octopilot space, reopen each
-    tracked herdr-app worker's tab (or space) on its worktree and resume its claude
-    conversation. Items on the TUI, and those whose worktree is gone, are skipped.
-
-    The launcher runs this before the engine's first tick, while it holds tick.lock
-    and exec.lock: it never takes them, and the state lock is taken per item. Refused
-    (exit 1) when herdr-app does not answer or no Octopilot space is open. Prints
-    one line per tracked item."""
+    """Reopen each tracked herdr-app worker and resume its claude; README has the flow.
+    The launcher holds tick.lock and exec.lock, never taken here; the state is per item.
+    Refused (exit 1) without herdr-app or an Octopilot space."""
     sessions, answered, open_ws = all_sessions()
     spaces = HC.spaces() if HC.name in answered else None
     if spaces is None:
@@ -3688,6 +3706,7 @@ def restore_sessions(args):
                 save(state)
         print(line)
     return 0
+
 
 def parse_line(raw):
     try:
