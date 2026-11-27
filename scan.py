@@ -3251,7 +3251,8 @@ def dispatch(cmd, args, state):
                 pr_detail(k.split("#")[0], pr), whoami(state))
         state["items"][k] = {"mode": mode, "branch": branch, "session": session,
                              "pr": pr, "reviewed_sha": reviewed,
-                             "phase": "working", "added": int(time.time())}
+                             "phase": "working", "added": int(time.time()),
+                             "driver": "agent" if mode == "fix" else "orchestrator"}
         # Name its agent so it can be addressed.
         it = state["items"][k]
         it["backend"] = backend.name
